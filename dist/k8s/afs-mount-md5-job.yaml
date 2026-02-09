@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: afs-mount-md5
+  namespace: test-afs
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        afs.reyoung.io/node-group: legacy-109d
+      containers:
+        - name: tester
+          image: ghcr.io/reyoung/afs:v0.1.0-3-gd7e10b8
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - /bin/sh
+            - -lc
+            - |
+              set -euo pipefail
+
+              mkdir -p /work/mnt
+              afs_mount \
+                -discovery-addr=afs-test-discovery:60051 \
+                -image=mirrors.tencent.com/josephyu/ioi_db_lookup \
+                -tag=0.1.0-de19b31-dirty-1770368758 \
+                -node-id="${NODE_ID}" \
+                -mountpoint=/work/mnt \
+                -grpc-insecure=true &
+              MOUNT_PID=$!
+
+              i=0
+              while [ $i -lt 180 ]; do
+                if grep -q " /work/mnt " /proc/mounts && [ -d /work/mnt/bin ]; then
+                  break
+                fi
+                sleep 2
+                i=$((i+1))
+              done
+
+              if ! grep -q " /work/mnt " /proc/mounts; then
+                echo "mount not ready"
+                kill -TERM "$MOUNT_PID" || true
+                wait "$MOUNT_PID" || true
+                exit 1
+              fi
+
+              find /work/mnt/bin -type f -exec md5sum {} + | sort | md5sum | tee /work/bin-dir.md5
+              echo "MD5_SUMMARY=$(cat /work/bin-dir.md5)"
+
+              kill -TERM "$MOUNT_PID" || true
+              wait "$MOUNT_PID" || true
+          volumeMounts:
+            - name: dev-fuse
+              mountPath: /dev/fuse
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: dev-fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
+        - name: work
+          emptyDir: {}
