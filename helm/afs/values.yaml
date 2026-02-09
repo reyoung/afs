@@ -1,0 +1,55 @@
+image:
+  repository: ghcr.io/reyoung/afs
+  tag: v0.1.0-1-gd03f7d7
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+commonLabels: {}
+
+podAnnotations: {}
+
+discovery:
+  replicas: 3
+  containerPort: 60051
+  goMemLimit: 1792MiB
+  service:
+    type: ClusterIP
+    port: 60051
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+grpcd:
+  containerPort: 50051
+  cacheDir: /var/lib/afs/layerstore
+  registryAuth:
+    enabled: false
+    registry: ""
+    existingSecret: ""
+    usernameKey: username
+    passwordKey: password
+  volume:
+    type: emptyDir
+    emptyDir: {}
+    hostPath: /var/lib/afs/layerstore
+    localPV:
+      storageClassName: local-path
+      size: 1Ti
+      accessModes:
+        - ReadWriteOnce
+  goMemLimit: 3584MiB
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi

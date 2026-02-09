@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "afs.fullname" . }}-grpcd
+  labels:
+    {{- include "afs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpcd
+spec:
+  selector:
+    matchLabels:
+      {{- include "afs.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: grpcd
+  template:
+    metadata:
+      labels:
+        {{- include "afs.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: grpcd
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: grpcd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/afs_layerstore_grpcd
+          args:
+            - -listen=$(POD_IP):{{ .Values.grpcd.containerPort }}
+            - -cache-dir={{ .Values.grpcd.cacheDir }}
+            - -node-id=$(NODE_ID)
+            - -discovery-endpoint={{ include "afs.discoveryHeadlessServiceName" . }}:{{ .Values.discovery.service.port }}
+            {{- if .Values.grpcd.registryAuth.enabled }}
+            {{- if eq (trim .Values.grpcd.registryAuth.registry) "" }}
+            {{- fail "grpcd.registryAuth.registry must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.grpcd.registryAuth.existingSecret) "" }}
+            {{- fail "grpcd.registryAuth.existingSecret must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.grpcd.registryAuth.usernameKey) "" }}
+            {{- fail "grpcd.registryAuth.usernameKey must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.grpcd.registryAuth.passwordKey) "" }}
+            {{- fail "grpcd.registryAuth.passwordKey must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            - -auth-registry-basic={{ .Values.grpcd.registryAuth.registry }}=$(REGISTRY_USERNAME):$(REGISTRY_PASSWORD)
+            {{- end }}
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: grpcd
+                  resource: limits.cpu
+                  divisor: "1"
+            - name: GOMEMLIMIT
+              value: "{{ .Values.grpcd.goMemLimit }}"
+            {{- if .Values.grpcd.registryAuth.enabled }}
+            - name: REGISTRY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.grpcd.registryAuth.existingSecret | quote }}
+                  key: {{ .Values.grpcd.registryAuth.usernameKey | quote }}
+            - name: REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.grpcd.registryAuth.existingSecret | quote }}
+                  key: {{ .Values.grpcd.registryAuth.passwordKey | quote }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.grpcd.containerPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: cache
+              mountPath: {{ .Values.grpcd.cacheDir }}
+          resources:
+            {{- toYaml .Values.grpcd.resources | nindent 12 }}
+      volumes:
+        - name: cache
+          {{- if eq .Values.grpcd.volume.type "emptyDir" }}
+          emptyDir:
+            {{- toYaml .Values.grpcd.volume.emptyDir | nindent 12 }}
+          {{- else if eq .Values.grpcd.volume.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.grpcd.volume.hostPath }}
+            type: DirectoryOrCreate
+          {{- else if eq .Values.grpcd.volume.type "local-pv" }}
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  {{- include "afs.selectorLabels" . | nindent 18 }}
+                  app.kubernetes.io/component: grpcd
+              spec:
+                accessModes:
+                  {{- toYaml .Values.grpcd.volume.localPV.accessModes | nindent 18 }}
+                storageClassName: {{ .Values.grpcd.volume.localPV.storageClassName | quote }}
+                resources:
+                  requests:
+                    storage: {{ .Values.grpcd.volume.localPV.size | quote }}
+          {{- else }}
+          {{- fail (printf "unsupported grpcd.volume.type: %s" .Values.grpcd.volume.type) }}
+          {{- end }}
