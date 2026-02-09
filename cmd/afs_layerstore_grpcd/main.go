@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -168,28 +169,18 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 			images = nil
 		}
 		images = mergeStringSets(images, pendingImages())
-		hbCtx, hbCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer hbCancel()
-
-		conn, err := grpc.DialContext(hbCtx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		targets, err := expandHeartbeatTargets(ctx, discoveryAddr)
 		if err != nil {
-			log.Printf("heartbeat dial failed: discovery=%s err=%v", discoveryAddr, err)
+			log.Printf("heartbeat resolve failed: discovery=%s err=%v", discoveryAddr, err)
 			return
 		}
-		defer conn.Close()
-
-		client := discoverypb.NewServiceDiscoveryClient(conn)
-		_, err = client.Heartbeat(hbCtx, &discoverypb.HeartbeatRequest{
-			NodeId:       nodeID,
-			Endpoint:     endpoint,
-			LayerDigests: layers,
-			CachedImages: images,
-		})
-		if err != nil {
-			log.Printf("heartbeat failed: discovery=%s err=%v", discoveryAddr, err)
-			return
+		for _, target := range targets {
+			if err := sendHeartbeatOnce(ctx, target, nodeID, endpoint, layers, images); err != nil {
+				log.Printf("heartbeat failed: discovery=%s target=%s err=%v", discoveryAddr, target, err)
+				continue
+			}
+			log.Printf("heartbeat sent: discovery=%s target=%s endpoint=%s layers=%d images=%d", discoveryAddr, target, endpoint, len(layers), len(images))
 		}
-		log.Printf("heartbeat sent: discovery=%s endpoint=%s layers=%d images=%d", discoveryAddr, endpoint, len(layers), len(images))
 	}
 
 	send()
@@ -201,6 +192,63 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 			send()
 		}
 	}
+}
+
+func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, layers []string, images []string) error {
+	hbCtx, hbCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer hbCancel()
+
+	conn, err := grpc.DialContext(hbCtx, target, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	client := discoverypb.NewServiceDiscoveryClient(conn)
+	_, err = client.Heartbeat(hbCtx, &discoverypb.HeartbeatRequest{
+		NodeId:       nodeID,
+		Endpoint:     endpoint,
+		LayerDigests: layers,
+		CachedImages: images,
+	})
+	return err
+}
+
+func expandHeartbeatTargets(ctx context.Context, discoveryAddr string) ([]string, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(discoveryAddr))
+	if err != nil {
+		return nil, err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{discoveryAddr}, nil
+	}
+
+	lookupCtx, lookupCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer lookupCancel()
+
+	ipAddrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(ipAddrs))
+	out := make([]string, 0, len(ipAddrs))
+	for _, ipAddr := range ipAddrs {
+		ip := strings.TrimSpace(ipAddr.IP.String())
+		if ip == "" {
+			continue
+		}
+		target := net.JoinHostPort(ip, port)
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no resolved addresses")
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func scanCachedLayerDigests(cacheDir string) ([]string, error) {

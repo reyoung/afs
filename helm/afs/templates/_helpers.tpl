@@ -38,3 +38,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "afs.discoveryServiceName" -}}
 {{- printf "%s-discovery" (include "afs.fullname" .) -}}
 {{- end -}}
+
+{{- define "afs.discoveryHeadlessServiceName" -}}
+{{- printf "%s-discovery-headless" (include "afs.fullname" .) -}}
+{{- end -}}

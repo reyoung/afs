@@ -34,7 +34,7 @@ spec:
             - -listen=$(POD_IP):{{ .Values.grpcd.containerPort }}
             - -cache-dir={{ .Values.grpcd.cacheDir }}
             - -node-id=$(NODE_ID)
-            - -discovery-endpoint={{ include "afs.discoveryServiceName" . }}:{{ .Values.discovery.service.port }}
+            - -discovery-endpoint={{ include "afs.discoveryHeadlessServiceName" . }}:{{ .Values.discovery.service.port }}
           env:
             - name: POD_IP
               valueFrom:
