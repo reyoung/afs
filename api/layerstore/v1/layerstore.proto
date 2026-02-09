@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package layerstore.v1;
+
+option go_package = "github.com/reyoung/afs/pkg/layerstorepb;layerstorepb";
+
+service LayerStore {
+  rpc PullImage(PullImageRequest) returns (PullImageResponse);
+  rpc StatLayer(StatLayerRequest) returns (StatLayerResponse);
+  rpc ReadLayer(ReadLayerRequest) returns (ReadLayerResponse);
+}
+
+message PullImageRequest {
+  string image = 1;
+  string tag = 2;
+  string platform_os = 3;
+  string platform_arch = 4;
+  string platform_variant = 5;
+  bool force = 6;
+}
+
+message PullImageResponse {
+  string resolved_registry = 1;
+  string resolved_repository = 2;
+  string resolved_reference = 3;
+  repeated Layer layers = 4;
+}
+
+message Layer {
+  string digest = 1;
+  string media_type = 2;
+  int64 compressed_size = 3;
+  int64 afs_size = 4;
+  string cache_path = 5;
+  bool cached = 6;
+}
+
+message StatLayerRequest {
+  string digest = 1;
+}
+
+message StatLayerResponse {
+  string digest = 1;
+  int64 afs_size = 2;
+  string cache_path = 3;
+}
+
+message ReadLayerRequest {
+  string digest = 1;
+  int64 offset = 2;
+  int32 length = 3;
+}
+
+message ReadLayerResponse {
+  string digest = 1;
+  int64 offset = 2;
+  bytes data = 3;
+  bool eof = 4;
+}

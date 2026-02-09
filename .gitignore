@@ -1,1 +1,4 @@
 .idea
+
+cmd/layer_mount/tmp
+cmd/layer_mount/workdir
