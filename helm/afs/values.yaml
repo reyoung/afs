@@ -18,10 +18,22 @@ discovery:
   service:
     type: ClusterIP
     port: 60051
-  resources: {}
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
 
 grpcd:
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
   emptyDir: {}
-  resources: {}
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi

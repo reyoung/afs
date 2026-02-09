@@ -33,6 +33,19 @@ spec:
             - -listen=:{{ .Values.discovery.containerPort }}
           command:
             - /usr/local/bin/afs_discovery_grpcd
+          env:
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: discovery
+                  resource: limits.cpu
+                  divisor: "1"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: discovery
+                  resource: limits.memory
+                  divisor: "1"
           ports:
             - name: grpc
               containerPort: {{ .Values.discovery.containerPort }}
