@@ -245,7 +245,7 @@ func expandHeartbeatTargets(ctx context.Context, discoveryAddr string) ([]string
 		out = append(out, target)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no resolved addresses")
+		return nil, fmt.Errorf("no resolved addresses for host %q (discovery addr %q)", host, discoveryAddr)
 	}
 	sort.Strings(out)
 	return out, nil
