@@ -33,7 +33,7 @@ grpcd:
   nodeSelector:
     afs.reyoung.io/node-group: legacy-109d
   volume:
-    type: local-pv
+    type: emptyDir
     emptyDir: {}
     hostPath: /var/lib/afs/layerstore
     localPV:
