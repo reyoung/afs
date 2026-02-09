@@ -1,0 +1,83 @@
+package main
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestReverseCopy(t *testing.T) {
+	t.Parallel()
+	in := []string{"a", "b", "c"}
+	got := reverseCopy(in)
+	want := []string{"c", "b", "a"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reverseCopy()=%v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(in, []string{"a", "b", "c"}) {
+		t.Fatalf("reverseCopy modified input: %v", in)
+	}
+}
+
+func TestBuildUnionMountCommandLinux(t *testing.T) {
+	t.Parallel()
+	cmd, err := buildUnionMountCommand("linux", []string{"/l1", "/l2", "/l3"}, "/mnt", "")
+	if err != nil {
+		t.Fatalf("buildUnionMountCommand() error: %v", err)
+	}
+	if cmd.Path != "fuse-overlayfs" {
+		t.Fatalf("Path=%q, want fuse-overlayfs", cmd.Path)
+	}
+	wantArgs := []string{"fuse-overlayfs", "-f", "-o", "lowerdir=/l3:/l2:/l1", "/mnt"}
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("Args=%v, want %v", cmd.Args, wantArgs)
+	}
+}
+
+func TestBuildUnionMountCommandUnsupportedOS(t *testing.T) {
+	t.Parallel()
+	if _, err := buildUnionMountCommand("windows", []string{"/l1"}, "/mnt", ""); err == nil {
+		t.Fatalf("expected error for unsupported OS")
+	}
+}
+
+func TestBuildUnionMountCommandDarwinBranches(t *testing.T) {
+	t.Parallel()
+
+	cmd, err := buildUnionMountCommand("darwin", []string{"/l1", "/l2"}, "/mnt", "/upper")
+	if err != nil {
+		t.Fatalf("buildUnionMountCommand() error: %v", err)
+	}
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "-o cow") {
+		t.Fatalf("darwin args should include cow: %v", cmd.Args)
+	}
+	if !strings.Contains(args, "/upper=RW:/l2=RO:/l1=RO") {
+		t.Fatalf("darwin branch order mismatch: %v", cmd.Args)
+	}
+}
+
+func TestUnmountCandidatesLinux(t *testing.T) {
+	t.Parallel()
+	got := unmountCandidates("linux", "/mnt")
+	want := [][]string{
+		{"fusermount3", "-u", "/mnt"},
+		{"fusermount", "-u", "/mnt"},
+		{"umount", "/mnt"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unmountCandidates(linux)=%v, want %v", got, want)
+	}
+}
+
+func TestUnmountCandidatesDarwin(t *testing.T) {
+	t.Parallel()
+	got := unmountCandidates("darwin", "/mnt")
+	want := [][]string{
+		{"umount", "/mnt"},
+		{"diskutil", "unmount", "force", "/mnt"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unmountCandidates(darwin)=%v, want %v", got, want)
+	}
+}

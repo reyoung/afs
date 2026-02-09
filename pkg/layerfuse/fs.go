@@ -147,6 +147,11 @@ func (d *DirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 func (d *DirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = uint32(syscall.S_IFDIR | 0o555)
+	if d.relPath != "" {
+		if e, ok := d.tree.entries[d.relPath]; ok {
+			setAttrTimes(out, e.ModTimeUnix)
+		}
+	}
 	return 0
 }
 
@@ -210,6 +215,7 @@ func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	}
 	out.Mode = uint32(syscall.S_IFREG | f.entry.Mode)
 	out.Size = uint64(len(f.data))
+	setAttrTimes(out, f.entry.ModTimeUnix)
 	return 0
 }
 
@@ -239,5 +245,16 @@ func (s *SymlinkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func (s *SymlinkNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = uint32(syscall.S_IFLNK | 0o777)
 	out.Size = uint64(len(s.entry.SymlinkTarget))
+	setAttrTimes(out, s.entry.ModTimeUnix)
 	return 0
+}
+
+func setAttrTimes(out *fuse.AttrOut, modTimeUnix int64) {
+	if modTimeUnix <= 0 {
+		return
+	}
+	ts := uint64(modTimeUnix)
+	out.Atime = ts
+	out.Mtime = ts
+	out.Ctime = ts
 }
