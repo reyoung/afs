@@ -36,6 +36,18 @@ spec:
             - -node-id=$(NODE_ID)
             - -discovery-endpoint={{ include "afs.discoveryHeadlessServiceName" . }}:{{ .Values.discovery.service.port }}
             {{- if .Values.grpcd.registryAuth.enabled }}
+            {{- if eq (trim .Values.grpcd.registryAuth.registry) "" }}
+            {{- fail "grpcd.registryAuth.registry must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.grpcd.registryAuth.existingSecret) "" }}
+            {{- fail "grpcd.registryAuth.existingSecret must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.grpcd.registryAuth.usernameKey) "" }}
+            {{- fail "grpcd.registryAuth.usernameKey must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.grpcd.registryAuth.passwordKey) "" }}
+            {{- fail "grpcd.registryAuth.passwordKey must be non-empty when grpcd.registryAuth.enabled=true" }}
+            {{- end }}
             - -auth-registry-basic={{ .Values.grpcd.registryAuth.registry }}=$(REGISTRY_USERNAME):$(REGISTRY_PASSWORD)
             {{- end }}
           env:
