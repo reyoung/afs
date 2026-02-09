@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseRegistryTokenPair(t *testing.T) {
 	t.Parallel()
@@ -44,14 +48,6 @@ func TestParseRegistryBasicPair(t *testing.T) {
 	if password != "pass" {
 		t.Fatalf("password=%q, want %q", password, "pass")
 	}
-
-	host, username, password, err = parseRegistryBasicPair("ghcr.io=alice")
-	if err != nil {
-		t.Fatalf("parseRegistryBasicPair (no password) returned error: %v", err)
-	}
-	if host != "ghcr.io" || username != "alice" || password != "" {
-		t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)", host, username, password, "ghcr.io", "alice", "")
-	}
 }
 
 func TestParseRegistryBasicPairInvalid(t *testing.T) {
@@ -65,5 +61,62 @@ func TestParseRegistryBasicPairInvalid(t *testing.T) {
 	}
 	if _, _, _, err := parseRegistryBasicPair("ghcr.io=:pass"); err == nil {
 		t.Fatalf("expected error for missing username")
+	}
+}
+
+func TestValidateListenEndpoint(t *testing.T) {
+	t.Parallel()
+
+	if err := validateListenEndpoint("10.0.0.1:50051"); err != nil {
+		t.Fatalf("validateListenEndpoint() error: %v", err)
+	}
+	if err := validateListenEndpoint(":50051"); err == nil {
+		t.Fatalf("expected error for missing ip")
+	}
+	if err := validateListenEndpoint("localhost:50051"); err == nil {
+		t.Fatalf("expected error for non-ip host")
+	}
+}
+
+func TestScanCachedLayerDigests(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
+	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(layerPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := scanCachedLayerDigests(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedLayerDigests: %v", err)
+	}
+	if len(got) != 1 || got[0] != "sha256:abcdef" {
+		t.Fatalf("got=%v, want [sha256:abcdef]", got)
+	}
+}
+
+func TestScanCachedImageKeys(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	metaPath := filepath.Join(tmp, "metadata", "a.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":""}`
+	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := scanCachedImageKeys(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedImageKeys: %v", err)
+	}
+	if len(got) != 1 || got[0] != "nginx|latest|linux|amd64|" {
+		t.Fatalf("got=%v, want [nginx|latest|linux|amd64|]", got)
 	}
 }

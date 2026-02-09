@@ -81,3 +81,20 @@ func TestUnmountCandidatesDarwin(t *testing.T) {
 		t.Fatalf("unmountCandidates(darwin)=%v, want %v", got, want)
 	}
 }
+
+func TestRankServicesForAffinity(t *testing.T) {
+	t.Parallel()
+
+	ordered := rankServicesForAffinity([]serviceInfo{
+		{nodeID: "remote-1", endpoint: "10.0.0.2:50051"},
+		{nodeID: "local", endpoint: "10.0.0.1:50051"},
+		{nodeID: "remote-2", endpoint: "10.0.0.3:50051"},
+	}, "local")
+
+	if len(ordered) != 3 {
+		t.Fatalf("ordered length=%d, want 3", len(ordered))
+	}
+	if ordered[0].nodeID != "local" {
+		t.Fatalf("expected local node first, got %s", ordered[0].nodeID)
+	}
+}

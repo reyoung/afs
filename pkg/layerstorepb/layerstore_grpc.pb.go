@@ -22,6 +22,8 @@ const (
 	LayerStore_PullImage_FullMethodName = "/layerstore.v1.LayerStore/PullImage"
 	LayerStore_StatLayer_FullMethodName = "/layerstore.v1.LayerStore/StatLayer"
 	LayerStore_ReadLayer_FullMethodName = "/layerstore.v1.LayerStore/ReadLayer"
+	LayerStore_HasLayer_FullMethodName  = "/layerstore.v1.LayerStore/HasLayer"
+	LayerStore_HasImage_FullMethodName  = "/layerstore.v1.LayerStore/HasImage"
 )
 
 // LayerStoreClient is the client API for LayerStore service.
@@ -31,6 +33,8 @@ type LayerStoreClient interface {
 	PullImage(ctx context.Context, in *PullImageRequest, opts ...grpc.CallOption) (*PullImageResponse, error)
 	StatLayer(ctx context.Context, in *StatLayerRequest, opts ...grpc.CallOption) (*StatLayerResponse, error)
 	ReadLayer(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (*ReadLayerResponse, error)
+	HasLayer(ctx context.Context, in *HasLayerRequest, opts ...grpc.CallOption) (*HasLayerResponse, error)
+	HasImage(ctx context.Context, in *HasImageRequest, opts ...grpc.CallOption) (*HasImageResponse, error)
 }
 
 type layerStoreClient struct {
@@ -71,6 +75,26 @@ func (c *layerStoreClient) ReadLayer(ctx context.Context, in *ReadLayerRequest, 
 	return out, nil
 }
 
+func (c *layerStoreClient) HasLayer(ctx context.Context, in *HasLayerRequest, opts ...grpc.CallOption) (*HasLayerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HasLayerResponse)
+	err := c.cc.Invoke(ctx, LayerStore_HasLayer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *layerStoreClient) HasImage(ctx context.Context, in *HasImageRequest, opts ...grpc.CallOption) (*HasImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HasImageResponse)
+	err := c.cc.Invoke(ctx, LayerStore_HasImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LayerStoreServer is the server API for LayerStore service.
 // All implementations must embed UnimplementedLayerStoreServer
 // for forward compatibility.
@@ -78,6 +102,8 @@ type LayerStoreServer interface {
 	PullImage(context.Context, *PullImageRequest) (*PullImageResponse, error)
 	StatLayer(context.Context, *StatLayerRequest) (*StatLayerResponse, error)
 	ReadLayer(context.Context, *ReadLayerRequest) (*ReadLayerResponse, error)
+	HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error)
+	HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error)
 	mustEmbedUnimplementedLayerStoreServer()
 }
 
@@ -96,6 +122,12 @@ func (UnimplementedLayerStoreServer) StatLayer(context.Context, *StatLayerReques
 }
 func (UnimplementedLayerStoreServer) ReadLayer(context.Context, *ReadLayerRequest) (*ReadLayerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReadLayer not implemented")
+}
+func (UnimplementedLayerStoreServer) HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HasLayer not implemented")
+}
+func (UnimplementedLayerStoreServer) HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HasImage not implemented")
 }
 func (UnimplementedLayerStoreServer) mustEmbedUnimplementedLayerStoreServer() {}
 func (UnimplementedLayerStoreServer) testEmbeddedByValue()                    {}
@@ -172,6 +204,42 @@ func _LayerStore_ReadLayer_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LayerStore_HasLayer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HasLayerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LayerStoreServer).HasLayer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LayerStore_HasLayer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LayerStoreServer).HasLayer(ctx, req.(*HasLayerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LayerStore_HasImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HasImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LayerStoreServer).HasImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LayerStore_HasImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LayerStoreServer).HasImage(ctx, req.(*HasImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // LayerStore_ServiceDesc is the grpc.ServiceDesc for LayerStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +258,14 @@ var LayerStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadLayer",
 			Handler:    _LayerStore_ReadLayer_Handler,
+		},
+		{
+			MethodName: "HasLayer",
+			Handler:    _LayerStore_HasLayer_Handler,
+		},
+		{
+			MethodName: "HasImage",
+			Handler:    _LayerStore_HasImage_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

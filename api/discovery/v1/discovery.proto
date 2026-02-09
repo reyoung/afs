@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package discovery.v1;
+
+option go_package = "github.com/reyoung/afs/pkg/discoverypb;discoverypb";
+
+service ServiceDiscovery {
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc FindImage(FindImageRequest) returns (FindImageResponse);
+}
+
+message ServiceInstance {
+  string node_id = 1;
+  string endpoint = 2;
+  int64 last_seen_unix = 3;
+  repeated string layer_digests = 4;
+  repeated string cached_images = 5;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  string endpoint = 2;
+  repeated string layer_digests = 3;
+  repeated string cached_images = 4;
+}
+
+message HeartbeatResponse {
+  int64 expires_in_seconds = 1;
+}
+
+message FindImageRequest {
+  // image_key format: image|tag|platform_os|platform_arch|platform_variant.
+  // If empty, service returns all active services.
+  string image_key = 1;
+}
+
+message FindImageResponse {
+  string image_key = 1;
+  repeated ServiceInstance services = 2;
+}
