@@ -15,7 +15,7 @@ podAnnotations: {}
 discovery:
   replicas: 3
   containerPort: 60051
-  goMemLimit: 1792Mi
+  goMemLimit: 1792MiB
   service:
     type: ClusterIP
     port: 60051
@@ -39,7 +39,7 @@ grpcd:
       size: 1Ti
       accessModes:
         - ReadWriteOnce
-  goMemLimit: 3584Mi
+  goMemLimit: 3584MiB
   resources:
     requests:
       cpu: "2"
