@@ -23,5 +23,5 @@ discovery:
 grpcd:
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
-  hostPath: /var/lib/afs/layerstore
+  emptyDir: {}
   resources: {}

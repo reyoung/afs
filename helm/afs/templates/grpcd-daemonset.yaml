@@ -55,6 +55,5 @@ spec:
             {{- toYaml .Values.grpcd.resources | nindent 12 }}
       volumes:
         - name: cache
-          hostPath:
-            path: {{ .Values.grpcd.hostPath }}
-            type: DirectoryOrCreate
+          emptyDir:
+            {{- toYaml .Values.grpcd.emptyDir | nindent 12 }}
