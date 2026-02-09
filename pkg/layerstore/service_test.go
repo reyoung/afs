@@ -138,6 +138,47 @@ func TestPullImageForceBypassesMetadataCache(t *testing.T) {
 	}
 }
 
+func TestHasImage(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	layerDigest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	layerBytes := buildTarGzip(t, map[string]string{"f": "1"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	miss, err := svc.HasImage(context.Background(), &layerstorepb.HasImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("HasImage miss: %v", err)
+	}
+	if miss.GetFound() {
+		t.Fatalf("expected miss before pull")
+	}
+
+	if _, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"}); err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+
+	hit, err := svc.HasImage(context.Background(), &layerstorepb.HasImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("HasImage hit: %v", err)
+	}
+	if !hit.GetFound() {
+		t.Fatalf("expected hit after pull")
+	}
+}
+
 type fakeFetcher struct {
 	layers         []registry.Layer
 	byDigest       map[string][]byte

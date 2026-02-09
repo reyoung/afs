@@ -215,6 +215,29 @@ func (r *Reader) ReadFile(p string) ([]byte, error) {
 	return b, nil
 }
 
+// CopyFile streams one file's uncompressed bytes into dst.
+func (r *Reader) CopyFile(p string, dst io.Writer) (int64, error) {
+	e, err := r.Stat(p)
+	if err != nil {
+		return 0, err
+	}
+	if e.Type != EntryTypeFile {
+		return 0, fmt.Errorf("%s is not a regular file", p)
+	}
+	section := io.NewSectionReader(r.ra, r.dataStart+e.CompressedOffset, e.CompressedSize)
+	gz, err := gzip.NewReader(section)
+	if err != nil {
+		return 0, fmt.Errorf("open file gzip %s: %w", p, err)
+	}
+	defer gz.Close()
+
+	n, err := io.Copy(dst, gz)
+	if err != nil {
+		return n, fmt.Errorf("copy file data %s: %w", p, err)
+	}
+	return n, nil
+}
+
 func gzipCompressFromReader(r io.Reader) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

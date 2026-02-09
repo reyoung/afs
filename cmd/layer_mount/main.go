@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,38 +23,20 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 )
 
-func main() {
-	cfg := parseFlags()
-	log.Printf("starting mount client: image=%s tag=%s mountpoint=%s grpc=%s platform=%s/%s variant=%s force=%v", cfg.image, cfg.tag, cfg.mountpoint, cfg.grpcAddr, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forcePull)
-
-	if err := ensureMountpoint(cfg.mountpoint); err != nil {
-		log.Fatalf("invalid mountpoint: %v", err)
-	}
-
-	conn, err := dialGRPC(cfg.grpcAddr, cfg.grpcTimeout, cfg.grpcInsecure)
-	if err != nil {
-		log.Fatalf("dial gRPC %s: %v", cfg.grpcAddr, err)
-	}
-	defer conn.Close()
-
-	client := layerstorepb.NewLayerStoreClient(conn)
-	if err := runImageMode(client, cfg); err != nil {
-		log.Fatalf("mount image: %v", err)
-	}
-}
-
 type config struct {
 	mountpoint      string
 	debug           bool
-	grpcAddr        string
+	discoveryAddr   string
 	grpcTimeout     time.Duration
 	grpcMaxChunk    int
 	grpcInsecure    bool
+	nodeID          string
 	image           string
 	tag             string
 	platformOS      string
@@ -62,6 +46,32 @@ type config struct {
 	pullTimeout     time.Duration
 	workDir         string
 	keepWorkDir     bool
+	fuseTempDir     string
+}
+
+type serviceInfo struct {
+	nodeID   string
+	endpoint string
+}
+
+func main() {
+	cfg := parseFlags()
+	log.Printf("starting mount client: image=%s tag=%s mountpoint=%s discovery=%s node-id=%s platform=%s/%s variant=%s force=%v", cfg.image, cfg.tag, cfg.mountpoint, cfg.discoveryAddr, cfg.nodeID, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forcePull)
+
+	if err := ensureMountpoint(cfg.mountpoint); err != nil {
+		log.Fatalf("invalid mountpoint: %v", err)
+	}
+
+	discoveryConn, err := dialGRPC(cfg.discoveryAddr, cfg.grpcTimeout, cfg.grpcInsecure)
+	if err != nil {
+		log.Fatalf("dial discovery gRPC %s: %v", cfg.discoveryAddr, err)
+	}
+	defer discoveryConn.Close()
+
+	discoveryClient := discoverypb.NewServiceDiscoveryClient(discoveryConn)
+	if err := runImageMode(discoveryClient, cfg); err != nil {
+		log.Fatalf("mount image: %v", err)
+	}
 }
 
 func parseFlags() config {
@@ -69,10 +79,11 @@ func parseFlags() config {
 
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "mount target directory")
 	flag.BoolVar(&cfg.debug, "debug", false, "enable go-fuse debug logs")
-	flag.StringVar(&cfg.grpcAddr, "grpc-addr", "127.0.0.1:50051", "layerstore gRPC address")
-	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC read/stat call")
+	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
+	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
 	flag.IntVar(&cfg.grpcMaxChunk, "grpc-max-chunk", 1<<20, "max bytes per gRPC read call")
 	flag.BoolVar(&cfg.grpcInsecure, "grpc-insecure", true, "use insecure gRPC transport")
+	flag.StringVar(&cfg.nodeID, "node-id", "", "node affinity id for preferring local layerstore")
 	flag.StringVar(&cfg.image, "image", "", "image reference for remote image mode")
 	flag.StringVar(&cfg.tag, "tag", "", "image tag for remote image mode")
 	flag.StringVar(&cfg.platformOS, "platform-os", "linux", "target platform os for PullImage")
@@ -82,6 +93,7 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.pullTimeout, "pull-timeout", 20*time.Minute, "timeout for PullImage RPC")
 	flag.StringVar(&cfg.workDir, "work-dir", "", "working directory for per-layer mountpoints (default: temp dir)")
 	flag.BoolVar(&cfg.keepWorkDir, "keep-work-dir", false, "keep work directory after exit")
+	flag.StringVar(&cfg.fuseTempDir, "fuse-temp-dir", "", "local temp directory for decompressed file spill during FUSE reads")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -96,30 +108,38 @@ func parseFlags() config {
 	if !cfg.grpcInsecure {
 		log.Fatal("only -grpc-insecure=true is supported now")
 	}
-
 	return cfg
 }
 
-func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.pullTimeout)
-	defer cancel()
-	log.Printf("requesting PullImage: image=%s tag=%s platform=%s/%s variant=%s force=%v", cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forcePull)
-
-	resp, err := client.PullImage(ctx, &layerstorepb.PullImageRequest{
-		Image:           cfg.image,
-		Tag:             cfg.tag,
-		PlatformOs:      cfg.platformOS,
-		PlatformArch:    cfg.platformArch,
-		PlatformVariant: cfg.platformVariant,
-		Force:           cfg.forcePull,
-	})
+func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config) error {
+	imageProviders, err := findImageServices(discoveryClient, imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant), cfg.grpcTimeout)
 	if err != nil {
-		return fmt.Errorf("PullImage failed: %w", err)
+		return err
 	}
-	if len(resp.GetLayers()) == 0 {
-		return fmt.Errorf("image has no layers: %s", cfg.image)
+	log.Printf("discovery returned %d providers with image", len(imageProviders))
+
+	allServices := imageProviders
+	if len(allServices) == 0 {
+		allServices, err = findImageServices(discoveryClient, "", cfg.grpcTimeout)
+		if err != nil {
+			return err
+		}
+		if len(allServices) == 0 {
+			return fmt.Errorf("no layerstore services registered in discovery")
+		}
+		log.Printf("no cached image providers found; fallback to %d total services", len(allServices))
 	}
-	log.Printf("PullImage done: resolved=%s/%s:%s layers=%d", resp.GetResolvedRegistry(), resp.GetResolvedRepository(), resp.GetResolvedReference(), len(resp.GetLayers()))
+
+	chosen, pullResp, err := pullImageWithDiscovery(imageProviders, allServices, cfg)
+	if err != nil {
+		return err
+	}
+	log.Printf("image resolved from endpoint=%s resolved=%s/%s:%s layers=%d", chosen.endpoint, pullResp.GetResolvedRegistry(), pullResp.GetResolvedRepository(), pullResp.GetResolvedReference(), len(pullResp.GetLayers()))
+	providers, err := discoverImageProviders(allServices, chosen, cfg)
+	if err != nil {
+		return err
+	}
+	log.Printf("image providers available for failover: %d", len(providers))
 
 	workDir, autoCreated, err := resolveWorkDir(cfg.workDir)
 	if err != nil {
@@ -130,7 +150,6 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 	} else {
 		log.Printf("using work directory: %s", workDir)
 	}
-
 	cleanupWorkDir := func() {}
 	if autoCreated && !cfg.keepWorkDir {
 		cleanupWorkDir = func() { _ = os.RemoveAll(workDir) }
@@ -147,7 +166,7 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 		dir    string
 		server *fuse.Server
 	}
-	mounted := make([]mountedLayer, 0, len(resp.GetLayers()))
+	mounted := make([]mountedLayer, 0, len(pullResp.GetLayers()))
 	defer func() {
 		for i := len(mounted) - 1; i >= 0; i-- {
 			_ = mounted[i].server.Unmount()
@@ -155,31 +174,30 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 		}
 	}()
 
-	layerDirs := make([]string, 0, len(resp.GetLayers()))
-	for i, layer := range resp.GetLayers() {
+	layerDirs := make([]string, 0, len(pullResp.GetLayers()))
+	for i, layer := range pullResp.GetLayers() {
 		digest := layer.GetDigest()
-		log.Printf("[%d/%d] preparing layer digest=%s cached=%v afsSize=%d", i+1, len(resp.GetLayers()), digest, layer.GetCached(), layer.GetAfsSize())
+		log.Printf("[%d/%d] preparing layer digest=%s", i+1, len(pullResp.GetLayers()), digest)
 		mountDir := filepath.Join(layersRoot, fmt.Sprintf("%03d_%s", i+1, sanitizeForPath(shortDigest(digest))))
 		if err := os.MkdirAll(mountDir, 0o755); err != nil {
 			return fmt.Errorf("create layer mount dir: %w", err)
 		}
 
-		remoteReader, err := newRemoteLayerReader(client, digest, cfg.grpcTimeout, cfg.grpcMaxChunk)
+		reader, err := newDiscoveryBackedLayerReader(cfg, digest, chosen.endpoint, providers)
 		if err != nil {
-			return fmt.Errorf("prepare layer %s: %w", digest, err)
+			return fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)
 		}
-		afslReader, err := layerformat.NewReader(remoteReader)
+		afslReader, err := layerformat.NewReader(reader)
 		if err != nil {
 			return fmt.Errorf("open layer %s: %w", digest, err)
 		}
-		source := fmt.Sprintf("grpc:%s/%s", cfg.grpcAddr, digest)
-		server, err := mountLayerReader(afslReader, mountDir, source, cfg.debug)
+		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, cfg.debug, cfg.fuseTempDir)
 		if err != nil {
 			return fmt.Errorf("mount layer %s: %w", digest, err)
 		}
 		mounted = append(mounted, mountedLayer{digest: digest, dir: mountDir, server: server})
 		layerDirs = append(layerDirs, mountDir)
-		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(resp.GetLayers()), digest, mountDir)
+		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(pullResp.GetLayers()), digest, mountDir)
 	}
 
 	var writableLayerDir string
@@ -188,7 +206,6 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 		if err := os.MkdirAll(writableLayerDir, 0o755); err != nil {
 			return fmt.Errorf("create writable upper dir: %w", err)
 		}
-		// Always remove writable upper layer on exit for ephemeral write semantics.
 		defer func() { _ = os.RemoveAll(writableLayerDir) }()
 	}
 
@@ -196,7 +213,6 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 	if err != nil {
 		return err
 	}
-
 	log.Printf("starting union mount command: %s %s", unionCmd.Path, strings.Join(unionCmd.Args[1:], " "))
 	unionCmd.Stdout = os.Stdout
 	unionCmd.Stderr = os.Stderr
@@ -205,9 +221,7 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 	}
 
 	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- unionCmd.Wait()
-	}()
+	go func() { waitCh <- unionCmd.Wait() }()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -240,6 +254,253 @@ func runImageMode(client layerstorepb.LayerStoreClient, cfg config) error {
 	return nil
 }
 
+func pullImageWithDiscovery(imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, *layerstorepb.PullImageResponse, error) {
+	if !cfg.forcePull && len(imageProviders) > 0 {
+		for _, s := range rankServicesForAffinity(imageProviders, cfg.nodeID) {
+			resp, err := pullImageFromService(s.endpoint, cfg, false)
+			if err == nil {
+				log.Printf("using cached image provider endpoint=%s", s.endpoint)
+				return s, resp, nil
+			}
+			log.Printf("cached provider pull failed endpoint=%s: %v", s.endpoint, err)
+		}
+	}
+
+	for _, s := range rankServicesForAffinity(allServices, cfg.nodeID) {
+		resp, pullErr := pullImageFromService(s.endpoint, cfg, cfg.forcePull)
+		if pullErr == nil {
+			log.Printf("pulled image on endpoint=%s force=%v", s.endpoint, cfg.forcePull)
+			return s, resp, nil
+		}
+		log.Printf("pull image failed on endpoint=%s: %v", s.endpoint, pullErr)
+	}
+	return serviceInfo{}, nil, fmt.Errorf("failed to pull image %s across all discovered services", cfg.image)
+}
+
+func pullImageFromService(endpoint string, cfg config, force bool) (*layerstorepb.PullImageResponse, error) {
+	conn, err := dialGRPC(endpoint, cfg.grpcTimeout, cfg.grpcInsecure)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := layerstorepb.NewLayerStoreClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.pullTimeout)
+	defer cancel()
+	return client.PullImage(ctx, &layerstorepb.PullImageRequest{
+		Image:           cfg.image,
+		Tag:             cfg.tag,
+		PlatformOs:      cfg.platformOS,
+		PlatformArch:    cfg.platformArch,
+		PlatformVariant: cfg.platformVariant,
+		Force:           force,
+	})
+}
+
+func discoverImageProviders(services []serviceInfo, chosen serviceInfo, cfg config) ([]serviceInfo, error) {
+	out := make([]serviceInfo, 0, len(services))
+	seen := make(map[string]struct{}, len(services))
+	for _, s := range rankServicesForAffinity(services, cfg.nodeID) {
+		if _, ok := seen[s.endpoint]; ok {
+			continue
+		}
+		seen[s.endpoint] = struct{}{}
+		out = append(out, s)
+	}
+	if _, ok := seen[chosen.endpoint]; !ok {
+		out = append([]serviceInfo{chosen}, out...)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no providers with image available")
+	}
+	return out, nil
+}
+
+func findImageServices(client discoverypb.ServiceDiscoveryClient, imageKey string, timeout time.Duration) ([]serviceInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{ImageKey: imageKey})
+	if err != nil {
+		return nil, err
+	}
+	services := make([]serviceInfo, 0, len(resp.GetServices()))
+	for _, s := range resp.GetServices() {
+		endpoint := strings.TrimSpace(s.GetEndpoint())
+		if endpoint == "" {
+			continue
+		}
+		services = append(services, serviceInfo{nodeID: s.GetNodeId(), endpoint: endpoint})
+	}
+	return services, nil
+}
+
+func rankServicesForAffinity(services []serviceInfo, nodeID string) []serviceInfo {
+	local := make([]serviceInfo, 0, len(services))
+	remote := make([]serviceInfo, 0, len(services))
+	for _, s := range services {
+		if nodeID != "" && s.nodeID == nodeID {
+			local = append(local, s)
+		} else {
+			remote = append(remote, s)
+		}
+	}
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	r.Shuffle(len(remote), func(i, j int) { remote[i], remote[j] = remote[j], remote[i] })
+	r.Shuffle(len(local), func(i, j int) { local[i], local[j] = local[j], local[i] })
+	return append(local, remote...)
+}
+
+func newDiscoveryBackedLayerReader(cfg config, digest string, bootstrapEndpoint string, providers []serviceInfo) (*discoveryLayerReaderAt, error) {
+	r := &discoveryLayerReaderAt{
+		cfg:       cfg,
+		digest:    digest,
+		bootstrap: bootstrapEndpoint,
+		providers: append([]serviceInfo(nil), providers...),
+	}
+	if err := r.switchProvider(nil); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+type discoveryLayerReaderAt struct {
+	cfg       config
+	digest    string
+	bootstrap string
+	providers []serviceInfo
+
+	mu       sync.Mutex
+	endpoint string
+	conn     *grpc.ClientConn
+	client   layerstorepb.LayerStoreClient
+	size     int64
+}
+
+func (r *discoveryLayerReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if off < 0 {
+		return 0, fmt.Errorf("negative offset: %d", off)
+	}
+	if off >= r.size {
+		return 0, io.EOF
+	}
+
+	maxReadable := int64(len(p))
+	if off+maxReadable > r.size {
+		maxReadable = r.size - off
+	}
+
+	excluded := make(map[string]struct{})
+	for {
+		total, err := r.readOnceLocked(p[:maxReadable], off)
+		if err == nil || errors.Is(err, io.EOF) {
+			if int64(total) < int64(len(p)) {
+				return total, io.EOF
+			}
+			return total, err
+		}
+		log.Printf("layer read failed, trying failover: digest=%s endpoint=%s err=%v", r.digest, r.endpoint, err)
+		excluded[r.endpoint] = struct{}{}
+		if switchErr := r.switchProvider(excluded); switchErr != nil {
+			if total > 0 {
+				return total, err
+			}
+			return 0, fmt.Errorf("read failed and no failover provider: %w", switchErr)
+		}
+	}
+}
+
+func (r *discoveryLayerReaderAt) readOnceLocked(p []byte, off int64) (int, error) {
+	total := 0
+	for total < len(p) {
+		remaining := len(p) - total
+		if remaining > r.cfg.grpcMaxChunk {
+			remaining = r.cfg.grpcMaxChunk
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), r.cfg.grpcTimeout)
+		resp, err := r.client.ReadLayer(ctx, &layerstorepb.ReadLayerRequest{
+			Digest: r.digest,
+			Offset: off + int64(total),
+			Length: int32(remaining),
+		})
+		cancel()
+		if err != nil {
+			return total, err
+		}
+		n := copy(p[total:], resp.GetData())
+		total += n
+		if n == 0 || resp.GetEof() {
+			break
+		}
+	}
+	if total < len(p) {
+		return total, io.EOF
+	}
+	return total, nil
+}
+
+func (r *discoveryLayerReaderAt) switchProvider(excluded map[string]struct{}) error {
+	candidates := r.findLayerProviders()
+	for _, c := range candidates {
+		if _, skip := excluded[c.endpoint]; skip {
+			continue
+		}
+		if err := r.connectProvider(c.endpoint); err != nil {
+			log.Printf("provider connect failed: digest=%s endpoint=%s err=%v", r.digest, c.endpoint, err)
+			continue
+		}
+		log.Printf("layer provider selected: digest=%s endpoint=%s", r.digest, c.endpoint)
+		return nil
+	}
+	return fmt.Errorf("no available provider for digest=%s", r.digest)
+}
+
+func (r *discoveryLayerReaderAt) findLayerProviders() []serviceInfo {
+	candidates := make([]serviceInfo, 0, len(r.providers)+1)
+	candidates = append(candidates, r.providers...)
+	if r.bootstrap != "" {
+		found := false
+		for _, c := range candidates {
+			if c.endpoint == r.bootstrap {
+				found = true
+				break
+			}
+		}
+		if !found {
+			candidates = append(candidates, serviceInfo{endpoint: r.bootstrap})
+		}
+	}
+	return rankServicesForAffinity(candidates, r.cfg.nodeID)
+}
+
+func (r *discoveryLayerReaderAt) connectProvider(endpoint string) error {
+	conn, err := dialGRPC(endpoint, r.cfg.grpcTimeout, r.cfg.grpcInsecure)
+	if err != nil {
+		return err
+	}
+	client := layerstorepb.NewLayerStoreClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.grpcTimeout)
+	defer cancel()
+	statResp, err := client.StatLayer(ctx, &layerstorepb.StatLayerRequest{Digest: r.digest})
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if r.conn != nil {
+		_ = r.conn.Close()
+	}
+	r.conn = conn
+	r.client = client
+	r.endpoint = endpoint
+	r.size = statResp.GetAfsSize()
+	return nil
+}
+
 func tryUnmountUnion(goos string, mountpoint string) error {
 	var errs []string
 	for _, argv := range unmountCandidates(goos, mountpoint) {
@@ -264,31 +525,17 @@ func tryUnmountUnion(goos string, mountpoint string) error {
 func unmountCandidates(goos string, mountpoint string) [][]string {
 	switch goos {
 	case "linux":
-		return [][]string{
-			{"fusermount3", "-u", mountpoint},
-			{"fusermount", "-u", mountpoint},
-			{"umount", mountpoint},
-		}
+		return [][]string{{"fusermount3", "-u", mountpoint}, {"fusermount", "-u", mountpoint}, {"umount", mountpoint}}
 	case "darwin":
-		return [][]string{
-			{"umount", mountpoint},
-			{"diskutil", "unmount", "force", mountpoint},
-		}
+		return [][]string{{"umount", mountpoint}, {"diskutil", "unmount", "force", mountpoint}}
 	default:
 		return [][]string{{"umount", mountpoint}}
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool) (*fuse.Server, error) {
-	root := layerfuse.NewRoot(reader)
-	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{
-		MountOptions: fuse.MountOptions{
-			Debug:   debug,
-			FsName:  fmt.Sprintf("afslyr:%s", source),
-			Name:    "afslyr",
-			Options: []string{"ro"},
-		},
-	})
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string) (*fuse.Server, error) {
+	root := layerfuse.NewRootWithTempDir(reader, tempDir)
+	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{MountOptions: fuse.MountOptions{Debug: debug, FsName: fmt.Sprintf("afslyr:%s", source), Name: "afslyr", Options: []string{"ro"}}})
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
 			return nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
@@ -340,13 +587,12 @@ func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, 
 		return nil, fmt.Errorf("no layer directories to compose")
 	}
 	ordered := reverseCopy(layerDirs)
-
-	switch goos {
-	case "linux":
+	if goos == "linux" {
 		lower := strings.Join(ordered, ":")
 		return exec.Command("fuse-overlayfs", "-f", "-o", "lowerdir="+lower, mountpoint), nil
-	case "darwin":
-		branches := make([]string, 0, len(ordered))
+	}
+	if goos == "darwin" {
+		branches := make([]string, 0, len(ordered)+1)
 		if strings.TrimSpace(writableUpper) != "" {
 			branches = append(branches, writableUpper+"=RW")
 		}
@@ -361,9 +607,8 @@ func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, 
 			binary = "unionfs"
 		}
 		return exec.Command(binary, "-f", "-o", "cow", strings.Join(branches, ":"), mountpoint), nil
-	default:
-		return nil, fmt.Errorf("unsupported OS %s; only linux and darwin are supported", goos)
 	}
+	return nil, fmt.Errorf("unsupported OS %s; only linux and darwin are supported", goos)
 }
 
 func reverseCopy(in []string) []string {
@@ -392,78 +637,12 @@ func shortDigest(digest string) string {
 	return digest[:18]
 }
 
-type grpcLayerReaderAt struct {
-	client   layerstorepb.LayerStoreClient
-	digest   string
-	size     int64
-	timeout  time.Duration
-	maxChunk int
-}
-
-func newRemoteLayerReader(client layerstorepb.LayerStoreClient, digest string, timeout time.Duration, maxChunk int) (*grpcLayerReaderAt, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	log.Printf("stat layer via gRPC: digest=%s", digest)
-	stat, err := client.StatLayer(ctx, &layerstorepb.StatLayerRequest{Digest: digest})
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("stat layer done: digest=%s afsSize=%d", digest, stat.GetAfsSize())
-	return &grpcLayerReaderAt{
-		client:   client,
-		digest:   digest,
-		size:     stat.GetAfsSize(),
-		timeout:  timeout,
-		maxChunk: maxChunk,
-	}, nil
-}
-
-func (r *grpcLayerReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if off < 0 {
-		return 0, fmt.Errorf("negative offset: %d", off)
-	}
-	if off >= r.size {
-		return 0, io.EOF
-	}
-
-	maxReadable := int64(len(p))
-	if off+maxReadable > r.size {
-		maxReadable = r.size - off
-	}
-
-	total := 0
-	for int64(total) < maxReadable {
-		remaining := int(maxReadable - int64(total))
-		if remaining > r.maxChunk {
-			remaining = r.maxChunk
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-		resp, err := r.client.ReadLayer(ctx, &layerstorepb.ReadLayerRequest{
-			Digest: r.digest,
-			Offset: off + int64(total),
-			Length: int32(remaining),
-		})
-		cancel()
-		if err != nil {
-			if total == 0 {
-				return 0, err
-			}
-			return total, err
-		}
-		n := copy(p[total:], resp.GetData())
-		total += n
-
-		if n == 0 || resp.GetEof() {
-			break
-		}
-	}
-
-	if int64(total) < int64(len(p)) {
-		return total, io.EOF
-	}
-	return total, nil
+func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(image),
+		strings.TrimSpace(tag),
+		strings.TrimSpace(platformOS),
+		strings.TrimSpace(platformArch),
+		strings.TrimSpace(platformVariant),
+	}, "|")
 }

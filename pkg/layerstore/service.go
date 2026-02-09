@@ -56,9 +56,15 @@ type Service struct {
 	maxReadSize int
 	authByHost  map[string]RegistryAuthConfig
 	metadataMu  sync.Mutex
+	pullReport  func(imageKey string, pulling bool)
 }
 
 type imageMetadata struct {
+	Image              string           `json:"image,omitempty"`
+	Tag                string           `json:"tag,omitempty"`
+	PlatformOS         string           `json:"platform_os,omitempty"`
+	PlatformArch       string           `json:"platform_arch,omitempty"`
+	PlatformVariant    string           `json:"platform_variant,omitempty"`
 	ResolvedRegistry   string           `json:"resolved_registry"`
 	ResolvedRepository string           `json:"resolved_repository"`
 	ResolvedReference  string           `json:"resolved_reference"`
@@ -123,6 +129,11 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
 	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
 	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
+	imgKey := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
+	if s.pullReport != nil {
+		s.pullReport(imgKey, true)
+		defer s.pullReport(imgKey, false)
+	}
 	log.Printf("pull image requested: image=%s tag=%s platform=%s/%s variant=%s force=%v", req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, req.GetForce())
 
 	meta, fromCache, err := s.resolveImageMetadata(ctx, f, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, req.GetForce())
@@ -144,7 +155,7 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 
 	for i, layer := range meta.Layers {
 		log.Printf("[%d/%d] processing layer digest=%s mediaType=%s size=%d", i+1, len(meta.Layers), layer.Digest, layer.MediaType, layer.Size)
-		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer)
+		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true)
 		if err != nil {
 			return nil, err
 		}
@@ -167,6 +178,10 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	return result, nil
 }
 
+func (s *Service) SetPullImageReporter(fn func(imageKey string, pulling bool)) {
+	s.pullReport = fn
+}
+
 func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, tag, platformOS, platformArch, platformVariant string, force bool) (imageMetadata, bool, error) {
 	ref, err := registry.ParseImageReference(image, tag)
 	if err != nil {
@@ -185,6 +200,11 @@ func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, ta
 		return imageMetadata{}, false, err
 	}
 	meta := imageMetadata{
+		Image:              image,
+		Tag:                tag,
+		PlatformOS:         platformOS,
+		PlatformArch:       platformArch,
+		PlatformVariant:    platformVariant,
 		ResolvedRegistry:   ref.Registry,
 		ResolvedRepository: ref.Repository,
 		ResolvedReference:  ref.Reference,
@@ -318,7 +338,73 @@ func (s *Service) ReadLayer(ctx context.Context, req *layerstorepb.ReadLayerRequ
 	}, nil
 }
 
-func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer) (cachePath string, size int64, cached bool, err error) {
+func (s *Service) HasLayer(ctx context.Context, req *layerstorepb.HasLayerRequest) (*layerstorepb.HasLayerResponse, error) {
+	_ = ctx
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	fullPath, err := s.layerPath(req.GetDigest())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	st, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &layerstorepb.HasLayerResponse{Digest: req.GetDigest(), Found: false}, nil
+		}
+		return nil, status.Errorf(codes.Internal, "stat layer: %v", err)
+	}
+	return &layerstorepb.HasLayerResponse{
+		Digest:  req.GetDigest(),
+		Found:   true,
+		AfsSize: st.Size(),
+	}, nil
+}
+
+func (s *Service) HasImage(ctx context.Context, req *layerstorepb.HasImageRequest) (*layerstorepb.HasImageResponse, error) {
+	_ = ctx
+	if req == nil || strings.TrimSpace(req.GetImage()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "image is required")
+	}
+	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
+	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
+	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
+
+	ref, err := registry.ParseImageReference(req.GetImage(), req.GetTag())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
+	}
+	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
+	meta, err := s.loadImageMetadata(cacheKey)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &layerstorepb.HasImageResponse{Found: false}, nil
+		}
+		return nil, status.Errorf(codes.Internal, "load image metadata: %v", err)
+	}
+
+	missing := 0
+	for _, l := range meta.Layers {
+		p, err := s.layerPath(l.Digest)
+		if err != nil {
+			missing++
+			continue
+		}
+		if _, err := os.Stat(p); err != nil {
+			missing++
+		}
+	}
+	return &layerstorepb.HasImageResponse{
+		Found:              missing == 0,
+		ResolvedRegistry:   meta.ResolvedRegistry,
+		ResolvedRepository: meta.ResolvedRepository,
+		ResolvedReference:  meta.ResolvedReference,
+		TotalLayers:        int32(len(meta.Layers)),
+		MissingLayers:      int32(missing),
+	}, nil
+}
+
+func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer, allowDownload bool) (cachePath string, size int64, cached bool, err error) {
 	if layer.MediaType != layerformat.OCILayerTarGzipMediaType {
 		return "", 0, false, status.Errorf(codes.FailedPrecondition, "unsupported layer media type %q for %s", layer.MediaType, layer.Digest)
 	}
@@ -330,6 +416,9 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 
 	if st, statErr := os.Stat(fullPath); statErr == nil {
 		return fullPath, st.Size(), true, nil
+	}
+	if !allowDownload {
+		return "", 0, false, status.Errorf(codes.NotFound, "layer is not cached: %s", layer.Digest)
 	}
 
 	unlock := s.locker.lock(layer.Digest)
@@ -427,6 +516,16 @@ func valueOrDefault(v, d string) string {
 		return s
 	}
 	return d
+}
+
+func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(image),
+		strings.TrimSpace(tag),
+		strings.TrimSpace(platformOS),
+		strings.TrimSpace(platformArch),
+		strings.TrimSpace(platformVariant),
+	}, "|")
 }
 
 type digestLocker struct {

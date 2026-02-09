@@ -32,6 +32,18 @@ func TestConvertTarGzipToArchive_ReadFileAndStat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
+
+	var copied bytes.Buffer
+	n, err := r.CopyFile("dir/hello.txt", &copied)
+	if err != nil {
+		t.Fatalf("CopyFile() error = %v", err)
+	}
+	if n != int64(len("hello world")) {
+		t.Fatalf("CopyFile() bytes = %d, want %d", n, len("hello world"))
+	}
+	if copied.String() != "hello world" {
+		t.Fatalf("unexpected copied content: %q", copied.String())
+	}
 	if string(data) != "hello world" {
 		t.Fatalf("unexpected file content: %q", string(data))
 	}
