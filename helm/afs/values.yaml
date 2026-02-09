@@ -30,11 +30,9 @@ discovery:
 grpcd:
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
-  nodeSelector:
-    afs.reyoung.io/node-group: legacy-109d
   registryAuth:
     enabled: false
-    registry: mirrors.tencent.com
+    registry: ""
     existingSecret: ""
     usernameKey: username
     passwordKey: password

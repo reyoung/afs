@@ -9,11 +9,12 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      nodeSelector:
-        afs.reyoung.io/node-group: legacy-109d
+      nodeName: 21.215.40.142
+      imagePullSecrets:
+        - name: afs-image-pull
       containers:
         - name: tester
-          image: ghcr.io/reyoung/afs:v0.1.0-3-gd7e10b8
+          image: mirrors.tencent.com/josephyu/afs:v0.1.0-11-g9900216
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -40,7 +41,7 @@ spec:
 
               i=0
               while [ $i -lt 180 ]; do
-                if grep -q " /work/mnt " /proc/mounts && [ -d /work/mnt/bin ]; then
+                if grep -q " /work/mnt " /proc/mounts && [ -d /work/mnt/data ]; then
                   break
                 fi
                 sleep 2
@@ -54,8 +55,8 @@ spec:
                 exit 1
               fi
 
-              find /work/mnt/bin -type f -exec md5sum {} + | sort | md5sum | tee /work/bin-dir.md5
-              echo "MD5_SUMMARY=$(cat /work/bin-dir.md5)"
+              find /work/mnt/data -type f -exec md5sum {} + | sort | md5sum | tee /work/data-dir.md5
+              echo "MD5_SUMMARY=$(cat /work/data-dir.md5)"
 
               kill -TERM "$MOUNT_PID" || true
               wait "$MOUNT_PID" || true
