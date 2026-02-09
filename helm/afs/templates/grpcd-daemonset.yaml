@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "afs.fullname" . }}-grpcd
+  labels:
+    {{- include "afs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpcd
+spec:
+  selector:
+    matchLabels:
+      {{- include "afs.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: grpcd
+  template:
+    metadata:
+      labels:
+        {{- include "afs.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: grpcd
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: grpcd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/afs_layerstore_grpcd
+          args:
+            - -listen=$(POD_IP):{{ .Values.grpcd.containerPort }}
+            - -cache-dir={{ .Values.grpcd.cacheDir }}
+            - -node-id=$(NODE_ID)
+            - -discovery-endpoint={{ include "afs.discoveryServiceName" . }}:{{ .Values.discovery.service.port }}
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.grpcd.containerPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: cache
+              mountPath: {{ .Values.grpcd.cacheDir }}
+          resources:
+            {{- toYaml .Values.grpcd.resources | nindent 12 }}
+      volumes:
+        - name: cache
+          hostPath:
+            path: {{ .Values.grpcd.hostPath }}
+            type: DirectoryOrCreate
