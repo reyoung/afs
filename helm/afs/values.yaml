@@ -15,6 +15,7 @@ podAnnotations: {}
 discovery:
   replicas: 3
   containerPort: 60051
+  goMemLimit: 1792Mi
   service:
     type: ClusterIP
     port: 60051
@@ -30,6 +31,7 @@ grpcd:
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
   emptyDir: {}
+  goMemLimit: 3584Mi
   resources:
     requests:
       cpu: "2"

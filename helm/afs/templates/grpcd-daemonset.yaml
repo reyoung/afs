@@ -51,11 +51,7 @@ spec:
                   resource: limits.cpu
                   divisor: "1"
             - name: GOMEMLIMIT
-              valueFrom:
-                resourceFieldRef:
-                  containerName: grpcd
-                  resource: limits.memory
-                  divisor: "1"
+              value: "{{ .Values.grpcd.goMemLimit }}"
           ports:
             - name: grpc
               containerPort: {{ .Values.grpcd.containerPort }}

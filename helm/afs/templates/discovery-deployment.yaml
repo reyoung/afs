@@ -41,11 +41,7 @@ spec:
                   resource: limits.cpu
                   divisor: "1"
             - name: GOMEMLIMIT
-              valueFrom:
-                resourceFieldRef:
-                  containerName: discovery
-                  resource: limits.memory
-                  divisor: "1"
+              value: "{{ .Values.discovery.goMemLimit }}"
           ports:
             - name: grpc
               containerPort: {{ .Values.discovery.containerPort }}
