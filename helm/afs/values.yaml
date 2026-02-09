@@ -32,6 +32,12 @@ grpcd:
   cacheDir: /var/lib/afs/layerstore
   nodeSelector:
     afs.reyoung.io/node-group: legacy-109d
+  registryAuth:
+    enabled: false
+    registry: mirrors.tencent.com
+    existingSecret: ""
+    usernameKey: username
+    passwordKey: password
   volume:
     type: emptyDir
     emptyDir: {}

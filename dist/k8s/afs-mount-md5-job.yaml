@@ -26,7 +26,7 @@ spec:
             - /bin/sh
             - -lc
             - |
-              set -euo pipefail
+              set -eu
 
               mkdir -p /work/mnt
               afs_mount \
