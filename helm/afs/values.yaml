@@ -30,7 +30,15 @@ discovery:
 grpcd:
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
-  emptyDir: {}
+  volume:
+    type: local-pv
+    emptyDir: {}
+    hostPath: /var/lib/afs/layerstore
+    localPV:
+      storageClassName: local-path
+      size: 1Ti
+      accessModes:
+        - ReadWriteOnce
   goMemLimit: 3584Mi
   resources:
     requests:

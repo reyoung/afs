@@ -63,5 +63,27 @@ spec:
             {{- toYaml .Values.grpcd.resources | nindent 12 }}
       volumes:
         - name: cache
+          {{- if eq .Values.grpcd.volume.type "emptyDir" }}
           emptyDir:
-            {{- toYaml .Values.grpcd.emptyDir | nindent 12 }}
+            {{- toYaml .Values.grpcd.volume.emptyDir | nindent 12 }}
+          {{- else if eq .Values.grpcd.volume.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.grpcd.volume.hostPath }}
+            type: DirectoryOrCreate
+          {{- else if eq .Values.grpcd.volume.type "local-pv" }}
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  {{- include "afs.selectorLabels" . | nindent 18 }}
+                  app.kubernetes.io/component: grpcd
+              spec:
+                accessModes:
+                  {{- toYaml .Values.grpcd.volume.localPV.accessModes | nindent 18 }}
+                storageClassName: {{ .Values.grpcd.volume.localPV.storageClassName | quote }}
+                resources:
+                  requests:
+                    storage: {{ .Values.grpcd.volume.localPV.size | quote }}
+          {{- else }}
+          {{- fail (printf "unsupported grpcd.volume.type: %s" .Values.grpcd.volume.type) }}
+          {{- end }}
