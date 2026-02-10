@@ -117,7 +117,31 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	assembler := newFileAssembler(sess.extraDir)
 	defer assembler.Close()
 
-	var start *afsletpb.StartRequest
+	firstReq, recvErr := stream.Recv()
+	if recvErr == io.EOF {
+		return status.Error(codes.InvalidArgument, "missing start request")
+	}
+	if recvErr != nil {
+		return recvErr
+	}
+	firstStart, ok := firstReq.GetPayload().(*afsletpb.ExecuteRequest_Start)
+	if !ok || firstStart.Start == nil {
+		return status.Error(codes.InvalidArgument, "first request must be start")
+	}
+	start := firstStart.Start
+	if err := validateStartRequest(start); err != nil {
+		return status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	release, reserveErr := s.reserveResources(start.GetCpuCores(), start.GetMemoryMb())
+	if reserveErr != nil {
+		return status.Errorf(codes.ResourceExhausted, "%v", reserveErr)
+	}
+	defer release()
+
+	if err := stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Accepted{Accepted: &afsletpb.Accepted{Accepted: true}}}); err != nil {
+		return err
+	}
+
 	for {
 		req, recvErr := stream.Recv()
 		if recvErr == io.EOF {
@@ -128,10 +152,7 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 		}
 		switch p := req.GetPayload().(type) {
 		case *afsletpb.ExecuteRequest_Start:
-			if start != nil {
-				return status.Error(codes.InvalidArgument, "duplicate start")
-			}
-			start = p.Start
+			return status.Error(codes.InvalidArgument, "duplicate start")
 		case *afsletpb.ExecuteRequest_FileBegin:
 			if err := assembler.Begin(p.FileBegin); err != nil {
 				return status.Errorf(codes.InvalidArgument, "file_begin: %v", err)
@@ -148,18 +169,8 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 			return status.Error(codes.InvalidArgument, "unknown request payload")
 		}
 	}
-	if start == nil {
-		return status.Error(codes.InvalidArgument, "missing start request")
-	}
 	if err := assembler.End(); err != nil {
 		return status.Errorf(codes.InvalidArgument, "finalize extra-dir files: %v", err)
-	}
-
-	if err := s.sendLog(stream, "session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir)); err != nil {
-		return err
-	}
-	if err := s.sendLog(stream, "request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs())); err != nil {
-		return err
 	}
 
 	logf := func(source string, message string) {
@@ -249,31 +260,44 @@ func (s *Service) reserveResources(cpu int64, memoryMB int64) (func(), error) {
 	}, nil
 }
 
+func validateStartRequest(start *afsletpb.StartRequest) error {
+	if start == nil {
+		return fmt.Errorf("missing start request")
+	}
+	if _, _, err := normalizeImageAndTag(start.GetImage(), start.GetTag()); err != nil {
+		return err
+	}
+	if strings.TrimSpace(start.GetImage()) == "" {
+		return fmt.Errorf("start.image is required")
+	}
+	if len(start.GetCommand()) == 0 {
+		return fmt.Errorf("start.command is required")
+	}
+	if start.GetCpuCores() <= 0 {
+		return fmt.Errorf("start.cpu_cores must be > 0")
+	}
+	if start.GetMemoryMb() <= 0 {
+		return fmt.Errorf("start.memory_mb must be > 0")
+	}
+	return nil
+}
+
 func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb.StartRequest, logf func(string, string)) commandResult {
 	image, tag, normErr := normalizeImageAndTag(start.GetImage(), start.GetTag())
 	if normErr != nil {
 		return commandResult{Success: false, ExitCode: -1, Err: normErr.Error()}
 	}
-	if strings.TrimSpace(image) == "" {
-		return commandResult{Success: false, ExitCode: -1, Err: "start.image is required"}
-	}
-	if len(start.GetCommand()) == 0 {
-		return commandResult{Success: false, ExitCode: -1, Err: "start.command is required"}
-	}
 	cpu := start.GetCpuCores()
+	memory := start.GetMemoryMb()
 	if cpu <= 0 {
 		return commandResult{Success: false, ExitCode: -1, Err: "start.cpu_cores must be > 0"}
 	}
-	memory := start.GetMemoryMb()
 	if memory <= 0 {
 		return commandResult{Success: false, ExitCode: -1, Err: "start.memory_mb must be > 0"}
 	}
-	release, reserveErr := s.reserveResources(cpu, memory)
-	if reserveErr != nil {
-		return commandResult{Success: false, ExitCode: -1, Err: reserveErr.Error()}
-	}
-	defer release()
 	if logf != nil {
+		logf("session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir))
+		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs()))
 		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
 	}
 
