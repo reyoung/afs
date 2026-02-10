@@ -6,7 +6,7 @@ HOST_GOOS := $(shell $(GO) env GOOS)
 HOST_GOARCH := $(shell $(GO) env GOARCH)
 
 OUT_DIR ?= dist/$(HOST_GOOS)_$(HOST_GOARCH)
-BINS := afs_discovery_grpcd afs_layerstore_grpcd afs_mount afs_registry_puller afs_layer_converter
+BINS := afs_discovery_grpcd afs_layerstore_grpcd afs_mount afs_registry_puller afs_layer_converter afs_runc afslet afs_cli
 DOCKER_IMAGE ?= afs-binaries:linux-amd64
 
 .PHONY: all build-local build-linux-docker clean print-vars
