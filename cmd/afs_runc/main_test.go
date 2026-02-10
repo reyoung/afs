@@ -13,13 +13,13 @@ func TestBuildSpecResources(t *testing.T) {
 		memoryMB:    512,
 		containerID: "cid-test",
 	}
-	s := buildSpec(cfg, []string{"/bin/echo", "hi"})
+	s := buildSpec(cfg, []string{"/bin/echo", "hi"}, "/abs/rootfs")
 
 	if s.Version != "1.0.2" {
 		t.Fatalf("Version=%q, want 1.0.2", s.Version)
 	}
-	if s.Root.Path != "rootfs" {
-		t.Fatalf("Root.Path=%q, want rootfs", s.Root.Path)
+	if s.Root.Path != "/abs/rootfs" {
+		t.Fatalf("Root.Path=%q, want /abs/rootfs", s.Root.Path)
 	}
 	if len(s.Process.Args) != 2 || s.Process.Args[0] != "/bin/echo" {
 		t.Fatalf("Process.Args=%v, want /bin/echo hi", s.Process.Args)

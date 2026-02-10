@@ -182,13 +182,7 @@ func prepareBundle(rootfsAbs string, cfg config, cmdArgs []string) (string, func
 	}
 	cleanup := func() { _ = os.RemoveAll(bundleDir) }
 
-	rootfsLink := filepath.Join(bundleDir, "rootfs")
-	if err := os.Symlink(rootfsAbs, rootfsLink); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("symlink rootfs into bundle: %w", err)
-	}
-
-	spec := buildSpec(cfg, cmdArgs)
+	spec := buildSpec(cfg, cmdArgs, rootfsAbs)
 	cfgPath := filepath.Join(bundleDir, "config.json")
 	content, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
@@ -203,7 +197,7 @@ func prepareBundle(rootfsAbs string, cfg config, cmdArgs []string) (string, func
 	return bundleDir, cleanup, nil
 }
 
-func buildSpec(cfg config, cmdArgs []string) ociSpec {
+func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 	period := uint64(100000)
 	quota := cfg.cpuCores * int64(period)
 	memLimit := cfg.memoryMB * 1024 * 1024
@@ -211,7 +205,7 @@ func buildSpec(cfg config, cmdArgs []string) ociSpec {
 	return ociSpec{
 		Version: "1.0.2",
 		Root: ociRoot{
-			Path:     "rootfs",
+			Path:     rootfsPath,
 			Readonly: false,
 		},
 		Process: ociProcess{
