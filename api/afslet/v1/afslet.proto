@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package afsletpb;
+
+option go_package = "github.com/reyoung/afs/pkg/afsletpb;afsletpb";
+
+service Afslet {
+  rpc Execute(stream ExecuteRequest) returns (stream ExecuteResponse);
+}
+
+message ExecuteRequest {
+  oneof payload {
+    StartRequest start = 1;
+    FileEntryBegin file_begin = 2;
+    FileChunk file_chunk = 3;
+    FileEntryEnd file_end = 4;
+  }
+}
+
+message StartRequest {
+  string image = 1;
+  string tag = 2;
+  repeated string command = 3;
+  int64 cpu_cores = 4;
+  int64 memory_mb = 5;
+  int64 timeout_ms = 6;
+  string discovery_addr = 7;
+  bool force_pull = 8;
+  string node_id = 9;
+  string platform_os = 10;
+  string platform_arch = 11;
+  string platform_variant = 12;
+}
+
+message FileEntryBegin {
+  string path = 1;
+  FileType type = 2;
+  uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+  int64 mtime_unix = 6;
+  string symlink_target = 7;
+}
+
+message FileChunk {
+  bytes data = 1;
+}
+
+message FileEntryEnd {}
+
+enum FileType {
+  FILE_TYPE_DIR = 0;
+  FILE_TYPE_FILE = 1;
+  FILE_TYPE_SYMLINK = 2;
+}
+
+message ExecuteResponse {
+  oneof payload {
+    LogMessage log = 1;
+    Result result = 2;
+    TarHeader tar_header = 3;
+    TarChunk tar_chunk = 4;
+    Done done = 5;
+  }
+}
+
+message LogMessage {
+  string source = 1;
+  string message = 2;
+}
+
+message Result {
+  bool success = 1;
+  int32 exit_code = 2;
+  string error = 3;
+}
+
+message TarHeader {
+  string name = 1;
+}
+
+message TarChunk {
+  bytes data = 1;
+}
+
+message Done {}
