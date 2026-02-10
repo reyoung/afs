@@ -33,6 +33,7 @@ type config struct {
 	mountpoint      string
 	debug           bool
 	mountProcDev    bool
+	extraDir        string
 	discoveryAddr   string
 	grpcTimeout     time.Duration
 	grpcMaxChunk    int
@@ -81,6 +82,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "mount target directory")
 	flag.BoolVar(&cfg.debug, "debug", false, "enable go-fuse debug logs")
 	flag.BoolVar(&cfg.mountProcDev, "mount-proc-dev", true, "mount /proc and /dev into mounted rootfs (linux only)")
+	flag.StringVar(&cfg.extraDir, "extra-dir", "", "extra read-only directory inserted between writable upper and image layers")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
 	flag.IntVar(&cfg.grpcMaxChunk, "grpc-max-chunk", 1<<20, "max bytes per gRPC read call")
@@ -109,6 +111,11 @@ func parseFlags() config {
 	}
 	if !cfg.grpcInsecure {
 		log.Fatal("only -grpc-insecure=true is supported now")
+	}
+	if strings.TrimSpace(cfg.extraDir) != "" {
+		if err := ensureMountpoint(cfg.extraDir); err != nil {
+			log.Fatalf("invalid -extra-dir: %v", err)
+		}
 	}
 	return cfg
 }
@@ -217,7 +224,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 		}
 	}
 
-	unionCmd, err := buildUnionMountCommand(runtime.GOOS, layerDirs, cfg.mountpoint, writableLayerDir, writableWorkDir)
+	unionCmd, err := buildUnionMountCommand(runtime.GOOS, layerDirs, cfg.mountpoint, writableLayerDir, writableWorkDir, cfg.extraDir)
 	if err != nil {
 		return err
 	}
@@ -661,12 +668,16 @@ func resolveWorkDir(workDir string) (dir string, autoCreated bool, err error) {
 	return workDir, false, nil
 }
 
-func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, writableUpper string, writableWork string) (*exec.Cmd, error) {
+func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, writableUpper string, writableWork string, extraDir string) (*exec.Cmd, error) {
 	if len(layerDirs) == 0 {
 		return nil, fmt.Errorf("no layer directories to compose")
 	}
+	extraDir = strings.TrimSpace(extraDir)
 	ordered := reverseCopy(layerDirs)
 	if goos == "linux" {
+		if extraDir != "" {
+			ordered = append([]string{extraDir}, ordered...)
+		}
 		lower := strings.Join(ordered, ":")
 		opts := []string{"lowerdir=" + lower, "exec"}
 		if strings.TrimSpace(writableUpper) != "" {
@@ -681,6 +692,9 @@ func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, 
 		branches := make([]string, 0, len(ordered)+1)
 		if strings.TrimSpace(writableUpper) != "" {
 			branches = append(branches, writableUpper+"=RW")
+		}
+		if extraDir != "" {
+			branches = append(branches, extraDir+"=RO")
 		}
 		for _, dir := range ordered {
 			branches = append(branches, dir+"=RO")

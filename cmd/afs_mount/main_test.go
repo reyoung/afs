@@ -23,7 +23,7 @@ func TestReverseCopy(t *testing.T) {
 
 func TestBuildUnionMountCommandLinux(t *testing.T) {
 	t.Parallel()
-	cmd, err := buildUnionMountCommand("linux", []string{"/l1", "/l2", "/l3"}, "/mnt", "/upper", "/work")
+	cmd, err := buildUnionMountCommand("linux", []string{"/l1", "/l2", "/l3"}, "/mnt", "/upper", "/work", "")
 	if err != nil {
 		t.Fatalf("buildUnionMountCommand() error: %v", err)
 	}
@@ -38,14 +38,14 @@ func TestBuildUnionMountCommandLinux(t *testing.T) {
 
 func TestBuildUnionMountCommandUnsupportedOS(t *testing.T) {
 	t.Parallel()
-	if _, err := buildUnionMountCommand("windows", []string{"/l1"}, "/mnt", "", ""); err == nil {
+	if _, err := buildUnionMountCommand("windows", []string{"/l1"}, "/mnt", "", "", ""); err == nil {
 		t.Fatalf("expected error for unsupported OS")
 	}
 }
 
 func TestBuildUnionMountCommandLinuxMissingWorkdir(t *testing.T) {
 	t.Parallel()
-	if _, err := buildUnionMountCommand("linux", []string{"/l1"}, "/mnt", "/upper", ""); err == nil {
+	if _, err := buildUnionMountCommand("linux", []string{"/l1"}, "/mnt", "/upper", "", ""); err == nil {
 		t.Fatalf("expected error when linux upperdir has no workdir")
 	}
 }
@@ -58,7 +58,7 @@ func TestBuildUnionMountCommandDarwinBranches(t *testing.T) {
 		}
 	}
 
-	cmd, err := buildUnionMountCommand("darwin", []string{"/l1", "/l2"}, "/mnt", "/upper", "")
+	cmd, err := buildUnionMountCommand("darwin", []string{"/l1", "/l2"}, "/mnt", "/upper", "", "")
 	if err != nil {
 		t.Fatalf("buildUnionMountCommand() error: %v", err)
 	}
@@ -68,6 +68,35 @@ func TestBuildUnionMountCommandDarwinBranches(t *testing.T) {
 	}
 	if !strings.Contains(args, "/upper=RW:/l2=RO:/l1=RO") {
 		t.Fatalf("darwin branch order mismatch: %v", cmd.Args)
+	}
+}
+
+func TestBuildUnionMountCommandLinuxWithExtraDir(t *testing.T) {
+	t.Parallel()
+	cmd, err := buildUnionMountCommand("linux", []string{"/l1", "/l2"}, "/mnt", "/upper", "/work", "/extra")
+	if err != nil {
+		t.Fatalf("buildUnionMountCommand() error: %v", err)
+	}
+	wantArgs := []string{"fuse-overlayfs", "-f", "-o", "lowerdir=/extra:/l2:/l1,exec,upperdir=/upper,workdir=/work", "/mnt"}
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("Args=%v, want %v", cmd.Args, wantArgs)
+	}
+}
+
+func TestBuildUnionMountCommandDarwinWithExtraDir(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("unionfs-fuse"); err != nil {
+		if _, altErr := exec.LookPath("unionfs"); altErr != nil {
+			t.Skip("unionfs-fuse/unionfs not installed")
+		}
+	}
+	cmd, err := buildUnionMountCommand("darwin", []string{"/l1"}, "/mnt", "/upper", "", "/extra")
+	if err != nil {
+		t.Fatalf("buildUnionMountCommand() error: %v", err)
+	}
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "/upper=RW:/extra=RO:/l1=RO") {
+		t.Fatalf("darwin extra-dir order mismatch: %v", cmd.Args)
 	}
 }
 
