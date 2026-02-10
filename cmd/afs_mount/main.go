@@ -201,15 +201,21 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 	}
 
 	var writableLayerDir string
-	if runtime.GOOS == "darwin" {
+	var writableWorkDir string
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		writableLayerDir = filepath.Join(workDir, "writable-upper")
 		if err := os.MkdirAll(writableLayerDir, 0o755); err != nil {
 			return fmt.Errorf("create writable upper dir: %w", err)
 		}
-		defer func() { _ = os.RemoveAll(writableLayerDir) }()
+	}
+	if runtime.GOOS == "linux" {
+		writableWorkDir = filepath.Join(workDir, "writable-work")
+		if err := os.MkdirAll(writableWorkDir, 0o755); err != nil {
+			return fmt.Errorf("create writable work dir: %w", err)
+		}
 	}
 
-	unionCmd, err := buildUnionMountCommand(runtime.GOOS, layerDirs, cfg.mountpoint, writableLayerDir)
+	unionCmd, err := buildUnionMountCommand(runtime.GOOS, layerDirs, cfg.mountpoint, writableLayerDir, writableWorkDir)
 	if err != nil {
 		return err
 	}
@@ -535,7 +541,7 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 
 func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string) (*fuse.Server, error) {
 	root := layerfuse.NewRootWithTempDir(reader, tempDir)
-	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{MountOptions: fuse.MountOptions{Debug: debug, FsName: fmt.Sprintf("afslyr:%s", source), Name: "afslyr", Options: []string{"ro"}}})
+	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{MountOptions: fuse.MountOptions{Debug: debug, FsName: fmt.Sprintf("afslyr:%s", source), Name: "afslyr", Options: []string{"ro", "exec"}}})
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
 			return nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
@@ -582,14 +588,21 @@ func resolveWorkDir(workDir string) (dir string, autoCreated bool, err error) {
 	return workDir, false, nil
 }
 
-func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, writableUpper string) (*exec.Cmd, error) {
+func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, writableUpper string, writableWork string) (*exec.Cmd, error) {
 	if len(layerDirs) == 0 {
 		return nil, fmt.Errorf("no layer directories to compose")
 	}
 	ordered := reverseCopy(layerDirs)
 	if goos == "linux" {
 		lower := strings.Join(ordered, ":")
-		return exec.Command("fuse-overlayfs", "-f", "-o", "lowerdir="+lower, mountpoint), nil
+		opts := []string{"lowerdir=" + lower, "exec"}
+		if strings.TrimSpace(writableUpper) != "" {
+			if strings.TrimSpace(writableWork) == "" {
+				return nil, fmt.Errorf("writable work dir is required for linux upperdir")
+			}
+			opts = append(opts, "upperdir="+writableUpper, "workdir="+writableWork)
+		}
+		return exec.Command("fuse-overlayfs", "-f", "-o", strings.Join(opts, ","), mountpoint), nil
 	}
 	if goos == "darwin" {
 		branches := make([]string, 0, len(ordered)+1)
@@ -606,7 +619,7 @@ func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, 
 			}
 			binary = "unionfs"
 		}
-		return exec.Command(binary, "-f", "-o", "cow", strings.Join(branches, ":"), mountpoint), nil
+		return exec.Command(binary, "-f", "-o", "cow,exec", strings.Join(branches, ":"), mountpoint), nil
 	}
 	return nil, fmt.Errorf("unsupported OS %s; only linux and darwin are supported", goos)
 }

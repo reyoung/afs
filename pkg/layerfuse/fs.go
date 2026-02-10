@@ -127,9 +127,6 @@ func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 	if strings.Contains(name, "/") || name == "" {
 		return nil, syscall.ENOENT
 	}
-	if c := d.GetChild(name); c != nil {
-		return c, 0
-	}
 	childPath := name
 	if d.relPath != "" {
 		childPath = d.relPath + "/" + name
@@ -137,6 +134,10 @@ func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 	e, ok := d.tree.entries[childPath]
 	if !ok {
 		return nil, syscall.ENOENT
+	}
+	setEntryOutAttr(out, e)
+	if c := d.GetChild(name); c != nil {
+		return c, 0
 	}
 	child := d.newChildNode(ctx, e)
 	d.AddChild(name, child, true)
@@ -338,6 +339,29 @@ func setAttrTimes(out *fuse.AttrOut, modTimeUnix int64) {
 	out.Atime = ts
 	out.Mtime = ts
 	out.Ctime = ts
+}
+
+func setEntryOutAttr(out *fuse.EntryOut, e layerformat.Entry) {
+	switch e.Type {
+	case layerformat.EntryTypeDir:
+		mode := e.Mode
+		if mode == 0 {
+			mode = 0o755
+		}
+		out.Mode = uint32(syscall.S_IFDIR | mode)
+	case layerformat.EntryTypeSymlink:
+		out.Mode = uint32(syscall.S_IFLNK | 0o777)
+		out.Size = uint64(len(e.SymlinkTarget))
+	default:
+		out.Mode = uint32(syscall.S_IFREG | e.Mode)
+		out.Size = uint64(e.UncompressedSize)
+	}
+	if e.ModTimeUnix > 0 {
+		ts := uint64(e.ModTimeUnix)
+		out.Atime = ts
+		out.Mtime = ts
+		out.Ctime = ts
+	}
 }
 
 var (

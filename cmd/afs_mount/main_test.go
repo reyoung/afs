@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -21,14 +23,14 @@ func TestReverseCopy(t *testing.T) {
 
 func TestBuildUnionMountCommandLinux(t *testing.T) {
 	t.Parallel()
-	cmd, err := buildUnionMountCommand("linux", []string{"/l1", "/l2", "/l3"}, "/mnt", "")
+	cmd, err := buildUnionMountCommand("linux", []string{"/l1", "/l2", "/l3"}, "/mnt", "/upper", "/work")
 	if err != nil {
 		t.Fatalf("buildUnionMountCommand() error: %v", err)
 	}
-	if cmd.Path != "fuse-overlayfs" {
-		t.Fatalf("Path=%q, want fuse-overlayfs", cmd.Path)
+	if filepath.Base(cmd.Path) != "fuse-overlayfs" {
+		t.Fatalf("Path=%q, want base fuse-overlayfs", cmd.Path)
 	}
-	wantArgs := []string{"fuse-overlayfs", "-f", "-o", "lowerdir=/l3:/l2:/l1", "/mnt"}
+	wantArgs := []string{"fuse-overlayfs", "-f", "-o", "lowerdir=/l3:/l2:/l1,exec,upperdir=/upper,workdir=/work", "/mnt"}
 	if !reflect.DeepEqual(cmd.Args, wantArgs) {
 		t.Fatalf("Args=%v, want %v", cmd.Args, wantArgs)
 	}
@@ -36,21 +38,33 @@ func TestBuildUnionMountCommandLinux(t *testing.T) {
 
 func TestBuildUnionMountCommandUnsupportedOS(t *testing.T) {
 	t.Parallel()
-	if _, err := buildUnionMountCommand("windows", []string{"/l1"}, "/mnt", ""); err == nil {
+	if _, err := buildUnionMountCommand("windows", []string{"/l1"}, "/mnt", "", ""); err == nil {
 		t.Fatalf("expected error for unsupported OS")
+	}
+}
+
+func TestBuildUnionMountCommandLinuxMissingWorkdir(t *testing.T) {
+	t.Parallel()
+	if _, err := buildUnionMountCommand("linux", []string{"/l1"}, "/mnt", "/upper", ""); err == nil {
+		t.Fatalf("expected error when linux upperdir has no workdir")
 	}
 }
 
 func TestBuildUnionMountCommandDarwinBranches(t *testing.T) {
 	t.Parallel()
+	if _, err := exec.LookPath("unionfs-fuse"); err != nil {
+		if _, altErr := exec.LookPath("unionfs"); altErr != nil {
+			t.Skip("unionfs-fuse/unionfs not installed")
+		}
+	}
 
-	cmd, err := buildUnionMountCommand("darwin", []string{"/l1", "/l2"}, "/mnt", "/upper")
+	cmd, err := buildUnionMountCommand("darwin", []string{"/l1", "/l2"}, "/mnt", "/upper", "")
 	if err != nil {
 		t.Fatalf("buildUnionMountCommand() error: %v", err)
 	}
 	args := strings.Join(cmd.Args, " ")
-	if !strings.Contains(args, "-o cow") {
-		t.Fatalf("darwin args should include cow: %v", cmd.Args)
+	if !strings.Contains(args, "-o cow,exec") {
+		t.Fatalf("darwin args should include cow,exec: %v", cmd.Args)
 	}
 	if !strings.Contains(args, "/upper=RW:/l2=RO:/l1=RO") {
 		t.Fatalf("darwin branch order mismatch: %v", cmd.Args)
