@@ -20,13 +20,20 @@ services:
     volumes:
       - ./dist/linux_amd64:/usr/local/bin:ro
       - layerstore_cache:/var/lib/afs/cache
+      # Optional: mount custom root CAs when using private/self-signed registry certs.
+      # - ./certs:/usr/local/share/ca-certificates/custom:ro
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
         set -euo pipefail
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates
+        update-ca-certificates
+        rm -rf /var/lib/apt/lists/*
         IP="$(hostname -i | awk '{print $1}')"
+        echo "layerstore listen ip=$$IP"
         exec /usr/local/bin/afs_layerstore_grpcd \
-          -listen="$${IP}:50051" \
+          -listen="$$IP:50051" \
           -cache-dir=/var/lib/afs/cache \
           -node-id=layerstore-1 \
           -discovery-endpoint=discovery:60051
@@ -37,6 +44,7 @@ services:
     image: ubuntu:24.04
     container_name: afs-afslet
     restart: unless-stopped
+    cgroup: host
     depends_on:
       - discovery
       - layerstore
