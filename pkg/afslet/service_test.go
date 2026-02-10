@@ -40,3 +40,29 @@ func TestNormalizeImageAndTag(t *testing.T) {
 		})
 	}
 }
+
+func TestPickDiscoveryAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		req  string
+		def  string
+		want string
+	}{
+		{name: "request overrides default", req: "10.0.0.1:60051", def: "127.0.0.1:60051", want: "10.0.0.1:60051"},
+		{name: "fallback to default", req: "", def: "127.0.0.1:60051", want: "127.0.0.1:60051"},
+		{name: "both empty", req: "", def: "", want: ""},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := pickDiscoveryAddr(tc.req, tc.def)
+			if got != tc.want {
+				t.Fatalf("pickDiscoveryAddr(%q,%q)=%q, want %q", tc.req, tc.def, got, tc.want)
+			}
+		})
+	}
+}

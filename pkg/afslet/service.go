@@ -31,27 +31,30 @@ const (
 )
 
 type Config struct {
-	MountBinary string
-	RuncBinary  string
-	UseSudo     bool
-	TarChunk    int
+	MountBinary      string
+	RuncBinary       string
+	UseSudo          bool
+	TarChunk         int
+	DefaultDiscovery string
 }
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountBinary string
-	runcBinary  string
-	useSudo     bool
-	tarChunk    int
+	mountBinary      string
+	runcBinary       string
+	useSudo          bool
+	tarChunk         int
+	defaultDiscovery string
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountBinary: strings.TrimSpace(cfg.MountBinary),
-		runcBinary:  strings.TrimSpace(cfg.RuncBinary),
-		useSudo:     cfg.UseSudo,
-		tarChunk:    cfg.TarChunk,
+		mountBinary:      strings.TrimSpace(cfg.MountBinary),
+		runcBinary:       strings.TrimSpace(cfg.RuncBinary),
+		useSudo:          cfg.UseSudo,
+		tarChunk:         cfg.TarChunk,
+		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -186,8 +189,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	if strings.TrimSpace(tag) != "" {
 		mountArgs = append(mountArgs, "-tag", tag)
 	}
-	if strings.TrimSpace(start.GetDiscoveryAddr()) != "" {
-		mountArgs = append(mountArgs, "-discovery-addr", start.GetDiscoveryAddr())
+	if discoveryAddr := pickDiscoveryAddr(start.GetDiscoveryAddr(), s.defaultDiscovery); discoveryAddr != "" {
+		mountArgs = append(mountArgs, "-discovery-addr", discoveryAddr)
 	}
 	if start.GetForcePull() {
 		mountArgs = append(mountArgs, "-force-pull")
@@ -727,4 +730,12 @@ func splitImageAndTag(image string) (string, string) {
 		return image[:lastColon], image[lastColon+1:]
 	}
 	return image, ""
+}
+
+func pickDiscoveryAddr(req string, def string) string {
+	req = strings.TrimSpace(req)
+	if req != "" {
+		return req
+	}
+	return strings.TrimSpace(def)
 }
