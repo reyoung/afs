@@ -45,7 +45,7 @@ func TestSetEntryOutAttrRegularFile(t *testing.T) {
 		Mode:             0o755,
 		UncompressedSize: 1234,
 		ModTimeUnix:      1700000000,
-	})
+	}, 1000, 1001, true)
 
 	if out.Mode != uint32(syscall.S_IFREG|0o755) {
 		t.Fatalf("Mode=%o, want %o", out.Mode, uint32(syscall.S_IFREG|0o755))
@@ -55,5 +55,20 @@ func TestSetEntryOutAttrRegularFile(t *testing.T) {
 	}
 	if out.Mtime != 1700000000 {
 		t.Fatalf("Mtime=%d, want 1700000000", out.Mtime)
+	}
+	if out.Uid != 1000 || out.Gid != 1001 {
+		t.Fatalf("uid/gid=%d/%d, want 1000/1001", out.Uid, out.Gid)
+	}
+}
+
+func TestSetAttrOwnerDisabled(t *testing.T) {
+	t.Parallel()
+
+	out := &fuse.AttrOut{}
+	out.Uid = 1
+	out.Gid = 2
+	setAttrOwner(out, 1000, 1001, false)
+	if out.Uid != 1 || out.Gid != 2 {
+		t.Fatalf("uid/gid changed when disabled: %d/%d", out.Uid, out.Gid)
 	}
 }

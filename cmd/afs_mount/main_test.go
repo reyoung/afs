@@ -112,3 +112,25 @@ func TestRankServicesForAffinity(t *testing.T) {
 		t.Fatalf("expected local node first, got %s", ordered[0].nodeID)
 	}
 }
+
+func TestExtraMountSpecsLinuxEnabled(t *testing.T) {
+	t.Parallel()
+	got := extraMountSpecs("linux", "/mnt/rootfs", true)
+	want := []extraMountSpec{
+		{source: "/proc", target: "/mnt/rootfs/proc"},
+		{source: "/dev", target: "/mnt/rootfs/dev"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("extraMountSpecs(linux,true)=%v, want %v", got, want)
+	}
+}
+
+func TestExtraMountSpecsDisabledOrNonLinux(t *testing.T) {
+	t.Parallel()
+	if got := extraMountSpecs("linux", "/mnt/rootfs", false); got != nil {
+		t.Fatalf("extraMountSpecs disabled should be nil, got %v", got)
+	}
+	if got := extraMountSpecs("darwin", "/mnt/rootfs", true); got != nil {
+		t.Fatalf("extraMountSpecs non-linux should be nil, got %v", got)
+	}
+}

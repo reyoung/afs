@@ -22,14 +22,21 @@ import (
 
 // NewRoot builds a read-only inode tree backed by layerformat.Reader.
 func NewRoot(r *layerformat.Reader) *DirNode {
-	t := buildTree(r, "")
+	t := buildTree(r, "", 0, 0, false)
 	return &DirNode{tree: t, relPath: ""}
 }
 
 // NewRootWithTempDir builds a read-only inode tree and uses tempDir to spill
 // decompressed file payloads, avoiding full-file memory buffering.
 func NewRootWithTempDir(r *layerformat.Reader, tempDir string) *DirNode {
-	t := buildTree(r, tempDir)
+	t := buildTree(r, tempDir, 0, 0, false)
+	return &DirNode{tree: t, relPath: ""}
+}
+
+// NewRootWithTempDirAndOwner builds a read-only inode tree and maps ownership
+// of all returned attrs to uid/gid when mapOwner is true.
+func NewRootWithTempDirAndOwner(r *layerformat.Reader, tempDir string, uid uint32, gid uint32, mapOwner bool) *DirNode {
+	t := buildTree(r, tempDir, uid, gid, mapOwner)
 	return &DirNode{tree: t, relPath: ""}
 }
 
@@ -39,15 +46,21 @@ type tree struct {
 	children map[string][]string
 	kinds    map[string]uint32
 	tempDir  string
+	ownerUID uint32
+	ownerGID uint32
+	mapOwner bool
 }
 
-func buildTree(r *layerformat.Reader, tempDir string) *tree {
+func buildTree(r *layerformat.Reader, tempDir string, ownerUID uint32, ownerGID uint32, mapOwner bool) *tree {
 	t := &tree{
 		reader:   r,
 		entries:  make(map[string]layerformat.Entry),
 		children: make(map[string][]string),
 		kinds:    make(map[string]uint32),
 		tempDir:  strings.TrimSpace(tempDir),
+		ownerUID: ownerUID,
+		ownerGID: ownerGID,
+		mapOwner: mapOwner,
 	}
 	seenChild := make(map[string]map[string]struct{})
 
@@ -135,7 +148,7 @@ func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 	if !ok {
 		return nil, syscall.ENOENT
 	}
-	setEntryOutAttr(out, e)
+	setEntryOutAttr(out, e, d.tree.ownerUID, d.tree.ownerGID, d.tree.mapOwner)
 	if c := d.GetChild(name); c != nil {
 		return c, 0
 	}
@@ -163,6 +176,7 @@ func (d *DirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 func (d *DirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = uint32(syscall.S_IFDIR | 0o555)
+	setAttrOwner(out, d.tree.ownerUID, d.tree.ownerGID, d.tree.mapOwner)
 	if d.relPath != "" {
 		if e, ok := d.tree.entries[d.relPath]; ok {
 			setAttrTimes(out, e.ModTimeUnix)
@@ -177,10 +191,10 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 		node := &DirNode{tree: d.tree, relPath: e.Path}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR})
 	case layerformat.EntryTypeSymlink:
-		node := &SymlinkNode{entry: e}
+		node := &SymlinkNode{entry: e, ownerUID: d.tree.ownerUID, ownerGID: d.tree.ownerGID, mapOwner: d.tree.mapOwner}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
 	default:
-		node := &FileNode{entry: e, reader: d.tree.reader, tempDir: d.tree.tempDir}
+		node := &FileNode{entry: e, reader: d.tree.reader, tempDir: d.tree.tempDir, ownerUID: d.tree.ownerUID, ownerGID: d.tree.ownerGID, mapOwner: d.tree.mapOwner}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
 }
@@ -188,9 +202,12 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 // FileNode is a read-only regular file.
 type FileNode struct {
 	fs.Inode
-	entry   layerformat.Entry
-	reader  *layerformat.Reader
-	tempDir string
+	entry    layerformat.Entry
+	reader   *layerformat.Reader
+	tempDir  string
+	ownerUID uint32
+	ownerGID uint32
+	mapOwner bool
 
 	once sync.Once
 	file *os.File
@@ -230,6 +247,7 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = uint32(syscall.S_IFREG | f.entry.Mode)
+	setAttrOwner(out, f.ownerUID, f.ownerGID, f.mapOwner)
 	if f.entry.UncompressedSize > 0 {
 		out.Size = uint64(f.entry.UncompressedSize)
 	} else {
@@ -314,7 +332,10 @@ func (f *FileNode) prepareTempFile() (*os.File, int64, error) {
 // SymlinkNode is a read-only symlink.
 type SymlinkNode struct {
 	fs.Inode
-	entry layerformat.Entry
+	entry    layerformat.Entry
+	ownerUID uint32
+	ownerGID uint32
+	mapOwner bool
 }
 
 var _ = (fs.NodeReadlinker)((*SymlinkNode)(nil))
@@ -327,6 +348,7 @@ func (s *SymlinkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 func (s *SymlinkNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = uint32(syscall.S_IFLNK | 0o777)
 	out.Size = uint64(len(s.entry.SymlinkTarget))
+	setAttrOwner(out, s.ownerUID, s.ownerGID, s.mapOwner)
 	setAttrTimes(out, s.entry.ModTimeUnix)
 	return 0
 }
@@ -341,7 +363,7 @@ func setAttrTimes(out *fuse.AttrOut, modTimeUnix int64) {
 	out.Ctime = ts
 }
 
-func setEntryOutAttr(out *fuse.EntryOut, e layerformat.Entry) {
+func setEntryOutAttr(out *fuse.EntryOut, e layerformat.Entry, ownerUID uint32, ownerGID uint32, mapOwner bool) {
 	switch e.Type {
 	case layerformat.EntryTypeDir:
 		mode := e.Mode
@@ -362,6 +384,23 @@ func setEntryOutAttr(out *fuse.EntryOut, e layerformat.Entry) {
 		out.Mtime = ts
 		out.Ctime = ts
 	}
+	setEntryOwner(out, ownerUID, ownerGID, mapOwner)
+}
+
+func setAttrOwner(out *fuse.AttrOut, uid uint32, gid uint32, mapOwner bool) {
+	if !mapOwner {
+		return
+	}
+	out.Uid = uid
+	out.Gid = gid
+}
+
+func setEntryOwner(out *fuse.EntryOut, uid uint32, gid uint32, mapOwner bool) {
+	if !mapOwner {
+		return
+	}
+	out.Uid = uid
+	out.Gid = gid
 }
 
 var (
