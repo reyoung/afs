@@ -24,6 +24,7 @@ func main() {
 	var tarChunk int
 	var gracefulTimeout time.Duration
 	var defaultDiscoveryAddr string
+	var tempDir string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -32,6 +33,7 @@ func main() {
 	flag.IntVar(&tarChunk, "tar-chunk", 256*1024, "tar.gz stream chunk size in bytes")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
 	flag.StringVar(&defaultDiscoveryAddr, "discovery-addr", "", "default discovery address used when request does not specify one")
+	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -45,6 +47,7 @@ func main() {
 		UseSudo:          useSudo,
 		TarChunk:         tarChunk,
 		DefaultDiscovery: defaultDiscoveryAddr,
+		TempDir:          tempDir,
 	})
 
 	grpcServer := grpc.NewServer()

@@ -1,6 +1,10 @@
 package afslet
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestNormalizeImageAndTag(t *testing.T) {
 	t.Parallel()
@@ -64,5 +68,20 @@ func TestPickDiscoveryAddr(t *testing.T) {
 				t.Fatalf("pickDiscoveryAddr(%q,%q)=%q, want %q", tc.req, tc.def, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewSessionRespectsTempDir(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	sess, cleanup, err := newSession(base)
+	if err != nil {
+		t.Fatalf("newSession() error: %v", err)
+	}
+	defer cleanup()
+
+	if !strings.HasPrefix(sess.root, filepath.Clean(base)+string(filepath.Separator)) {
+		t.Fatalf("session root=%q should be under %q", sess.root, base)
 	}
 }

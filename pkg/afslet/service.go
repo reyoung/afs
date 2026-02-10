@@ -36,6 +36,7 @@ type Config struct {
 	UseSudo          bool
 	TarChunk         int
 	DefaultDiscovery string
+	TempDir          string
 }
 
 type Service struct {
@@ -46,6 +47,7 @@ type Service struct {
 	useSudo          bool
 	tarChunk         int
 	defaultDiscovery string
+	tempDir          string
 }
 
 func NewService(cfg Config) *Service {
@@ -55,6 +57,7 @@ func NewService(cfg Config) *Service {
 		useSudo:          cfg.UseSudo,
 		tarChunk:         cfg.TarChunk,
 		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
+		tempDir:          strings.TrimSpace(cfg.TempDir),
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -89,7 +92,7 @@ func newFileAssembler(baseDir string) *fileAssembler {
 
 func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	ctx := stream.Context()
-	sess, cleanup, err := newSession()
+	sess, cleanup, err := newSession(s.tempDir)
 	if err != nil {
 		return status.Errorf(codes.Internal, "create session: %v", err)
 	}
@@ -545,8 +548,14 @@ func safeJoin(base string, rel string) (string, error) {
 	return target, nil
 }
 
-func newSession() (*session, func(), error) {
-	root, err := os.MkdirTemp("", "afslet-session-*")
+func newSession(tempDir string) (*session, func(), error) {
+	rootBase := strings.TrimSpace(tempDir)
+	if rootBase != "" {
+		if err := os.MkdirAll(rootBase, 0o755); err != nil {
+			return nil, nil, err
+		}
+	}
+	root, err := os.MkdirTemp(rootBase, "afslet-session-*")
 	if err != nil {
 		return nil, nil, err
 	}
