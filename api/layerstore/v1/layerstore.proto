@@ -10,6 +10,7 @@ service LayerStore {
   rpc ReadLayer(ReadLayerRequest) returns (ReadLayerResponse);
   rpc HasLayer(HasLayerRequest) returns (HasLayerResponse);
   rpc HasImage(HasImageRequest) returns (HasImageResponse);
+  rpc PruneCache(PruneCacheRequest) returns (PruneCacheResponse);
 }
 
 message PullImageRequest {
@@ -85,4 +86,16 @@ message HasImageResponse {
   string resolved_reference = 4;
   int32 total_layers = 5;
   int32 missing_layers = 6;
+}
+
+message PruneCacheRequest {
+  // Percentage of current cache bytes to reclaim, range (0, 100].
+  double percent = 1;
+}
+
+message PruneCacheResponse {
+  int64 before_bytes = 1;
+  int64 after_bytes = 2;
+  int64 reclaimed_bytes = 3;
+  int32 evicted_layers = 4;
 }

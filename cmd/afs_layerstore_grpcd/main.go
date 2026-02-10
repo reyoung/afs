@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +41,7 @@ func main() {
 		authPairs          multiStringFlag
 		basicPairs         multiStringFlag
 		discoveryEndpoints multiStringFlag
+		cacheMaxBytes      int64
 	)
 
 	flag.StringVar(&listenAddr, "listen", "", "gRPC listen endpoint with IP, e.g. 10.0.0.12:50051")
@@ -52,6 +54,7 @@ func main() {
 	flag.Var(&authPairs, "auth-registry-token", "repeatable registry token pair, format <registry>=<token>")
 	flag.Var(&basicPairs, "auth-registry-basic", "repeatable registry basic auth, format <registry>=<username>[:<password>]")
 	flag.Var(&discoveryEndpoints, "discovery-endpoint", "repeatable discovery gRPC endpoint, e.g. 10.0.0.2:60051")
+	flag.Int64Var(&cacheMaxBytes, "cache-max-bytes", 0, "max layer cache bytes (0 means default: min(1TB, 60% of free space))")
 	flag.Parse()
 
 	if err := validateListenEndpoint(listenAddr); err != nil {
@@ -97,17 +100,31 @@ func main() {
 	if err != nil {
 		log.Fatalf("init service: %v", err)
 	}
+	if cacheMaxBytes > 0 {
+		svc.SetCacheLimitBytes(cacheMaxBytes)
+	}
+	log.Printf("layer cache limit bytes=%s", strconv.FormatInt(svc.CacheLimitBytes(), 10))
 	var pendingMu sync.RWMutex
 	pending := make(map[string]struct{})
+	heartbeatNow := make(chan struct{}, 1)
+	triggerHeartbeat := func() {
+		select {
+		case heartbeatNow <- struct{}{}:
+		default:
+		}
+	}
 	svc.SetPullImageReporter(func(imgKey string, pulling bool) {
 		pendingMu.Lock()
 		defer pendingMu.Unlock()
 		if pulling {
 			pending[imgKey] = struct{}{}
+			triggerHeartbeat()
 			return
 		}
 		delete(pending, imgKey)
+		triggerHeartbeat()
 	})
+	svc.SetEvictionReporter(triggerHeartbeat)
 
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -134,7 +151,7 @@ func main() {
 				out = append(out, k)
 			}
 			return out
-		})
+		}, heartbeatNow)
 	}
 
 	go func() {
@@ -153,7 +170,7 @@ func main() {
 	grpcServer.GracefulStop()
 }
 
-func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, pendingImages func() []string) {
+func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, pendingImages func() []string, trigger <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -189,6 +206,8 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			send()
+		case <-trigger:
 			send()
 		}
 	}

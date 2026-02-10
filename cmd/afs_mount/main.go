@@ -379,6 +379,23 @@ func rankServicesForAffinity(services []serviceInfo, nodeID string) []serviceInf
 	return append(local, remote...)
 }
 
+func dedupeServiceInfos(in []serviceInfo) []serviceInfo {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]serviceInfo, 0, len(in))
+	for _, s := range in {
+		ep := strings.TrimSpace(s.endpoint)
+		if ep == "" {
+			continue
+		}
+		if _, ok := seen[ep]; ok {
+			continue
+		}
+		seen[ep] = struct{}{}
+		out = append(out, serviceInfo{nodeID: strings.TrimSpace(s.nodeID), endpoint: ep})
+	}
+	return out
+}
+
 func newDiscoveryBackedLayerReader(cfg config, digest string, bootstrapEndpoint string, providers []serviceInfo) (*discoveryLayerReaderAt, error) {
 	r := &discoveryLayerReaderAt{
 		cfg:       cfg,
@@ -408,6 +425,7 @@ type discoveryLayerReaderAt struct {
 func (r *discoveryLayerReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refreshProvidersLocked()
 
 	if len(p) == 0 {
 		return 0, nil
@@ -441,6 +459,16 @@ func (r *discoveryLayerReaderAt) ReadAt(p []byte, off int64) (int, error) {
 			}
 			return 0, fmt.Errorf("read failed and no failover provider: %w", switchErr)
 		}
+	}
+}
+
+func (r *discoveryLayerReaderAt) refreshProvidersLocked() {
+	fresh, err := findLayerServices(r.cfg.discoveryAddr, r.digest, r.cfg.grpcTimeout, r.cfg.grpcInsecure)
+	if err != nil {
+		return
+	}
+	if len(fresh) > 0 {
+		r.providers = fresh
 	}
 }
 
@@ -491,7 +519,12 @@ func (r *discoveryLayerReaderAt) switchProvider(excluded map[string]struct{}) er
 
 func (r *discoveryLayerReaderAt) findLayerProviders() []serviceInfo {
 	candidates := make([]serviceInfo, 0, len(r.providers)+1)
-	candidates = append(candidates, r.providers...)
+	fresh, err := findLayerServices(r.cfg.discoveryAddr, r.digest, r.cfg.grpcTimeout, r.cfg.grpcInsecure)
+	if err == nil && len(fresh) > 0 {
+		candidates = append(candidates, fresh...)
+	} else {
+		candidates = append(candidates, r.providers...)
+	}
 	if r.bootstrap != "" {
 		found := false
 		for _, c := range candidates {
@@ -505,6 +538,37 @@ func (r *discoveryLayerReaderAt) findLayerProviders() []serviceInfo {
 		}
 	}
 	return rankServicesForAffinity(candidates, r.cfg.nodeID)
+}
+
+func findLayerServices(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]serviceInfo, error) {
+	conn, err := dialGRPC(discoveryAddr, timeout, insecureTransport)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	client := discoverypb.NewServiceDiscoveryClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]serviceInfo, 0, len(resp.GetServices()))
+	for _, svc := range resp.GetServices() {
+		if svc == nil {
+			continue
+		}
+		for _, d := range svc.GetLayerDigests() {
+			if d == digest {
+				out = append(out, serviceInfo{
+					nodeID:   strings.TrimSpace(svc.GetNodeId()),
+					endpoint: strings.TrimSpace(svc.GetEndpoint()),
+				})
+				break
+			}
+		}
+	}
+	return dedupeServiceInfos(out), nil
 }
 
 func (r *discoveryLayerReaderAt) connectProvider(endpoint string) error {

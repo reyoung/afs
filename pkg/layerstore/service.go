@@ -12,8 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,6 +30,8 @@ const (
 	defaultPlatformOS   = "linux"
 	defaultPlatformArch = "amd64"
 	maxReadBytes        = 4 << 20
+	defaultCacheMaxByte = int64(1) << 40 // 1TB
+	defaultCacheRatio   = int64(60)      // 60% of free space
 )
 
 var digestPattern = regexp.MustCompile(`^[A-Za-z0-9_+.-]+:[A-Fa-f0-9]+$`)
@@ -48,15 +53,26 @@ type RegistryAuthConfig struct {
 type Service struct {
 	layerstorepb.UnimplementedLayerStoreServer
 
-	cacheDir    string
-	layersDir   string
-	metadataDir string
-	locker      *digestLocker
-	newFetcher  func() fetcher
-	maxReadSize int
-	authByHost  map[string]RegistryAuthConfig
-	metadataMu  sync.Mutex
-	pullReport  func(imageKey string, pulling bool)
+	cacheDir      string
+	layersDir     string
+	metadataDir   string
+	locker        *digestLocker
+	newFetcher    func() fetcher
+	maxReadSize   int
+	authByHost    map[string]RegistryAuthConfig
+	metadataMu    sync.Mutex
+	pullReport    func(imageKey string, pulling bool)
+	pruneMu       sync.Mutex
+	cacheMax      int64
+	reservedBytes int64
+	evictReport   func()
+}
+
+type cachedLayerFile struct {
+	digest  string
+	path    string
+	size    int64
+	modTime time.Time
 }
 
 type imageMetadata struct {
@@ -100,6 +116,10 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		cfg.RegistryHost = host
 		authByHost[host] = cfg
 	}
+	cacheMax := defaultCacheMaxByte
+	if dyn, err := defaultCacheLimitFromFS(cacheDir); err == nil && dyn > 0 && dyn < cacheMax {
+		cacheMax = dyn
+	}
 	return &Service{
 		cacheDir:    cacheDir,
 		layersDir:   layersDir,
@@ -108,6 +128,7 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		newFetcher:  func() fetcher { return registry.NewClient(nil) },
 		maxReadSize: maxReadBytes,
 		authByHost:  authByHost,
+		cacheMax:    cacheMax,
 	}, nil
 }
 
@@ -145,6 +166,11 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	} else {
 		log.Printf("resolved image metadata from registry: registry=%s repository=%s reference=%s layers=%d", meta.ResolvedRegistry, meta.ResolvedRepository, meta.ResolvedReference, len(meta.Layers))
 	}
+	releaseReservation, reserveErr := s.reservePullSpace(meta.Layers)
+	if reserveErr != nil {
+		return nil, reserveErr
+	}
+	defer releaseReservation()
 
 	result := &layerstorepb.PullImageResponse{
 		ResolvedRegistry:   meta.ResolvedRegistry,
@@ -180,6 +206,86 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 
 func (s *Service) SetPullImageReporter(fn func(imageKey string, pulling bool)) {
 	s.pullReport = fn
+}
+
+func (s *Service) SetEvictionReporter(fn func()) {
+	s.evictReport = fn
+}
+
+func (s *Service) SetCacheLimitBytes(v int64) {
+	if v <= 0 {
+		return
+	}
+	s.cacheMax = v
+}
+
+func (s *Service) CacheLimitBytes() int64 {
+	return s.cacheMax
+}
+
+func (s *Service) reservePullSpace(layers []registry.Layer) (func(), error) {
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+
+	required, protected, err := s.estimateRequiredBytesLocked(layers)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "estimate required space: %v", err)
+	}
+	if required > s.cacheMax {
+		return nil, status.Errorf(codes.ResourceExhausted, "image requires %d bytes but cache limit is %d", required, s.cacheMax)
+	}
+
+	usage, err := s.cacheUsageBytesLocked()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "compute cache usage: %v", err)
+	}
+	available := s.cacheMax - usage - s.reservedBytes
+	if available < required {
+		target := required - available
+		reclaimed, _, pruneErr := s.pruneByReclaimTargetLocked(target, protected)
+		if pruneErr != nil {
+			return nil, status.Errorf(codes.Internal, "prune for reservation: %v", pruneErr)
+		}
+		available += reclaimed
+	}
+	if available < required {
+		return nil, status.Errorf(codes.ResourceExhausted, "insufficient cache space: need=%d available=%d limit=%d", required, available, s.cacheMax)
+	}
+
+	s.reservedBytes += required
+	return func() {
+		s.pruneMu.Lock()
+		defer s.pruneMu.Unlock()
+		s.reservedBytes -= required
+		if s.reservedBytes < 0 {
+			s.reservedBytes = 0
+		}
+	}, nil
+}
+
+func (s *Service) estimateRequiredBytesLocked(layers []registry.Layer) (int64, map[string]struct{}, error) {
+	protected := make(map[string]struct{}, len(layers))
+	var required int64
+	for _, l := range layers {
+		d := strings.TrimSpace(l.Digest)
+		if d == "" {
+			continue
+		}
+		protected[d] = struct{}{}
+		p, err := s.layerPath(d)
+		if err != nil {
+			return 0, nil, err
+		}
+		if _, statErr := os.Stat(p); statErr == nil {
+			continue
+		}
+		if l.Size > 0 {
+			required += l.Size
+		} else {
+			required += 1
+		}
+	}
+	return required, protected, nil
 }
 
 func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, tag, platformOS, platformArch, platformVariant string, force bool) (imageMetadata, bool, error) {
@@ -288,6 +394,7 @@ func (s *Service) StatLayer(ctx context.Context, req *layerstorepb.StatLayerRequ
 		}
 		return nil, status.Errorf(codes.Internal, "stat layer: %v", err)
 	}
+	_ = touchFile(fullPath)
 	return &layerstorepb.StatLayerResponse{
 		Digest:    req.GetDigest(),
 		AfsSize:   st.Size(),
@@ -329,6 +436,7 @@ func (s *Service) ReadLayer(ctx context.Context, req *layerstorepb.ReadLayerRequ
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return nil, status.Errorf(codes.Internal, "read layer: %v", readErr)
 	}
+	_ = touchFile(fullPath)
 
 	return &layerstorepb.ReadLayerResponse{
 		Digest: req.GetDigest(),
@@ -404,6 +512,44 @@ func (s *Service) HasImage(ctx context.Context, req *layerstorepb.HasImageReques
 	}, nil
 }
 
+func (s *Service) PruneCache(ctx context.Context, req *layerstorepb.PruneCacheRequest) (*layerstorepb.PruneCacheResponse, error) {
+	_ = ctx
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	percent := req.GetPercent()
+	if percent <= 0 || percent > 100 {
+		return nil, status.Error(codes.InvalidArgument, "percent must be in (0,100]")
+	}
+	before, err := s.cacheUsageBytes()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "compute cache usage: %v", err)
+	}
+	target := int64(float64(before) * (percent / 100.0))
+	if target <= 0 {
+		return &layerstorepb.PruneCacheResponse{
+			BeforeBytes:    before,
+			AfterBytes:     before,
+			ReclaimedBytes: 0,
+			EvictedLayers:  0,
+		}, nil
+	}
+	reclaimed, evicted, pruneErr := s.pruneByReclaimTarget(target, nil)
+	if pruneErr != nil {
+		return nil, status.Errorf(codes.Internal, "prune cache: %v", pruneErr)
+	}
+	after := before - reclaimed
+	if after < 0 {
+		after = 0
+	}
+	return &layerstorepb.PruneCacheResponse{
+		BeforeBytes:    before,
+		AfterBytes:     after,
+		ReclaimedBytes: reclaimed,
+		EvictedLayers:  int32(evicted),
+	}, nil
+}
+
 func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer, allowDownload bool) (cachePath string, size int64, cached bool, err error) {
 	if layer.MediaType != layerformat.OCILayerTarGzipMediaType {
 		return "", 0, false, status.Errorf(codes.FailedPrecondition, "unsupported layer media type %q for %s", layer.MediaType, layer.Digest)
@@ -415,6 +561,7 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	}
 
 	if st, statErr := os.Stat(fullPath); statErr == nil {
+		_ = touchFile(fullPath)
 		return fullPath, st.Size(), true, nil
 	}
 	if !allowDownload {
@@ -425,6 +572,7 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	defer unlock()
 
 	if st, statErr := os.Stat(fullPath); statErr == nil {
+		_ = touchFile(fullPath)
 		return fullPath, st.Size(), true, nil
 	}
 
@@ -467,7 +615,153 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	if err != nil {
 		return "", 0, false, status.Errorf(codes.Internal, "stat cache file: %v", err)
 	}
+	_ = touchFile(fullPath)
+	if _, _, pruneErr := s.enforceCacheLimit(map[string]struct{}{layer.Digest: {}}); pruneErr != nil {
+		log.Printf("warning: enforce cache limit failed: %v", pruneErr)
+	}
 	return fullPath, st.Size(), false, nil
+}
+
+func (s *Service) enforceCacheLimit(exclude map[string]struct{}) (int64, int, error) {
+	if s.cacheMax <= 0 {
+		return 0, 0, nil
+	}
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+
+	usage, err := s.cacheUsageBytesLocked()
+	if err != nil {
+		return 0, 0, err
+	}
+	if usage+s.reservedBytes <= s.cacheMax {
+		return 0, 0, nil
+	}
+	target := usage + s.reservedBytes - s.cacheMax
+	return s.pruneByReclaimTargetLocked(target, exclude)
+}
+
+func (s *Service) pruneByReclaimTarget(target int64, exclude map[string]struct{}) (int64, int, error) {
+	if target <= 0 {
+		return 0, 0, nil
+	}
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	return s.pruneByReclaimTargetLocked(target, exclude)
+}
+
+func (s *Service) pruneByReclaimTargetLocked(target int64, exclude map[string]struct{}) (int64, int, error) {
+	files, _, err := s.scanLayerFiles()
+	if err != nil {
+		return 0, 0, err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.Before(files[j].modTime)
+	})
+
+	var reclaimed int64
+	evicted := 0
+	removed := false
+	for _, f := range files {
+		if reclaimed >= target {
+			break
+		}
+		if exclude != nil {
+			if _, ok := exclude[f.digest]; ok {
+				continue
+			}
+		}
+		if err := os.Remove(f.path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return reclaimed, evicted, err
+		}
+		reclaimed += f.size
+		evicted++
+		removed = true
+	}
+	if removed && s.evictReport != nil {
+		s.evictReport()
+	}
+	return reclaimed, evicted, nil
+}
+
+func (s *Service) cacheUsageBytes() (int64, error) {
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	return s.cacheUsageBytesLocked()
+}
+
+func (s *Service) cacheUsageBytesLocked() (int64, error) {
+	_, total, err := s.scanLayerFiles()
+	return total, err
+}
+
+func (s *Service) scanLayerFiles() ([]cachedLayerFile, int64, error) {
+	out := make([]cachedLayerFile, 0, 256)
+	var total int64
+	err := filepath.WalkDir(s.layersDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".afslyr") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(s.layersDir, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(rel, string(os.PathSeparator))
+		if len(parts) != 2 {
+			return nil
+		}
+		algo := strings.TrimSpace(parts[0])
+		hexName := strings.TrimSuffix(parts[1], ".afslyr")
+		if algo == "" || hexName == "" {
+			return nil
+		}
+		digest := strings.ToLower(algo) + ":" + hexName
+		out = append(out, cachedLayerFile{
+			digest:  digest,
+			path:    path,
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		})
+		total += info.Size()
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
+func defaultCacheLimitFromFS(dir string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	free := int64(st.Bavail) * int64(st.Bsize)
+	if free <= 0 {
+		return 0, fmt.Errorf("free space is zero")
+	}
+	limit := free * defaultCacheRatio / 100
+	if limit <= 0 {
+		return 0, fmt.Errorf("computed limit is zero")
+	}
+	return limit, nil
+}
+
+func touchFile(path string) error {
+	now := time.Now()
+	return os.Chtimes(path, now, now)
 }
 
 func (s *Service) layerPath(digest string) (string, error) {
