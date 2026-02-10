@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -42,12 +43,13 @@ type Config struct {
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountBinary      string
-	runcBinary       string
-	useSudo          bool
-	tarChunk         int
-	defaultDiscovery string
-	tempDir          string
+	mountBinary       string
+	runcBinary        string
+	useSudo           bool
+	tarChunk          int
+	defaultDiscovery  string
+	tempDir           string
+	runningContainers atomic.Int64
 }
 
 func NewService(cfg Config) *Service {
@@ -164,6 +166,12 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	return stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Done{Done: &afsletpb.Done{}}})
 }
 
+func (s *Service) GetRuntimeStatus(ctx context.Context, req *afsletpb.GetRuntimeStatusRequest) (*afsletpb.GetRuntimeStatusResponse, error) {
+	return &afsletpb.GetRuntimeStatusResponse{
+		RunningContainers: s.runningContainers.Load(),
+	}, nil
+}
+
 type commandResult struct {
 	Success  bool
 	ExitCode int32
@@ -277,6 +285,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		_ = tryForceUmount(sess.mountpoint)
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
 	}
+	s.runningContainers.Add(1)
+	defer s.runningContainers.Add(-1)
 	runErr := runcCmd.Wait()
 
 	_ = terminateProcess(mountCmd, mountWait)

@@ -6,6 +6,7 @@ option go_package = "github.com/reyoung/afs/pkg/afsletpb;afsletpb";
 
 service Afslet {
   rpc Execute(stream ExecuteRequest) returns (stream ExecuteResponse);
+  rpc GetRuntimeStatus(GetRuntimeStatusRequest) returns (GetRuntimeStatusResponse);
 }
 
 message ExecuteRequest {
@@ -84,3 +85,9 @@ message TarChunk {
 }
 
 message Done {}
+
+message GetRuntimeStatusRequest {}
+
+message GetRuntimeStatusResponse {
+  int64 running_containers = 1;
+}

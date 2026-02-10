@@ -1,9 +1,12 @@
 package afslet
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/reyoung/afs/pkg/afsletpb"
 )
 
 func TestNormalizeImageAndTag(t *testing.T) {
@@ -83,5 +86,20 @@ func TestNewSessionRespectsTempDir(t *testing.T) {
 
 	if !strings.HasPrefix(sess.root, filepath.Clean(base)+string(filepath.Separator)) {
 		t.Fatalf("session root=%q should be under %q", sess.root, base)
+	}
+}
+
+func TestGetRuntimeStatus(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Config{})
+	svc.runningContainers.Store(3)
+
+	resp, err := svc.GetRuntimeStatus(context.Background(), &afsletpb.GetRuntimeStatusRequest{})
+	if err != nil {
+		t.Fatalf("GetRuntimeStatus() error: %v", err)
+	}
+	if resp.GetRunningContainers() != 3 {
+		t.Fatalf("running_containers=%d, want 3", resp.GetRunningContainers())
 	}
 }

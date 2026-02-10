@@ -22,6 +22,7 @@ import (
 
 type config struct {
 	addr            string
+	statusOnly      bool
 	dir             string
 	image           string
 	tag             string
@@ -49,6 +50,7 @@ func main() {
 func parseFlags() (config, []string) {
 	cfg := config{}
 	flag.StringVar(&cfg.addr, "addr", "127.0.0.1:61051", "afslet gRPC address")
+	flag.BoolVar(&cfg.statusOnly, "status", false, "query runtime status only (running containers)")
 	flag.StringVar(&cfg.dir, "dir", "", "directory to upload as extra-dir")
 	flag.StringVar(&cfg.image, "image", "", "image name")
 	flag.StringVar(&cfg.tag, "tag", "", "image tag")
@@ -67,6 +69,12 @@ func parseFlags() (config, []string) {
 	flag.Parse()
 
 	cmdArgs := flag.Args()
+	if cfg.statusOnly {
+		if cfg.grpcTimeout <= 0 {
+			log.Fatal("-grpc-timeout must be > 0")
+		}
+		return cfg, nil
+	}
 	if strings.TrimSpace(cfg.dir) == "" {
 		log.Fatal("-dir is required")
 	}
@@ -118,6 +126,14 @@ func run(cfg config, cmdArgs []string) error {
 	defer conn.Close()
 
 	client := afsletpb.NewAfsletClient(conn)
+	if cfg.statusOnly {
+		resp, err := client.GetRuntimeStatus(ctx, &afsletpb.GetRuntimeStatusRequest{})
+		if err != nil {
+			return fmt.Errorf("get runtime status: %w", err)
+		}
+		fmt.Printf("running_containers=%d\n", resp.GetRunningContainers())
+		return nil
+	}
 	stream, err := client.Execute(ctx)
 	if err != nil {
 		return fmt.Errorf("execute stream: %w", err)

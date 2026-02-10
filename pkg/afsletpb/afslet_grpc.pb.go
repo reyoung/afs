@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Afslet_Execute_FullMethodName = "/afsletpb.Afslet/Execute"
+	Afslet_Execute_FullMethodName          = "/afsletpb.Afslet/Execute"
+	Afslet_GetRuntimeStatus_FullMethodName = "/afsletpb.Afslet/GetRuntimeStatus"
 )
 
 // AfsletClient is the client API for Afslet service.
@@ -27,6 +28,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AfsletClient interface {
 	Execute(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecuteRequest, ExecuteResponse], error)
+	GetRuntimeStatus(ctx context.Context, in *GetRuntimeStatusRequest, opts ...grpc.CallOption) (*GetRuntimeStatusResponse, error)
 }
 
 type afsletClient struct {
@@ -50,11 +52,22 @@ func (c *afsletClient) Execute(ctx context.Context, opts ...grpc.CallOption) (gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Afslet_ExecuteClient = grpc.BidiStreamingClient[ExecuteRequest, ExecuteResponse]
 
+func (c *afsletClient) GetRuntimeStatus(ctx context.Context, in *GetRuntimeStatusRequest, opts ...grpc.CallOption) (*GetRuntimeStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRuntimeStatusResponse)
+	err := c.cc.Invoke(ctx, Afslet_GetRuntimeStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AfsletServer is the server API for Afslet service.
 // All implementations must embed UnimplementedAfsletServer
 // for forward compatibility.
 type AfsletServer interface {
 	Execute(grpc.BidiStreamingServer[ExecuteRequest, ExecuteResponse]) error
+	GetRuntimeStatus(context.Context, *GetRuntimeStatusRequest) (*GetRuntimeStatusResponse, error)
 	mustEmbedUnimplementedAfsletServer()
 }
 
@@ -67,6 +80,9 @@ type UnimplementedAfsletServer struct{}
 
 func (UnimplementedAfsletServer) Execute(grpc.BidiStreamingServer[ExecuteRequest, ExecuteResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Execute not implemented")
+}
+func (UnimplementedAfsletServer) GetRuntimeStatus(context.Context, *GetRuntimeStatusRequest) (*GetRuntimeStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRuntimeStatus not implemented")
 }
 func (UnimplementedAfsletServer) mustEmbedUnimplementedAfsletServer() {}
 func (UnimplementedAfsletServer) testEmbeddedByValue()                {}
@@ -96,13 +112,36 @@ func _Afslet_Execute_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Afslet_ExecuteServer = grpc.BidiStreamingServer[ExecuteRequest, ExecuteResponse]
 
+func _Afslet_GetRuntimeStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRuntimeStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AfsletServer).GetRuntimeStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Afslet_GetRuntimeStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AfsletServer).GetRuntimeStatus(ctx, req.(*GetRuntimeStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Afslet_ServiceDesc is the grpc.ServiceDesc for Afslet service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Afslet_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "afsletpb.Afslet",
 	HandlerType: (*AfsletServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetRuntimeStatus",
+			Handler:    _Afslet_GetRuntimeStatus_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Execute",
