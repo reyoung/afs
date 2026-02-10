@@ -17,6 +17,8 @@ services:
     restart: unless-stopped
     depends_on:
       - discovery
+    env_file:
+      - .env.layerstore
     volumes:
       - ./dist/linux_amd64:/usr/local/bin:ro
       - layerstore_cache:/var/lib/afs/cache
@@ -32,11 +34,22 @@ services:
         rm -rf /var/lib/apt/lists/*
         IP="$(hostname -i | awk '{print $1}')"
         echo "layerstore listen ip=$$IP"
+        AUTH_ARGS=()
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_1:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_1}=$${LAYERSTORE_AUTH_TOKEN_1}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_2:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_2:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_2}=$${LAYERSTORE_AUTH_TOKEN_2}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_3:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_3:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_3}=$${LAYERSTORE_AUTH_TOKEN_3}")
+        fi
         exec /usr/local/bin/afs_layerstore_grpcd \
           -listen="$$IP:50051" \
           -cache-dir=/var/lib/afs/cache \
           -node-id=layerstore-1 \
-          -discovery-endpoint=discovery:60051
+          -discovery-endpoint=discovery:60051 \
+          "$${AUTH_ARGS[@]}"
     networks:
       - afsnet
 

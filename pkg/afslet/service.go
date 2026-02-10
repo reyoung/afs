@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,6 +37,8 @@ type Config struct {
 	TarChunk         int
 	DefaultDiscovery string
 	TempDir          string
+	LimitCPUCores    int64
+	LimitMemoryMB    int64
 }
 
 type Service struct {
@@ -49,7 +50,12 @@ type Service struct {
 	tarChunk          int
 	defaultDiscovery  string
 	tempDir           string
-	runningContainers atomic.Int64
+	mu                sync.Mutex
+	limitCPUCores     int64
+	limitMemoryMB     int64
+	usedCPUCores      int64
+	usedMemoryMB      int64
+	runningContainers int64
 }
 
 func NewService(cfg Config) *Service {
@@ -60,6 +66,8 @@ func NewService(cfg Config) *Service {
 		tarChunk:         cfg.TarChunk,
 		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
 		tempDir:          strings.TrimSpace(cfg.TempDir),
+		limitCPUCores:    cfg.LimitCPUCores,
+		limitMemoryMB:    cfg.LimitMemoryMB,
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -69,6 +77,12 @@ func NewService(cfg Config) *Service {
 	}
 	if s.tarChunk <= 0 {
 		s.tarChunk = 256 * 1024
+	}
+	if s.limitCPUCores <= 0 {
+		s.limitCPUCores = defaultCPUCores
+	}
+	if s.limitMemoryMB <= 0 {
+		s.limitMemoryMB = defaultMemoryMB
 	}
 	return s
 }
@@ -167,8 +181,24 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 }
 
 func (s *Service) GetRuntimeStatus(ctx context.Context, req *afsletpb.GetRuntimeStatusRequest) (*afsletpb.GetRuntimeStatusResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	availCPU := s.limitCPUCores - s.usedCPUCores
+	if availCPU < 0 {
+		availCPU = 0
+	}
+	availMem := s.limitMemoryMB - s.usedMemoryMB
+	if availMem < 0 {
+		availMem = 0
+	}
 	return &afsletpb.GetRuntimeStatusResponse{
-		RunningContainers: s.runningContainers.Load(),
+		RunningContainers: s.runningContainers,
+		LimitCpuCores:     s.limitCPUCores,
+		LimitMemoryMb:     s.limitMemoryMB,
+		UsedCpuCores:      s.usedCPUCores,
+		UsedMemoryMb:      s.usedMemoryMB,
+		AvailableCpuCores: availCPU,
+		AvailableMemoryMb: availMem,
 	}, nil
 }
 
@@ -176,6 +206,47 @@ type commandResult struct {
 	Success  bool
 	ExitCode int32
 	Err      string
+}
+
+func (s *Service) addRunningContainers(delta int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runningContainers += delta
+	if s.runningContainers < 0 {
+		s.runningContainers = 0
+	}
+}
+
+func (s *Service) reserveResources(cpu int64, memoryMB int64) (func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cpu > s.limitCPUCores {
+		return nil, fmt.Errorf("requested cpu=%d exceeds limit=%d", cpu, s.limitCPUCores)
+	}
+	if memoryMB > s.limitMemoryMB {
+		return nil, fmt.Errorf("requested memory_mb=%d exceeds limit=%d", memoryMB, s.limitMemoryMB)
+	}
+	remainCPU := s.limitCPUCores - s.usedCPUCores
+	remainMem := s.limitMemoryMB - s.usedMemoryMB
+	if cpu > remainCPU || memoryMB > remainMem {
+		return nil, fmt.Errorf("insufficient resources: request cpu=%d memory_mb=%d, available cpu=%d memory_mb=%d", cpu, memoryMB, remainCPU, remainMem)
+	}
+
+	s.usedCPUCores += cpu
+	s.usedMemoryMB += memoryMB
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.usedCPUCores -= cpu
+		if s.usedCPUCores < 0 {
+			s.usedCPUCores = 0
+		}
+		s.usedMemoryMB -= memoryMB
+		if s.usedMemoryMB < 0 {
+			s.usedMemoryMB = 0
+		}
+	}, nil
 }
 
 func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb.StartRequest, logf func(string, string)) commandResult {
@@ -188,6 +259,22 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if len(start.GetCommand()) == 0 {
 		return commandResult{Success: false, ExitCode: -1, Err: "start.command is required"}
+	}
+	cpu := start.GetCpuCores()
+	if cpu <= 0 {
+		return commandResult{Success: false, ExitCode: -1, Err: "start.cpu_cores must be > 0"}
+	}
+	memory := start.GetMemoryMb()
+	if memory <= 0 {
+		return commandResult{Success: false, ExitCode: -1, Err: "start.memory_mb must be > 0"}
+	}
+	release, reserveErr := s.reserveResources(cpu, memory)
+	if reserveErr != nil {
+		return commandResult{Success: false, ExitCode: -1, Err: reserveErr.Error()}
+	}
+	defer release()
+	if logf != nil {
+		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
 	}
 
 	mountArgs := []string{
@@ -251,14 +338,6 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		logf("mount", "mountpoint is ready")
 	}
 
-	cpu := start.GetCpuCores()
-	if cpu <= 0 {
-		cpu = defaultCPUCores
-	}
-	memory := start.GetMemoryMb()
-	if memory <= 0 {
-		memory = defaultMemoryMB
-	}
 	timeout := defaultTimeout
 	if start.GetTimeoutMs() > 0 {
 		timeout = time.Duration(start.GetTimeoutMs()) * time.Millisecond
@@ -285,8 +364,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		_ = tryForceUmount(sess.mountpoint)
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
 	}
-	s.runningContainers.Add(1)
-	defer s.runningContainers.Add(-1)
+	s.addRunningContainers(1)
+	defer s.addRunningContainers(-1)
 	runErr := runcCmd.Wait()
 
 	_ = terminateProcess(mountCmd, mountWait)
@@ -597,17 +676,15 @@ func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.D
 	deadline := time.Now().Add(timeout)
 	lastProgress := time.Time{}
 	for {
-		select {
-		case err := <-mountWait:
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("afs_mount exited before mount became ready")
-		default:
+		if err, exited := tryReadMountWait(mountWait); exited {
+			return err
 		}
 		mounted, err := isMounted(mountpoint)
 		if err == nil && mounted {
 			return nil
+		}
+		if err, exited := tryReadMountWait(mountWait); exited {
+			return err
 		}
 		if onProgress != nil && (lastProgress.IsZero() || time.Since(lastProgress) >= 2*time.Second) {
 			lastProgress = time.Now()
@@ -622,7 +699,30 @@ func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.D
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for mount")
 		}
-		time.Sleep(200 * time.Millisecond)
+		sleep := 200 * time.Millisecond
+		if remaining := time.Until(deadline); remaining > 0 && remaining < sleep {
+			sleep = remaining
+		}
+		select {
+		case err := <-mountWait:
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("afs_mount exited before mount became ready")
+		case <-time.After(sleep):
+		}
+	}
+}
+
+func tryReadMountWait(mountWait <-chan error) (error, bool) {
+	select {
+	case err := <-mountWait:
+		if err != nil {
+			return err, true
+		}
+		return fmt.Errorf("afs_mount exited before mount became ready"), true
+	default:
+		return nil, false
 	}
 }
 
@@ -700,13 +800,33 @@ func terminateProcess(cmd *exec.Cmd, waitCh <-chan error) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case err := <-waitCh:
+		return err
+	default:
+	}
+	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		return nil
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
 	select {
 	case err := <-waitCh:
 		return err
 	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		return <-waitCh
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			return nil
+		}
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		select {
+		case err := <-waitCh:
+			return err
+		case <-time.After(time.Second):
+			return nil
+		}
 	}
 }
 

@@ -131,7 +131,15 @@ func run(cfg config, cmdArgs []string) error {
 		if err != nil {
 			return fmt.Errorf("get runtime status: %w", err)
 		}
-		fmt.Printf("running_containers=%d\n", resp.GetRunningContainers())
+		fmt.Printf("running_containers=%d limit_cpu_cores=%d limit_memory_mb=%d used_cpu_cores=%d used_memory_mb=%d available_cpu_cores=%d available_memory_mb=%d\n",
+			resp.GetRunningContainers(),
+			resp.GetLimitCpuCores(),
+			resp.GetLimitMemoryMb(),
+			resp.GetUsedCpuCores(),
+			resp.GetUsedMemoryMb(),
+			resp.GetAvailableCpuCores(),
+			resp.GetAvailableMemoryMb(),
+		)
 		return nil
 	}
 	stream, err := client.Execute(ctx)

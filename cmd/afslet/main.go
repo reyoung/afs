@@ -25,6 +25,8 @@ func main() {
 	var gracefulTimeout time.Duration
 	var defaultDiscoveryAddr string
 	var tempDir string
+	var limitCPUCores int64
+	var limitMemoryMB int64
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -34,6 +36,8 @@ func main() {
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
 	flag.StringVar(&defaultDiscoveryAddr, "discovery-addr", "", "default discovery address used when request does not specify one")
 	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
+	flag.Int64Var(&limitCPUCores, "limit-cpu", 1, "total allocatable CPU cores for afslet admission control")
+	flag.Int64Var(&limitMemoryMB, "limit-memory-mb", 256, "total allocatable memory (MB) for afslet admission control")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -48,6 +52,8 @@ func main() {
 		TarChunk:         tarChunk,
 		DefaultDiscovery: defaultDiscoveryAddr,
 		TempDir:          tempDir,
+		LimitCPUCores:    limitCPUCores,
+		LimitMemoryMB:    limitMemoryMB,
 	})
 
 	grpcServer := grpc.NewServer()

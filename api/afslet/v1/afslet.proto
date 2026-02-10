@@ -90,4 +90,10 @@ message GetRuntimeStatusRequest {}
 
 message GetRuntimeStatusResponse {
   int64 running_containers = 1;
+  int64 limit_cpu_cores = 2;
+  int64 limit_memory_mb = 3;
+  int64 used_cpu_cores = 4;
+  int64 used_memory_mb = 5;
+  int64 available_cpu_cores = 6;
+  int64 available_memory_mb = 7;
 }
