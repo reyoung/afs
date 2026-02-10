@@ -33,7 +33,6 @@ type config struct {
 	mountpoint      string
 	debug           bool
 	mountProcDev    bool
-	mapOwnerCurrent bool
 	discoveryAddr   string
 	grpcTimeout     time.Duration
 	grpcMaxChunk    int
@@ -82,7 +81,6 @@ func parseFlags() config {
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "mount target directory")
 	flag.BoolVar(&cfg.debug, "debug", false, "enable go-fuse debug logs")
 	flag.BoolVar(&cfg.mountProcDev, "mount-proc-dev", true, "mount /proc and /dev into mounted rootfs (linux only)")
-	flag.BoolVar(&cfg.mapOwnerCurrent, "map-owner-current-user", true, "map mounted file uid/gid to current user")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
 	flag.IntVar(&cfg.grpcMaxChunk, "grpc-max-chunk", 1<<20, "max bytes per gRPC read call")
@@ -195,7 +193,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 		if err != nil {
 			return fmt.Errorf("open layer %s: %w", digest, err)
 		}
-		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, cfg.debug, cfg.fuseTempDir, uint32(os.Getuid()), uint32(os.Getgid()), cfg.mapOwnerCurrent)
+		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, cfg.debug, cfg.fuseTempDir)
 		if err != nil {
 			return fmt.Errorf("mount layer %s: %w", digest, err)
 		}
@@ -557,8 +555,8 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string, ownerUID uint32, ownerGID uint32, mapOwnerCurrent bool) (*fuse.Server, error) {
-	root := layerfuse.NewRootWithTempDirAndOwner(reader, tempDir, ownerUID, ownerGID, mapOwnerCurrent)
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string) (*fuse.Server, error) {
+	root := layerfuse.NewRootWithTempDir(reader, tempDir)
 	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{MountOptions: fuse.MountOptions{Debug: debug, FsName: fmt.Sprintf("afslyr:%s", source), Name: "afslyr", Options: []string{"ro", "exec"}}})
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
