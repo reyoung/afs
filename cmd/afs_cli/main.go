@@ -36,6 +36,8 @@ type config struct {
 	platformOS      string
 	platformArch    string
 	platformVariant string
+	proxyMaxRetries int64
+	proxyBackoff    time.Duration
 	chunkSize       int
 	grpcTimeout     time.Duration
 }
@@ -64,6 +66,8 @@ func parseFlags() (config, []string) {
 	flag.StringVar(&cfg.platformOS, "platform-os", "linux", "platform os")
 	flag.StringVar(&cfg.platformArch, "platform-arch", "amd64", "platform arch")
 	flag.StringVar(&cfg.platformVariant, "platform-variant", "", "platform variant")
+	flag.Int64Var(&cfg.proxyMaxRetries, "proxy-dispatch-max-retries", 0, "dispatch retry count for afs_proxy (0 means infinite retries)")
+	flag.DurationVar(&cfg.proxyBackoff, "proxy-dispatch-backoff", 50*time.Millisecond, "dispatch retry backoff for afs_proxy")
 	flag.IntVar(&cfg.chunkSize, "chunk-size", 256*1024, "upload chunk size bytes")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 20*time.Minute, "overall grpc timeout")
 	flag.Parse()
@@ -95,6 +99,12 @@ func parseFlags() (config, []string) {
 	}
 	if cfg.chunkSize <= 0 {
 		log.Fatal("-chunk-size must be > 0")
+	}
+	if cfg.proxyMaxRetries < 0 {
+		log.Fatal("-proxy-dispatch-max-retries must be >= 0")
+	}
+	if cfg.proxyBackoff < 0 {
+		log.Fatal("-proxy-dispatch-backoff must be >= 0")
 	}
 	if cfg.grpcTimeout <= 0 {
 		log.Fatal("-grpc-timeout must be > 0")
@@ -162,18 +172,20 @@ func run(cfg config, cmdArgs []string) error {
 
 func sendStart(stream afsletpb.Afslet_ExecuteClient, cfg config, cmdArgs []string) error {
 	req := &afsletpb.ExecuteRequest{Payload: &afsletpb.ExecuteRequest_Start{Start: &afsletpb.StartRequest{
-		Image:           cfg.image,
-		Tag:             cfg.tag,
-		Command:         cmdArgs,
-		CpuCores:        cfg.cpu,
-		MemoryMb:        cfg.memoryMB,
-		TimeoutMs:       cfg.timeout.Milliseconds(),
-		DiscoveryAddr:   cfg.discoveryAddr,
-		ForcePull:       cfg.forcePull,
-		NodeId:          cfg.nodeID,
-		PlatformOs:      cfg.platformOS,
-		PlatformArch:    cfg.platformArch,
-		PlatformVariant: cfg.platformVariant,
+		Image:                   cfg.image,
+		Tag:                     cfg.tag,
+		Command:                 cmdArgs,
+		CpuCores:                cfg.cpu,
+		MemoryMb:                cfg.memoryMB,
+		TimeoutMs:               cfg.timeout.Milliseconds(),
+		DiscoveryAddr:           cfg.discoveryAddr,
+		ForcePull:               cfg.forcePull,
+		NodeId:                  cfg.nodeID,
+		PlatformOs:              cfg.platformOS,
+		PlatformArch:            cfg.platformArch,
+		PlatformVariant:         cfg.platformVariant,
+		ProxyDispatchMaxRetries: cfg.proxyMaxRetries,
+		ProxyDispatchBackoffMs:  cfg.proxyBackoff.Milliseconds(),
 	}}}
 	if err := stream.Send(req); err != nil {
 		return fmt.Errorf("send start: %w", err)
@@ -296,6 +308,8 @@ func receiveResponses(stream afsletpb.Afslet_ExecuteClient, outPath string) erro
 			return fmt.Errorf("receive response: %w", err)
 		}
 		switch p := resp.GetPayload().(type) {
+		case *afsletpb.ExecuteResponse_Accepted:
+			log.Printf("[accepted] %v", p.Accepted.GetAccepted())
 		case *afsletpb.ExecuteResponse_Log:
 			log.Printf("[%s] %s", p.Log.GetSource(), p.Log.GetMessage())
 		case *afsletpb.ExecuteResponse_Result:

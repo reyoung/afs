@@ -92,6 +92,29 @@ services:
     networks:
       - afsnet
 
+  afs_proxy:
+    image: ubuntu:24.04
+    restart: unless-stopped
+    depends_on:
+      - afslet
+    volumes:
+      - ./dist/linux_amd64:/usr/local/bin:ro
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        exec /usr/local/bin/afs_proxy \
+          -listen=:62051 \
+          -http-listen=:62052 \
+          -afslet-target=afslet:61051 \
+          -proxy-peers-target=afs_proxy:62052 \
+          -dispatch-backoff=50ms
+    ports:
+      - "62051:62051"
+      - "62052:62052"
+    networks:
+      - afsnet
+
 networks:
   afsnet:
     driver: bridge

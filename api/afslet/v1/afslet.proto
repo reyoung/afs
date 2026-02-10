@@ -31,6 +31,8 @@ message StartRequest {
   string platform_os = 10;
   string platform_arch = 11;
   string platform_variant = 12;
+  int64 proxy_dispatch_max_retries = 13;
+  int64 proxy_dispatch_backoff_ms = 14;
 }
 
 message FileEntryBegin {
@@ -62,7 +64,12 @@ message ExecuteResponse {
     TarHeader tar_header = 3;
     TarChunk tar_chunk = 4;
     Done done = 5;
+    Accepted accepted = 6;
   }
+}
+
+message Accepted {
+  bool accepted = 1;
 }
 
 message LogMessage {
