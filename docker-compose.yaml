@@ -1,0 +1,81 @@
+services:
+  discovery:
+    image: ubuntu:24.04
+    container_name: afs-discovery
+    restart: unless-stopped
+    volumes:
+      - ./dist/linux_amd64:/usr/local/bin:ro
+    command: ["/usr/local/bin/afs_discovery_grpcd", "-listen=:60051"]
+    ports:
+      - "60051:60051"
+    networks:
+      - afsnet
+
+  layerstore:
+    image: ubuntu:24.04
+    container_name: afs-layerstore
+    restart: unless-stopped
+    depends_on:
+      - discovery
+    volumes:
+      - ./dist/linux_amd64:/usr/local/bin:ro
+      - layerstore_cache:/var/lib/afs/cache
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        IP="$(hostname -i | awk '{print $1}')"
+        exec /usr/local/bin/afs_layerstore_grpcd \
+          -listen="$${IP}:50051" \
+          -cache-dir=/var/lib/afs/cache \
+          -node-id=layerstore-1 \
+          -discovery-endpoint=discovery:60051
+    networks:
+      - afsnet
+
+  afslet:
+    image: ubuntu:24.04
+    container_name: afs-afslet
+    restart: unless-stopped
+    depends_on:
+      - discovery
+      - layerstore
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/fuse:/dev/fuse
+    volumes:
+      - ./dist/linux_amd64:/usr/local/bin:ro
+      - afslet_tmp:/var/lib/afslet/tmp
+      - afslet_work:/var/lib/afslet/work
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    ports:
+      - "61051:61051"
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        apt-get update
+        apt-get install -y --no-install-recommends runc fuse3 fuse-overlayfs ca-certificates
+        rm -rf /var/lib/apt/lists/*
+        exec /usr/local/bin/afslet \
+          -listen=:61051 \
+          -mount-binary=/usr/local/bin/afs_mount \
+          -runc-binary=/usr/local/bin/afs_runc \
+          -discovery-addr=discovery:60051 \
+          -temp-dir=/var/lib/afslet/tmp \
+          -graceful-timeout=15s
+    networks:
+      - afsnet
+
+networks:
+  afsnet:
+    driver: bridge
+
+volumes:
+  layerstore_cache:
+  afslet_tmp:
+  afslet_work:
