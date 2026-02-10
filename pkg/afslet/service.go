@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -135,8 +136,14 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	if err := s.sendLog(stream, "session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir)); err != nil {
 		return err
 	}
+	if err := s.sendLog(stream, "request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs())); err != nil {
+		return err
+	}
 
-	runRes := s.runCommand(ctx, sess, start)
+	logf := func(source string, message string) {
+		_ = s.sendLog(stream, source, message)
+	}
+	runRes := s.runCommand(ctx, sess, start, logf)
 	if err := s.sendResult(stream, runRes); err != nil {
 		return err
 	}
@@ -157,8 +164,12 @@ type commandResult struct {
 	Err      string
 }
 
-func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb.StartRequest) commandResult {
-	if strings.TrimSpace(start.GetImage()) == "" {
+func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb.StartRequest, logf func(string, string)) commandResult {
+	image, tag, normErr := normalizeImageAndTag(start.GetImage(), start.GetTag())
+	if normErr != nil {
+		return commandResult{Success: false, ExitCode: -1, Err: normErr.Error()}
+	}
+	if strings.TrimSpace(image) == "" {
 		return commandResult{Success: false, ExitCode: -1, Err: "start.image is required"}
 	}
 	if len(start.GetCommand()) == 0 {
@@ -170,10 +181,10 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		"-work-dir", sess.workDir,
 		"-extra-dir", sess.extraDir,
 		"-mount-proc-dev=false",
-		"-image", start.GetImage(),
+		"-image", image,
 	}
-	if strings.TrimSpace(start.GetTag()) != "" {
-		mountArgs = append(mountArgs, "-tag", start.GetTag())
+	if strings.TrimSpace(tag) != "" {
+		mountArgs = append(mountArgs, "-tag", tag)
 	}
 	if strings.TrimSpace(start.GetDiscoveryAddr()) != "" {
 		mountArgs = append(mountArgs, "-discovery-addr", start.GetDiscoveryAddr())
@@ -195,18 +206,25 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 
 	mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)
-	mountStdout := &strings.Builder{}
-	mountStderr := &strings.Builder{}
+	mountStdout := newProcessLogWriter("mount:stdout", logf)
+	mountStderr := newProcessLogWriter("mount:stderr", logf)
 	mountCmd.Stdout = mountStdout
 	mountCmd.Stderr = mountStderr
 	if err := mountCmd.Start(); err != nil {
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_mount: %v", err)}
 	}
+	if logf != nil {
+		logf("mount", fmt.Sprintf("started: %s %s", s.mountBinary, strings.Join(mountArgs, " ")))
+	}
 
 	mountWait := make(chan error, 1)
 	go func() { mountWait <- mountCmd.Wait() }()
 
-	readyErr := waitForMountReady(sess.mountpoint, mountWait, 120*time.Second)
+	readyErr := waitForMountReady(sess.mountpoint, mountWait, 120*time.Second, func(msg string) {
+		if logf != nil {
+			logf("mount", msg)
+		}
+	})
 	if readyErr != nil {
 		_ = terminateProcess(mountCmd, mountWait)
 		combined := strings.TrimSpace(mountStdout.String() + "\n" + mountStderr.String())
@@ -214,6 +232,9 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 			readyErr = fmt.Errorf("%w: %s", readyErr, combined)
 		}
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("mount not ready: %v", readyErr)}
+	}
+	if logf != nil {
+		logf("mount", "mountpoint is ready")
 	}
 
 	cpu := start.GetCpuCores()
@@ -238,10 +259,30 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	runcArgs = append(runcArgs, start.GetCommand()...)
 	runcCmd := s.newCommandContext(ctx, s.runcBinary, runcArgs...)
-	out, runErr := runcCmd.CombinedOutput()
+	runcStdout := newProcessLogWriter("runc:stdout", logf)
+	runcStderr := newProcessLogWriter("runc:stderr", logf)
+	runcCmd.Stdout = runcStdout
+	runcCmd.Stderr = runcStderr
+	if logf != nil {
+		logf("runc", fmt.Sprintf("running: %s %s", s.runcBinary, strings.Join(runcArgs, " ")))
+	}
+	if err := runcCmd.Start(); err != nil {
+		_ = terminateProcess(mountCmd, mountWait)
+		_ = tryForceUmount(sess.mountpoint)
+		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
+	}
+	runErr := runcCmd.Wait()
 
 	_ = terminateProcess(mountCmd, mountWait)
-	_ = tryForceUmount(sess.mountpoint)
+	if umErr := tryForceUmount(sess.mountpoint); umErr != nil {
+		if logf != nil {
+			logf("cleanup", fmt.Sprintf("umount warning: %v", umErr))
+		}
+	} else {
+		if logf != nil {
+			logf("cleanup", "mountpoint unmounted")
+		}
+	}
 
 	if runErr != nil {
 		exitCode := int32(1)
@@ -249,13 +290,19 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		if errors.As(runErr, &ex) {
 			exitCode = int32(ex.ExitCode())
 		}
-		msg := strings.TrimSpace(string(out))
+		msg := strings.TrimSpace(runcStdout.String() + "\n" + runcStderr.String())
 		if msg == "" {
 			msg = runErr.Error()
 		}
+		if logf != nil {
+			logf("runc", fmt.Sprintf("failed exit=%d", exitCode))
+		}
 		return commandResult{Success: false, ExitCode: exitCode, Err: msg}
 	}
-	return commandResult{Success: true, ExitCode: 0, Err: strings.TrimSpace(string(out))}
+	if logf != nil {
+		logf("runc", "completed successfully")
+	}
+	return commandResult{Success: true, ExitCode: 0, Err: strings.TrimSpace(runcStdout.String())}
 }
 
 func (s *Service) sendLog(stream afsletpb.Afslet_ExecuteServer, source string, message string) error {
@@ -524,8 +571,9 @@ func (s *Service) newCommandContext(ctx context.Context, binary string, args ...
 	return exec.CommandContext(ctx, binary, args...)
 }
 
-func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.Duration) error {
+func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.Duration, onProgress func(string)) error {
 	deadline := time.Now().Add(timeout)
+	lastProgress := time.Time{}
 	for {
 		select {
 		case err := <-mountWait:
@@ -539,11 +587,63 @@ func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.D
 		if err == nil && mounted {
 			return nil
 		}
+		if onProgress != nil && (lastProgress.IsZero() || time.Since(lastProgress) >= 2*time.Second) {
+			lastProgress = time.Now()
+			info := "pending"
+			if st, stErr := os.Stat(mountpoint); stErr == nil {
+				info = fmt.Sprintf("dir-mode=%o", st.Mode().Perm())
+			} else {
+				info = fmt.Sprintf("stat-err=%v", stErr)
+			}
+			onProgress(fmt.Sprintf("waiting for mountpoint %s ... (%s)", mountpoint, info))
+		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for mount")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+type processLogWriter struct {
+	mu     sync.Mutex
+	source string
+	logf   func(string, string)
+	buf    strings.Builder
+	line   strings.Builder
+}
+
+func newProcessLogWriter(source string, logf func(string, string)) *processLogWriter {
+	return &processLogWriter{source: source, logf: logf}
+}
+
+func (w *processLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, _ = w.buf.Write(p)
+	for _, b := range p {
+		if b == '\n' {
+			if w.logf != nil {
+				w.logf(w.source, w.line.String())
+			}
+			w.line.Reset()
+			continue
+		}
+		_ = w.line.WriteByte(b)
+	}
+	return len(p), nil
+}
+
+func (w *processLogWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := w.buf.String()
+	if w.line.Len() > 0 {
+		if out != "" && !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		out += w.line.String()
+	}
+	return strings.TrimSpace(out)
 }
 
 func isMounted(mountpoint string) (bool, error) {
@@ -598,4 +698,33 @@ func tryForceUmount(mountpoint string) error {
 		return fmt.Errorf("umount %s: %s", mountpoint, text)
 	}
 	return nil
+}
+
+func normalizeImageAndTag(image string, tag string) (string, string, error) {
+	image = strings.TrimSpace(image)
+	tag = strings.TrimSpace(tag)
+	if image == "" {
+		return "", "", fmt.Errorf("start.image is required")
+	}
+	base, detected := splitImageAndTag(image)
+	switch {
+	case tag == "" && detected != "":
+		return base, detected, nil
+	case tag != "" && detected != "":
+		if tag != detected {
+			return "", "", fmt.Errorf("image tag mismatch: image=%q tag=%q", detected, tag)
+		}
+		return base, tag, nil
+	default:
+		return image, tag, nil
+	}
+}
+
+func splitImageAndTag(image string) (string, string) {
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon > lastSlash {
+		return image[:lastColon], image[lastColon+1:]
+	}
+	return image, ""
 }
