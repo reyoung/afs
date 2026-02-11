@@ -24,6 +24,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/reyoung/afs/pkg/afsletpb"
+	"github.com/reyoung/afs/pkg/afsproxypb"
+	"github.com/reyoung/afs/pkg/discoverypb"
 )
 
 const (
@@ -41,6 +43,7 @@ var (
 type Config struct {
 	AfsletTarget      string
 	ProxyPeersTarget  string
+	DiscoveryTarget   string
 	NodeID            string
 	DialTimeout       time.Duration
 	StatusTimeout     time.Duration
@@ -50,9 +53,11 @@ type Config struct {
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
+	afsproxypb.UnimplementedAfsProxyServer
 
 	afsletTarget      string
 	proxyPeersTarget  string
+	discoveryTarget   string
 	nodeID            string
 	dialTimeout       time.Duration
 	statusTimeout     time.Duration
@@ -90,6 +95,7 @@ func NewService(cfg Config) *Service {
 	s := &Service{
 		afsletTarget:      strings.TrimSpace(cfg.AfsletTarget),
 		proxyPeersTarget:  strings.TrimSpace(cfg.ProxyPeersTarget),
+		discoveryTarget:   strings.TrimSpace(cfg.DiscoveryTarget),
 		nodeID:            strings.TrimSpace(cfg.NodeID),
 		dialTimeout:       cfg.DialTimeout,
 		statusTimeout:     cfg.StatusTimeout,
@@ -259,6 +265,94 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 
 func (s *Service) GetRuntimeStatus(ctx context.Context, req *afsletpb.GetRuntimeStatusRequest) (*afsletpb.GetRuntimeStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "afs_proxy does not implement GetRuntimeStatus")
+}
+
+func (s *Service) Status(req *afsproxypb.StatusRequest, stream afsproxypb.AfsProxy_StatusServer) error {
+	includeLayerstores := true
+	includeAfslets := true
+	if req != nil {
+		includeLayerstores = req.GetIncludeLayerstores()
+		includeAfslets = req.GetIncludeAfslets()
+	}
+
+	var layerstoreCount int64
+	var afsletCount int64
+	var afsletReachable int64
+	var totalLayers int64
+
+	if includeLayerstores {
+		services, err := s.fetchLayerstoreServices(stream.Context())
+		if err != nil {
+			_ = stream.Send(&afsproxypb.StatusResponse{
+				Payload: &afsproxypb.StatusResponse_Error{
+					Error: &afsproxypb.StatusError{
+						Source:  "discovery",
+						Message: err.Error(),
+					},
+				},
+			})
+		} else {
+			layerstoreCount = int64(len(services))
+			for _, inst := range services {
+				totalLayers += int64(len(inst.GetLayers()))
+				if err := stream.Send(&afsproxypb.StatusResponse{
+					Payload: &afsproxypb.StatusResponse_Layerstore{Layerstore: inst},
+				}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	if includeAfslets {
+		addresses, err := resolveHostPorts(stream.Context(), s.afsletTarget)
+		if err != nil {
+			_ = stream.Send(&afsproxypb.StatusResponse{
+				Payload: &afsproxypb.StatusResponse_Error{
+					Error: &afsproxypb.StatusError{
+						Source:  "afslet_resolve",
+						Message: err.Error(),
+					},
+				},
+			})
+		} else {
+			afsletCount = int64(len(addresses))
+			for _, addr := range addresses {
+				inst := &afsproxypb.AfsletInstance{Endpoint: addr}
+				st, serr := s.fetchRuntimeStatus(stream.Context(), addr)
+				if serr != nil {
+					inst.Reachable = false
+					inst.Error = serr.Error()
+				} else {
+					afsletReachable++
+					inst.Reachable = true
+					inst.RunningContainers = st.GetRunningContainers()
+					inst.LimitCpuCores = st.GetLimitCpuCores()
+					inst.LimitMemoryMb = st.GetLimitMemoryMb()
+					inst.UsedCpuCores = st.GetUsedCpuCores()
+					inst.UsedMemoryMb = st.GetUsedMemoryMb()
+					inst.AvailableCpuCores = st.GetAvailableCpuCores()
+					inst.AvailableMemoryMb = st.GetAvailableMemoryMb()
+				}
+				if err := stream.Send(&afsproxypb.StatusResponse{
+					Payload: &afsproxypb.StatusResponse_Afslet{Afslet: inst},
+				}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return stream.Send(&afsproxypb.StatusResponse{
+		Payload: &afsproxypb.StatusResponse_Summary{
+			Summary: &afsproxypb.StatusSummary{
+				LayerstoreInstances: layerstoreCount,
+				AfsletInstances:     afsletCount,
+				AfsletReachable:     afsletReachable,
+				TotalLayers:         totalLayers,
+			},
+		},
+	})
 }
 
 func (s *Service) HandleStatusHTTP(w http.ResponseWriter, r *http.Request) {
@@ -444,6 +538,65 @@ func (s *Service) fetchRuntimeStatus(ctx context.Context, addr string) (*afsletp
 	callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
 	defer callCancel()
 	return client.GetRuntimeStatus(callCtx, &afsletpb.GetRuntimeStatusRequest{})
+}
+
+func (s *Service) fetchLayerstoreServices(ctx context.Context) ([]*afsproxypb.LayerstoreInstance, error) {
+	if strings.TrimSpace(s.discoveryTarget) == "" {
+		return nil, fmt.Errorf("discovery target is empty")
+	}
+	targets, err := resolveHostPorts(ctx, s.discoveryTarget)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, target := range targets {
+		dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
+		conn, err := grpc.DialContext(dialCtx, target, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		client := discoverypb.NewServiceDiscoveryClient(conn)
+		callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
+		resp, err := client.FindImage(callCtx, &discoverypb.FindImageRequest{})
+		callCancel()
+		_ = conn.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		out := make([]*afsproxypb.LayerstoreInstance, 0, len(resp.GetServices()))
+		for _, svc := range resp.GetServices() {
+			layerInfos := make([]*afsproxypb.LayerInfo, 0, len(svc.GetLayerStats()))
+			if len(svc.GetLayerStats()) > 0 {
+				for _, ls := range svc.GetLayerStats() {
+					layerInfos = append(layerInfos, &afsproxypb.LayerInfo{
+						Digest:  ls.GetDigest(),
+						AfsSize: ls.GetAfsSize(),
+					})
+				}
+			} else {
+				for _, digest := range svc.GetLayerDigests() {
+					layerInfos = append(layerInfos, &afsproxypb.LayerInfo{Digest: digest})
+				}
+			}
+			out = append(out, &afsproxypb.LayerstoreInstance{
+				NodeId:        svc.GetNodeId(),
+				Endpoint:      svc.GetEndpoint(),
+				LastSeenUnix:  svc.GetLastSeenUnix(),
+				CacheMaxBytes: svc.GetCacheMaxBytes(),
+				Layers:        layerInfos,
+				CachedImages:  append([]string(nil), svc.GetCachedImages()...),
+			})
+		}
+		return out, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no discovery targets available")
 }
 
 func (s *Service) dispatchHandshake(ctx context.Context, backendAddr string, startReq *afsletpb.ExecuteRequest) (*grpc.ClientConn, afsletpb.Afslet_ExecuteClient, *afsletpb.ExecuteResponse, error) {

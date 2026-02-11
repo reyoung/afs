@@ -48,7 +48,7 @@ class ExecuteInput:
     memory_mb: int = 256
     timeout_ms: int = 1000
     discovery_addr: str = ""
-    force_pull: bool = False
+    force_local_fetch: bool = False
     node_id: str = ""
     platform_os: str = "linux"
     platform_arch: str = "amd64"
@@ -68,6 +68,50 @@ class RuntimeStatus:
     used_memory_mb: int
     available_cpu_cores: int
     available_memory_mb: int
+
+
+@dataclass(slots=True)
+class ProxyStatusSummary:
+    layerstore_instances: int
+    afslet_instances: int
+    afslet_reachable: int
+    total_layers: int
+
+
+@dataclass(slots=True)
+class ProxyLayerInfo:
+    digest: str
+    afs_size: int
+
+
+@dataclass(slots=True)
+class ProxyLayerstoreInstance:
+    node_id: str
+    endpoint: str
+    last_seen_unix: int
+    cache_max_bytes: int
+    layers: list[ProxyLayerInfo]
+    cached_images: list[str]
+
+
+@dataclass(slots=True)
+class ProxyAfsletInstance:
+    endpoint: str
+    reachable: bool
+    error: str
+    running_containers: int
+    limit_cpu_cores: int
+    limit_memory_mb: int
+    used_cpu_cores: int
+    used_memory_mb: int
+    available_cpu_cores: int
+    available_memory_mb: int
+
+
+@dataclass(slots=True)
+class ProxyStatusError:
+    source: str
+    message: str
 
 
 @dataclass(slots=True)
@@ -145,4 +189,11 @@ ExecuteEvent = Union[
     TarSymlink,
     TarFilePart,
     DoneEvent,
+]
+
+ProxyStatusEvent = Union[
+    ProxyStatusSummary,
+    ProxyLayerstoreInstance,
+    ProxyAfsletInstance,
+    ProxyStatusError,
 ]

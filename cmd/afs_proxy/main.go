@@ -16,6 +16,7 @@ import (
 
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsproxy"
+	"github.com/reyoung/afs/pkg/afsproxypb"
 )
 
 func main() {
@@ -30,6 +31,7 @@ func main() {
 		defaultBackoff  time.Duration
 		httpPeerTimeout time.Duration
 		gracefulTimeout time.Duration
+		discoveryTarget string
 	)
 
 	flag.StringVar(&grpcListen, "listen", ":62051", "gRPC listen address")
@@ -42,6 +44,7 @@ func main() {
 	flag.DurationVar(&defaultBackoff, "dispatch-backoff", 50*time.Millisecond, "default dispatch retry backoff")
 	flag.DurationVar(&httpPeerTimeout, "peer-http-timeout", 2*time.Second, "peer query timeout for cluster dispatching status")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "graceful shutdown timeout")
+	flag.StringVar(&discoveryTarget, "discovery-target", "", "discovery DNS target host:port for layerstore status query")
 	flag.Parse()
 
 	svc := afsproxy.NewService(afsproxy.Config{
@@ -52,6 +55,7 @@ func main() {
 		StatusTimeout:     statusTimeout,
 		DefaultBackoff:    defaultBackoff,
 		HTTPClientTimeout: httpPeerTimeout,
+		DiscoveryTarget:   discoveryTarget,
 	})
 
 	grpcLis, err := net.Listen("tcp", grpcListen)
@@ -65,6 +69,7 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	afsletpb.RegisterAfsletServer(grpcServer, svc)
+	afsproxypb.RegisterAfsProxyServer(grpcServer, svc)
 	reflection.Register(grpcServer)
 
 	httpMux := http.NewServeMux()

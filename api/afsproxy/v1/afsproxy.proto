@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package afsproxy.v1;
+
+option go_package = "github.com/reyoung/afs/pkg/afsproxypb;afsproxypb";
+
+service AfsProxy {
+  rpc Status(StatusRequest) returns (stream StatusResponse);
+}
+
+message StatusRequest {
+  bool include_layerstores = 1;
+  bool include_afslets = 2;
+}
+
+message StatusSummary {
+  int64 layerstore_instances = 1;
+  int64 afslet_instances = 2;
+  int64 afslet_reachable = 3;
+  int64 total_layers = 4;
+}
+
+message LayerstoreInstance {
+  string node_id = 1;
+  string endpoint = 2;
+  int64 last_seen_unix = 3;
+  int64 cache_max_bytes = 4;
+  repeated LayerInfo layers = 5;
+  repeated string cached_images = 6;
+}
+
+message LayerInfo {
+  string digest = 1;
+  int64 afs_size = 2;
+}
+
+message AfsletInstance {
+  string endpoint = 1;
+  bool reachable = 2;
+  string error = 3;
+  int64 running_containers = 4;
+  int64 limit_cpu_cores = 5;
+  int64 limit_memory_mb = 6;
+  int64 used_cpu_cores = 7;
+  int64 used_memory_mb = 8;
+  int64 available_cpu_cores = 9;
+  int64 available_memory_mb = 10;
+}
+
+message StatusError {
+  string source = 1;
+  string message = 2;
+}
+
+message StatusResponse {
+  oneof payload {
+    StatusSummary summary = 1;
+    LayerstoreInstance layerstore = 2;
+    AfsletInstance afslet = 3;
+    StatusError error = 4;
+  }
+}

@@ -232,10 +232,10 @@ func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *
 	callCtx, callCancel := context.WithTimeout(ctx, 12*time.Minute)
 	defer callCancel()
 	resp, err := client.PullImage(callCtx, &layerstorepb.PullImageRequest{
-		Image:        image,
-		Tag:          tag,
-		PlatformOs:   "linux",
-		PlatformArch: "amd64",
+		Image:           image,
+		Tag:             tag,
+		PlatformOs:      "linux",
+		PlatformArch:    "amd64",
 		ForceLocalFetch: false,
 	})
 	if err != nil {

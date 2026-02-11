@@ -144,7 +144,7 @@ func main() {
 		if endpoint == "" {
 			continue
 		}
-		go registerHeartbeatLoop(ctx, endpoint, nodeID, listenAddr, cacheDir, func() []string {
+		go registerHeartbeatLoop(ctx, endpoint, nodeID, listenAddr, cacheDir, svc.CacheLimitBytes(), func() []string {
 			pendingMu.RLock()
 			defer pendingMu.RUnlock()
 			out := make([]string, 0, len(pending))
@@ -171,15 +171,15 @@ func main() {
 	grpcServer.GracefulStop()
 }
 
-func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, pendingImages func() []string, trigger <-chan struct{}) {
+func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, cacheMaxBytes int64, pendingImages func() []string, trigger <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
 	send := func() {
-		layers, err := scanCachedLayerDigests(cacheDir)
+		layerStats, err := scanCachedLayerStats(cacheDir)
 		if err != nil {
 			log.Printf("heartbeat scan cache failed: discovery=%s err=%v", discoveryAddr, err)
-			layers = nil
+			layerStats = nil
 		}
 		images, err := scanCachedImageKeys(cacheDir)
 		if err != nil {
@@ -193,11 +193,11 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 			return
 		}
 		for _, target := range targets {
-			if err := sendHeartbeatOnce(ctx, target, nodeID, endpoint, layers, images); err != nil {
+			if err := sendHeartbeatOnce(ctx, target, nodeID, endpoint, layerStats, images, cacheMaxBytes); err != nil {
 				log.Printf("heartbeat failed: discovery=%s target=%s err=%v", discoveryAddr, target, err)
 				continue
 			}
-			log.Printf("heartbeat sent: discovery=%s target=%s endpoint=%s layers=%d images=%d", discoveryAddr, target, endpoint, len(layers), len(images))
+			log.Printf("heartbeat sent: discovery=%s target=%s endpoint=%s layers=%d images=%d cache_max_bytes=%d", discoveryAddr, target, endpoint, len(layerStats), len(images), cacheMaxBytes)
 		}
 	}
 
@@ -214,7 +214,7 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 	}
 }
 
-func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, layers []string, images []string) error {
+func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, layerStats []*discoverypb.LayerStat, images []string, cacheMaxBytes int64) error {
 	hbCtx, hbCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer hbCancel()
 
@@ -225,11 +225,20 @@ func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, lay
 	defer conn.Close()
 
 	client := discoverypb.NewServiceDiscoveryClient(conn)
+	layerDigests := make([]string, 0, len(layerStats))
+	for _, ls := range layerStats {
+		if ls == nil || strings.TrimSpace(ls.GetDigest()) == "" {
+			continue
+		}
+		layerDigests = append(layerDigests, ls.GetDigest())
+	}
 	_, err = client.Heartbeat(hbCtx, &discoverypb.HeartbeatRequest{
-		NodeId:       nodeID,
-		Endpoint:     endpoint,
-		LayerDigests: layers,
-		CachedImages: images,
+		NodeId:        nodeID,
+		Endpoint:      endpoint,
+		LayerDigests:  layerDigests,
+		CachedImages:  images,
+		LayerStats:    layerStats,
+		CacheMaxBytes: cacheMaxBytes,
 	})
 	return err
 }
@@ -271,7 +280,7 @@ func expandHeartbeatTargets(ctx context.Context, discoveryAddr string) ([]string
 	return out, nil
 }
 
-func scanCachedLayerDigests(cacheDir string) ([]string, error) {
+func scanCachedLayerStats(cacheDir string) ([]*discoverypb.LayerStat, error) {
 	layersDir := filepath.Join(cacheDir, "layers")
 	entries, err := os.ReadDir(layersDir)
 	if err != nil {
@@ -280,7 +289,7 @@ func scanCachedLayerDigests(cacheDir string) ([]string, error) {
 		}
 		return nil, err
 	}
-	var out []string
+	out := make([]*discoverypb.LayerStat, 0, 256)
 	for _, algoEnt := range entries {
 		if !algoEnt.IsDir() {
 			continue
@@ -306,7 +315,14 @@ func scanCachedLayerDigests(cacheDir string) ([]string, error) {
 			if hex == "" {
 				continue
 			}
-			out = append(out, strings.ToLower(algo)+":"+hex)
+			info, infoErr := f.Info()
+			if infoErr != nil {
+				continue
+			}
+			out = append(out, &discoverypb.LayerStat{
+				Digest:  strings.ToLower(algo) + ":" + hex,
+				AfsSize: info.Size(),
+			})
 		}
 	}
 	return out, nil

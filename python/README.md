@@ -15,8 +15,10 @@ cd python
 - Low-level: `AfsClient.raw_execute(requests: AsyncIterator[ExecuteRequest])`
 - High-level: `AfsClient.execute(request: ExecuteInput)`
   - request is a single typed object (`image`, `command`, resources, and extra file entries)
-  - set `force_pull=True` to force registry download path (skip peer layer reuse)
+  - set `force_local_fetch=True` to force local layer fetch on selected layerstore
   - response is `AsyncIterator[ExecuteEvent]`
+- Proxy status stream: `AfsClient.status(include_layerstores=True, include_afslets=True)`
+  - returns `AsyncIterator[ProxyStatusEvent]`
   - tar.gz is parsed in streaming form into:
     - `TarDirectory`
     - `TarSymlink`

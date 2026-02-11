@@ -36,6 +36,7 @@ spec:
             - -http-listen=:{{ .Values.afsProxy.httpPort }}
             - -afslet-target={{ include "afs.afsletHeadlessServiceName" . }}:{{ .Values.afslet.service.port }}
             - -proxy-peers-target={{ include "afs.afsProxyHeadlessServiceName" . }}:{{ .Values.afsProxy.httpPort }}
+            - -discovery-target={{ include "afs.discoveryHeadlessServiceName" . }}:{{ .Values.discovery.service.port }}
             - -dispatch-backoff={{ .Values.afsProxy.dispatchBackoff }}
             - -graceful-timeout={{ .Values.afsProxy.gracefulTimeout }}
           env:
