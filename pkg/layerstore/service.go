@@ -18,9 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 	"github.com/reyoung/afs/pkg/registry"
@@ -66,6 +69,13 @@ type Service struct {
 	cacheMax      int64
 	reservedBytes int64
 	evictReport   func()
+
+	localEndpoint      string
+	discoveryEndpoints []string
+	peerFetchTimeout   time.Duration
+	peerReadSize       int32
+	layerPeerFetcher   func(ctx context.Context, digest, destPath string) (bool, error)
+	imagePeerChecker   func(ctx context.Context, imageKey string) (bool, error)
 }
 
 type cachedLayerFile struct {
@@ -121,15 +131,35 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		cacheMax = dyn
 	}
 	return &Service{
-		cacheDir:    cacheDir,
-		layersDir:   layersDir,
-		metadataDir: metadataDir,
-		locker:      newDigestLocker(),
-		newFetcher:  func() fetcher { return registry.NewClient(nil) },
-		maxReadSize: maxReadBytes,
-		authByHost:  authByHost,
-		cacheMax:    cacheMax,
+		cacheDir:         cacheDir,
+		layersDir:        layersDir,
+		metadataDir:      metadataDir,
+		locker:           newDigestLocker(),
+		newFetcher:       func() fetcher { return registry.NewClient(nil) },
+		maxReadSize:      maxReadBytes,
+		authByHost:       authByHost,
+		cacheMax:         cacheMax,
+		peerFetchTimeout: 5 * time.Second,
+		peerReadSize:     maxReadBytes,
 	}, nil
+}
+
+func (s *Service) SetPeerFetchConfig(localEndpoint string, discoveryEndpoints []string) {
+	s.localEndpoint = strings.TrimSpace(localEndpoint)
+	seen := make(map[string]struct{}, len(discoveryEndpoints))
+	out := make([]string, 0, len(discoveryEndpoints))
+	for _, ep := range discoveryEndpoints {
+		ep = strings.TrimSpace(ep)
+		if ep == "" {
+			continue
+		}
+		if _, ok := seen[ep]; ok {
+			continue
+		}
+		seen[ep] = struct{}{}
+		out = append(out, ep)
+	}
+	s.discoveryEndpoints = out
 }
 
 func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequest) (*layerstorepb.PullImageResponse, error) {
@@ -155,9 +185,10 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 		s.pullReport(imgKey, true)
 		defer s.pullReport(imgKey, false)
 	}
-	log.Printf("pull image requested: image=%s tag=%s platform=%s/%s variant=%s force=%v", req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, req.GetForce())
+	forceLocalFetch := req.GetForceLocalFetch()
+	log.Printf("pull image requested: image=%s tag=%s platform=%s/%s variant=%s force_local_fetch=%v", req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, forceLocalFetch)
 
-	meta, fromCache, err := s.resolveImageMetadata(ctx, f, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, req.GetForce())
+	meta, fromCache, err := s.resolveImageMetadata(ctx, f, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, forceLocalFetch)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resolve image metadata: %v", err)
 	}
@@ -166,11 +197,24 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	} else {
 		log.Printf("resolved image metadata from registry: registry=%s repository=%s reference=%s layers=%d", meta.ResolvedRegistry, meta.ResolvedRepository, meta.ResolvedReference, len(meta.Layers))
 	}
-	releaseReservation, reserveErr := s.reservePullSpace(meta.Layers)
-	if reserveErr != nil {
-		return nil, reserveErr
+	peerHasImage := false
+	if !forceLocalFetch {
+		hasPeer, peerErr := s.peerHasImage(ctx, imgKey)
+		if peerErr != nil {
+			log.Printf("warning: peer image check failed image=%s key=%s: %v", req.GetImage(), imgKey, peerErr)
+		} else if hasPeer {
+			peerHasImage = true
+			log.Printf("peer already has image; skip local fetch for missing layers: image=%s key=%s", req.GetImage(), imgKey)
+		}
 	}
-	defer releaseReservation()
+
+	if !peerHasImage {
+		releaseReservation, reserveErr := s.reservePullSpace(meta.Layers)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		defer releaseReservation()
+	}
 
 	result := &layerstorepb.PullImageResponse{
 		ResolvedRegistry:   meta.ResolvedRegistry,
@@ -181,7 +225,28 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 
 	for i, layer := range meta.Layers {
 		log.Printf("[%d/%d] processing layer digest=%s mediaType=%s size=%d", i+1, len(meta.Layers), layer.Digest, layer.MediaType, layer.Size)
-		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true)
+		if peerHasImage {
+			cachePath, afsSize, cached, err := s.layerLocalState(layer.Digest)
+			if err != nil {
+				return nil, err
+			}
+			if cached {
+				log.Printf("[%d/%d] local layer present digest=%s afsSize=%d path=%s", i+1, len(meta.Layers), layer.Digest, afsSize, cachePath)
+			} else {
+				log.Printf("[%d/%d] skipped local layer fetch because peer has image digest=%s", i+1, len(meta.Layers), layer.Digest)
+			}
+			result.Layers = append(result.Layers, &layerstorepb.Layer{
+				Digest:         layer.Digest,
+				MediaType:      layer.MediaType,
+				CompressedSize: layer.Size,
+				AfsSize:        afsSize,
+				CachePath:      cachePath,
+				Cached:         cached,
+			})
+			continue
+		}
+
+		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true, false)
 		if err != nil {
 			return nil, err
 		}
@@ -288,14 +353,14 @@ func (s *Service) estimateRequiredBytesLocked(layers []registry.Layer) (int64, m
 	return required, protected, nil
 }
 
-func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, tag, platformOS, platformArch, platformVariant string, force bool) (imageMetadata, bool, error) {
+func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, tag, platformOS, platformArch, platformVariant string, forceRefreshMetadata bool) (imageMetadata, bool, error) {
 	ref, err := registry.ParseImageReference(image, tag)
 	if err != nil {
 		return imageMetadata{}, false, err
 	}
 
 	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
-	if !force {
+	if !forceRefreshMetadata {
 		if cached, err := s.loadImageMetadata(cacheKey); err == nil {
 			return cached, true, nil
 		}
@@ -550,7 +615,7 @@ func (s *Service) PruneCache(ctx context.Context, req *layerstorepb.PruneCacheRe
 	}, nil
 }
 
-func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer, allowDownload bool) (cachePath string, size int64, cached bool, err error) {
+func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer, allowDownload bool, allowPeerFetch bool) (cachePath string, size int64, cached bool, err error) {
 	if layer.MediaType != layerformat.OCILayerTarGzipMediaType {
 		return "", 0, false, status.Errorf(codes.FailedPrecondition, "unsupported layer media type %q for %s", layer.MediaType, layer.Digest)
 	}
@@ -579,6 +644,24 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", 0, false, status.Errorf(codes.Internal, "create layer cache dir: %v", err)
+	}
+
+	if allowPeerFetch {
+		ok, peerErr := s.tryFetchLayerFromPeers(ctx, layer.Digest, fullPath)
+		if peerErr != nil {
+			log.Printf("warning: peer layer fetch failed digest=%s: %v", layer.Digest, peerErr)
+		}
+		if ok {
+			st, statErr := os.Stat(fullPath)
+			if statErr != nil {
+				return "", 0, false, status.Errorf(codes.Internal, "stat peer-fetched layer: %v", statErr)
+			}
+			_ = touchFile(fullPath)
+			if _, _, pruneErr := s.enforceCacheLimit(map[string]struct{}{layer.Digest: {}}); pruneErr != nil {
+				log.Printf("warning: enforce cache limit failed: %v", pruneErr)
+			}
+			return fullPath, st.Size(), false, nil
+		}
 	}
 
 	rc, err := f.DownloadLayer(ctx, image, tag, layer.Digest)
@@ -620,6 +703,205 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		log.Printf("warning: enforce cache limit failed: %v", pruneErr)
 	}
 	return fullPath, st.Size(), false, nil
+}
+
+func (s *Service) tryFetchLayerFromPeers(ctx context.Context, digest, destPath string) (bool, error) {
+	if s.layerPeerFetcher != nil {
+		return s.layerPeerFetcher(ctx, digest, destPath)
+	}
+	providers, err := s.findLayerProviders(ctx, digest)
+	if err != nil {
+		return false, err
+	}
+	if len(providers) == 0 {
+		return false, nil
+	}
+	for _, endpoint := range providers {
+		if endpoint == s.localEndpoint {
+			continue
+		}
+		ok, copyErr := s.copyLayerFromPeer(ctx, endpoint, digest, destPath)
+		if copyErr != nil {
+			log.Printf("warning: copy layer from peer failed endpoint=%s digest=%s: %v", endpoint, digest, copyErr)
+			continue
+		}
+		if ok {
+			log.Printf("copied layer from peer endpoint=%s digest=%s", endpoint, digest)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) findLayerProviders(ctx context.Context, digest string) ([]string, error) {
+	if len(s.discoveryEndpoints) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 16)
+	for _, discoveryAddr := range s.discoveryEndpoints {
+		cctx, cancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+		conn, err := grpc.DialContext(cctx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancel()
+		if err != nil {
+			log.Printf("warning: dial discovery for layer lookup failed addr=%s digest=%s: %v", discoveryAddr, digest, err)
+			continue
+		}
+		client := discoverypb.NewServiceDiscoveryClient(conn)
+		qctx, qcancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+		resp, qerr := client.FindImage(qctx, &discoverypb.FindImageRequest{})
+		qcancel()
+		_ = conn.Close()
+		if qerr != nil {
+			log.Printf("warning: discovery FindImage for layer lookup failed addr=%s digest=%s: %v", discoveryAddr, digest, qerr)
+			continue
+		}
+		for _, svc := range resp.GetServices() {
+			if !containsString(svc.GetLayerDigests(), digest) {
+				continue
+			}
+			ep := strings.TrimSpace(svc.GetEndpoint())
+			if ep == "" {
+				continue
+			}
+			if _, ok := seen[ep]; ok {
+				continue
+			}
+			seen[ep] = struct{}{}
+			out = append(out, ep)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (s *Service) copyLayerFromPeer(ctx context.Context, endpoint, digest, destPath string) (bool, error) {
+	dctx, dcancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+	conn, err := grpc.DialContext(dctx, endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dcancel()
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+
+	client := layerstorepb.NewLayerStoreClient(conn)
+	hctx, hcancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+	hasResp, err := client.HasLayer(hctx, &layerstorepb.HasLayerRequest{Digest: digest})
+	hcancel()
+	if err != nil {
+		return false, err
+	}
+	if !hasResp.GetFound() {
+		return false, nil
+	}
+
+	dir := filepath.Dir(destPath)
+	tmpFile, err := os.CreateTemp(dir, ".tmp-peer-*.afslyr")
+	if err != nil {
+		return false, err
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	var offset int64
+	for {
+		rctx, rcancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+		resp, readErr := client.ReadLayer(rctx, &layerstorepb.ReadLayerRequest{
+			Digest: digest,
+			Offset: offset,
+			Length: s.peerReadSize,
+		})
+		rcancel()
+		if readErr != nil {
+			return false, readErr
+		}
+		data := resp.GetData()
+		if len(data) > 0 {
+			if _, werr := tmpFile.Write(data); werr != nil {
+				return false, werr
+			}
+			offset += int64(len(data))
+		}
+		if resp.GetEof() {
+			break
+		}
+		if len(data) == 0 {
+			return false, fmt.Errorf("peer returned empty non-eof chunk for digest=%s at offset=%d", digest, offset)
+		}
+	}
+	if err := tmpFile.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Service) peerHasImage(ctx context.Context, imageKey string) (bool, error) {
+	if strings.TrimSpace(imageKey) == "" {
+		return false, nil
+	}
+	if s.imagePeerChecker != nil {
+		return s.imagePeerChecker(ctx, imageKey)
+	}
+	if len(s.discoveryEndpoints) == 0 {
+		return false, nil
+	}
+	for _, discoveryAddr := range s.discoveryEndpoints {
+		dctx, cancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+		conn, err := grpc.DialContext(dctx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancel()
+		if err != nil {
+			log.Printf("warning: dial discovery for image check failed addr=%s imageKey=%s: %v", discoveryAddr, imageKey, err)
+			continue
+		}
+		client := discoverypb.NewServiceDiscoveryClient(conn)
+		qctx, qcancel := context.WithTimeout(ctx, s.peerFetchTimeout)
+		resp, qerr := client.FindImage(qctx, &discoverypb.FindImageRequest{ImageKey: imageKey})
+		qcancel()
+		_ = conn.Close()
+		if qerr != nil {
+			log.Printf("warning: discovery FindImage for image check failed addr=%s imageKey=%s: %v", discoveryAddr, imageKey, qerr)
+			continue
+		}
+		for _, svc := range resp.GetServices() {
+			ep := strings.TrimSpace(svc.GetEndpoint())
+			if ep == "" || ep == s.localEndpoint {
+				continue
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) layerLocalState(digest string) (cachePath string, size int64, cached bool, err error) {
+	fullPath, err := s.layerPath(digest)
+	if err != nil {
+		return "", 0, false, status.Error(codes.InvalidArgument, err.Error())
+	}
+	st, statErr := os.Stat(fullPath)
+	if statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return "", 0, false, nil
+		}
+		return "", 0, false, status.Errorf(codes.Internal, "stat layer: %v", statErr)
+	}
+	_ = touchFile(fullPath)
+	return fullPath, st.Size(), true, nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, v := range values {
+		if v == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) enforceCacheLimit(exclude map[string]struct{}) (int64, int, error) {

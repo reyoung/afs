@@ -26,7 +26,7 @@ message StartRequest {
   int64 memory_mb = 5;
   int64 timeout_ms = 6;
   string discovery_addr = 7;
-  bool force_pull = 8;
+  bool force_local_fetch = 8;
   string node_id = 9;
   string platform_os = 10;
   string platform_arch = 11;

@@ -192,7 +192,7 @@ type StartRequest struct {
 	MemoryMb                int64                  `protobuf:"varint,5,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
 	TimeoutMs               int64                  `protobuf:"varint,6,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
 	DiscoveryAddr           string                 `protobuf:"bytes,7,opt,name=discovery_addr,json=discoveryAddr,proto3" json:"discovery_addr,omitempty"`
-	ForcePull               bool                   `protobuf:"varint,8,opt,name=force_pull,json=forcePull,proto3" json:"force_pull,omitempty"`
+	ForceLocalFetch               bool                   `protobuf:"varint,8,opt,name=force_local_fetch,json=forceLocalFetch,proto3" json:"force_local_fetch,omitempty"`
 	NodeId                  string                 `protobuf:"bytes,9,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	PlatformOs              string                 `protobuf:"bytes,10,opt,name=platform_os,json=platformOs,proto3" json:"platform_os,omitempty"`
 	PlatformArch            string                 `protobuf:"bytes,11,opt,name=platform_arch,json=platformArch,proto3" json:"platform_arch,omitempty"`
@@ -282,9 +282,9 @@ func (x *StartRequest) GetDiscoveryAddr() string {
 	return ""
 }
 
-func (x *StartRequest) GetForcePull() bool {
+func (x *StartRequest) GetForceLocalFetch() bool {
 	if x != nil {
-		return x.ForcePull
+		return x.ForceLocalFetch
 	}
 	return false
 }

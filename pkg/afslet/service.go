@@ -314,8 +314,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	if discoveryAddr := pickDiscoveryAddr(start.GetDiscoveryAddr(), s.defaultDiscovery); discoveryAddr != "" {
 		mountArgs = append(mountArgs, "-discovery-addr", discoveryAddr)
 	}
-	if start.GetForcePull() {
-		mountArgs = append(mountArgs, "-force-pull")
+	if start.GetForceLocalFetch() {
+		mountArgs = append(mountArgs, "-force-local-fetch")
 	}
 	if strings.TrimSpace(start.GetNodeId()) != "" {
 		mountArgs = append(mountArgs, "-node-id", start.GetNodeId())

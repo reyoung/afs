@@ -31,7 +31,7 @@ type config struct {
 	memoryMB        int64
 	timeout         time.Duration
 	discoveryAddr   string
-	forcePull       bool
+	forceLocalFetch bool
 	nodeID          string
 	platformOS      string
 	platformArch    string
@@ -61,7 +61,7 @@ func parseFlags() (config, []string) {
 	flag.Int64Var(&cfg.memoryMB, "memory-mb", 256, "memory limit in MB")
 	flag.DurationVar(&cfg.timeout, "timeout", time.Second, "command timeout")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "", "discovery grpc address for afs_mount")
-	flag.BoolVar(&cfg.forcePull, "force-pull", false, "force pull image")
+	flag.BoolVar(&cfg.forceLocalFetch, "force-local-fetch", false, "force local layer fetch on selected node")
 	flag.StringVar(&cfg.nodeID, "node-id", "", "node affinity id")
 	flag.StringVar(&cfg.platformOS, "platform-os", "linux", "platform os")
 	flag.StringVar(&cfg.platformArch, "platform-arch", "amd64", "platform arch")
@@ -179,7 +179,7 @@ func sendStart(stream afsletpb.Afslet_ExecuteClient, cfg config, cmdArgs []strin
 		MemoryMb:                cfg.memoryMB,
 		TimeoutMs:               cfg.timeout.Milliseconds(),
 		DiscoveryAddr:           cfg.discoveryAddr,
-		ForcePull:               cfg.forcePull,
+		ForceLocalFetch:         cfg.forceLocalFetch,
 		NodeId:                  cfg.nodeID,
 		PlatformOs:              cfg.platformOS,
 		PlatformArch:            cfg.platformArch,
