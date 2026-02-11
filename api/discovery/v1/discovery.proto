@@ -9,12 +9,19 @@ service ServiceDiscovery {
   rpc FindImage(FindImageRequest) returns (FindImageResponse);
 }
 
+message LayerStat {
+  string digest = 1;
+  int64 afs_size = 2;
+}
+
 message ServiceInstance {
   string node_id = 1;
   string endpoint = 2;
   int64 last_seen_unix = 3;
   repeated string layer_digests = 4;
   repeated string cached_images = 5;
+  repeated LayerStat layer_stats = 6;
+  int64 cache_max_bytes = 7;
 }
 
 message HeartbeatRequest {
@@ -22,6 +29,8 @@ message HeartbeatRequest {
   string endpoint = 2;
   repeated string layer_digests = 3;
   repeated string cached_images = 4;
+  repeated LayerStat layer_stats = 5;
+  int64 cache_max_bytes = 6;
 }
 
 message HeartbeatResponse {

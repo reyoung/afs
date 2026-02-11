@@ -78,7 +78,7 @@ func TestValidateListenEndpoint(t *testing.T) {
 	}
 }
 
-func TestScanCachedLayerDigests(t *testing.T) {
+func TestScanCachedLayerStats(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -90,12 +90,15 @@ func TestScanCachedLayerDigests(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got, err := scanCachedLayerDigests(tmp)
+	got, err := scanCachedLayerStats(tmp)
 	if err != nil {
-		t.Fatalf("scanCachedLayerDigests: %v", err)
+		t.Fatalf("scanCachedLayerStats: %v", err)
 	}
-	if len(got) != 1 || got[0] != "sha256:abcdef" {
-		t.Fatalf("got=%v, want [sha256:abcdef]", got)
+	if len(got) != 1 || got[0].GetDigest() != "sha256:abcdef" {
+		t.Fatalf("got=%v, want digest=sha256:abcdef", got)
+	}
+	if got[0].GetAfsSize() != 1 {
+		t.Fatalf("afs_size=%d, want 1", got[0].GetAfsSize())
 	}
 }
 

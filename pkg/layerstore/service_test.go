@@ -97,8 +97,8 @@ func TestPullImageForceLocalFetchSkipsPeerImageCheck(t *testing.T) {
 	}
 
 	if _, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{
-		Image: "busybox",
-		Tag:   "latest",
+		Image:           "busybox",
+		Tag:             "latest",
 		ForceLocalFetch: true,
 	}); err != nil {
 		t.Fatalf("PullImage(force): %v", err)

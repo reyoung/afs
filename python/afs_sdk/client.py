@@ -10,6 +10,8 @@ from grpclib.client import Channel
 from ._tar_stream import TarGzParser
 from .api.afslet.v1.afslet_grpc import AfsletStub
 from .api.afslet.v1 import afslet_pb2 as pb
+from .api.afsproxy.v1.afsproxy_grpc import AfsProxyStub
+from .api.afsproxy.v1 import afsproxy_pb2 as proxypb
 from .models import (
     AcceptedEvent,
     DoneEvent,
@@ -22,6 +24,12 @@ from .models import (
     ResultEvent,
     RuntimeStatus,
     TarArchiveStart,
+    ProxyStatusEvent,
+    ProxyStatusSummary,
+    ProxyLayerInfo,
+    ProxyLayerstoreInstance,
+    ProxyAfsletInstance,
+    ProxyStatusError,
 )
 
 
@@ -38,6 +46,7 @@ class AfsClient:
     ) -> None:
         self._channel = Channel(host=host, port=port, ssl=ssl)
         self._stub = AfsletStub(self._channel)
+        self._proxy_stub = AfsProxyStub(self._channel)
         self._owned_executor: Optional[ThreadPoolExecutor] = None
         if tar_executor is None:
             self._owned_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="afs-sdk-tar")
@@ -71,6 +80,109 @@ class AfsClient:
 
     async def iter_runtime_status(self) -> AsyncIterator[RuntimeStatus]:
         yield await self.get_runtime_status()
+
+    async def status(
+        self,
+        *,
+        include_layerstores: bool = True,
+        include_afslets: bool = True,
+    ) -> AsyncIterator[ProxyStatusEvent]:
+        req = proxypb.StatusRequest(
+            include_layerstores=include_layerstores,
+            include_afslets=include_afslets,
+        )
+        call = self._proxy_stub.Status(req)
+        if hasattr(call, "__aiter__"):
+            async_iter = call
+            sync_iter = None
+        else:
+            result = await call
+            if hasattr(result, "__aiter__"):
+                async_iter = result
+                sync_iter = None
+            else:
+                async_iter = None
+                sync_iter = result
+
+        if async_iter is not None:
+            async for resp in async_iter:
+                kind = resp.WhichOneof("payload")
+                if kind == "summary":
+                    p = resp.summary
+                    yield ProxyStatusSummary(
+                        layerstore_instances=p.layerstore_instances,
+                        afslet_instances=p.afslet_instances,
+                        afslet_reachable=p.afslet_reachable,
+                        total_layers=p.total_layers,
+                    )
+                elif kind == "layerstore":
+                    p = resp.layerstore
+                    layers = [ProxyLayerInfo(digest=x.digest, afs_size=x.afs_size) for x in p.layers]
+                    yield ProxyLayerstoreInstance(
+                        node_id=p.node_id,
+                        endpoint=p.endpoint,
+                        last_seen_unix=p.last_seen_unix,
+                        cache_max_bytes=p.cache_max_bytes,
+                        layers=layers,
+                        cached_images=list(p.cached_images),
+                    )
+                elif kind == "afslet":
+                    p = resp.afslet
+                    yield ProxyAfsletInstance(
+                        endpoint=p.endpoint,
+                        reachable=p.reachable,
+                        error=p.error,
+                        running_containers=p.running_containers,
+                        limit_cpu_cores=p.limit_cpu_cores,
+                        limit_memory_mb=p.limit_memory_mb,
+                        used_cpu_cores=p.used_cpu_cores,
+                        used_memory_mb=p.used_memory_mb,
+                        available_cpu_cores=p.available_cpu_cores,
+                        available_memory_mb=p.available_memory_mb,
+                    )
+                elif kind == "error":
+                    p = resp.error
+                    yield ProxyStatusError(source=p.source, message=p.message)
+            return
+
+        for resp in sync_iter:
+            kind = resp.WhichOneof("payload")
+            if kind == "summary":
+                p = resp.summary
+                yield ProxyStatusSummary(
+                    layerstore_instances=p.layerstore_instances,
+                    afslet_instances=p.afslet_instances,
+                    afslet_reachable=p.afslet_reachable,
+                    total_layers=p.total_layers,
+                )
+            elif kind == "layerstore":
+                p = resp.layerstore
+                layers = [ProxyLayerInfo(digest=x.digest, afs_size=x.afs_size) for x in p.layers]
+                yield ProxyLayerstoreInstance(
+                    node_id=p.node_id,
+                    endpoint=p.endpoint,
+                    last_seen_unix=p.last_seen_unix,
+                    cache_max_bytes=p.cache_max_bytes,
+                    layers=layers,
+                    cached_images=list(p.cached_images),
+                )
+            elif kind == "afslet":
+                p = resp.afslet
+                yield ProxyAfsletInstance(
+                    endpoint=p.endpoint,
+                    reachable=p.reachable,
+                    error=p.error,
+                    running_containers=p.running_containers,
+                    limit_cpu_cores=p.limit_cpu_cores,
+                    limit_memory_mb=p.limit_memory_mb,
+                    used_cpu_cores=p.used_cpu_cores,
+                    used_memory_mb=p.used_memory_mb,
+                    available_cpu_cores=p.available_cpu_cores,
+                    available_memory_mb=p.available_memory_mb,
+                )
+            elif kind == "error":
+                p = resp.error
+                yield ProxyStatusError(source=p.source, message=p.message)
 
     async def raw_execute(self, requests: AsyncIterator[pb.ExecuteRequest]) -> AsyncIterator[pb.ExecuteResponse]:
         """Low-level Execute API using raw protobuf frames."""
@@ -162,7 +274,7 @@ class AfsClient:
                 memory_mb=req.memory_mb,
                 timeout_ms=req.timeout_ms,
                 discovery_addr=req.discovery_addr,
-                force_pull=req.force_pull,
+                force_local_fetch=req.force_local_fetch,
                 node_id=req.node_id,
                 platform_os=req.platform_os,
                 platform_arch=req.platform_arch,

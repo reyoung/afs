@@ -225,7 +225,6 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 			},
 			Namespaces: []ociNS{
 				{Type: "pid"},
-				{Type: "network"},
 				{Type: "ipc"},
 				{Type: "uts"},
 				{Type: "mount"},
@@ -244,6 +243,7 @@ func defaultMounts() []ociMount {
 		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
 		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+		{Destination: "/etc/resolv.conf", Type: "bind", Source: "/etc/resolv.conf", Options: []string{"rbind", "ro"}},
 	}
 }
 

@@ -18,11 +18,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/reyoung/afs/pkg/afsletpb"
+	"github.com/reyoung/afs/pkg/afsproxypb"
 )
 
 type config struct {
 	addr            string
 	statusOnly      bool
+	proxyStatus     bool
 	dir             string
 	image           string
 	tag             string
@@ -53,6 +55,7 @@ func parseFlags() (config, []string) {
 	cfg := config{}
 	flag.StringVar(&cfg.addr, "addr", "127.0.0.1:61051", "afslet gRPC address")
 	flag.BoolVar(&cfg.statusOnly, "status", false, "query runtime status only (running containers)")
+	flag.BoolVar(&cfg.proxyStatus, "proxy-status", false, "query afs_proxy cluster status stream")
 	flag.StringVar(&cfg.dir, "dir", "", "directory to upload as extra-dir")
 	flag.StringVar(&cfg.image, "image", "", "image name")
 	flag.StringVar(&cfg.tag, "tag", "", "image tag")
@@ -73,7 +76,10 @@ func parseFlags() (config, []string) {
 	flag.Parse()
 
 	cmdArgs := flag.Args()
-	if cfg.statusOnly {
+	if cfg.statusOnly && cfg.proxyStatus {
+		log.Fatal("-status and -proxy-status cannot both be set")
+	}
+	if cfg.statusOnly || cfg.proxyStatus {
 		if cfg.grpcTimeout <= 0 {
 			log.Fatal("-grpc-timeout must be > 0")
 		}
@@ -151,6 +157,58 @@ func run(cfg config, cmdArgs []string) error {
 			resp.GetAvailableMemoryMb(),
 		)
 		return nil
+	}
+	if cfg.proxyStatus {
+		proxyClient := afsproxypb.NewAfsProxyClient(conn)
+		stream, err := proxyClient.Status(ctx, &afsproxypb.StatusRequest{
+			IncludeLayerstores: true,
+			IncludeAfslets:     true,
+		})
+		if err != nil {
+			return fmt.Errorf("proxy status stream: %w", err)
+		}
+		for {
+			resp, err := stream.Recv()
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("recv proxy status: %w", err)
+			}
+			switch p := resp.GetPayload().(type) {
+			case *afsproxypb.StatusResponse_Summary:
+				fmt.Printf("summary layerstores=%d afslets=%d afslets_reachable=%d total_layers=%d\n",
+					p.Summary.GetLayerstoreInstances(),
+					p.Summary.GetAfsletInstances(),
+					p.Summary.GetAfsletReachable(),
+					p.Summary.GetTotalLayers(),
+				)
+			case *afsproxypb.StatusResponse_Layerstore:
+				fmt.Printf("layerstore node=%s endpoint=%s last_seen=%d cache_max_bytes=%d layers=%d images=%d\n",
+					p.Layerstore.GetNodeId(),
+					p.Layerstore.GetEndpoint(),
+					p.Layerstore.GetLastSeenUnix(),
+					p.Layerstore.GetCacheMaxBytes(),
+					len(p.Layerstore.GetLayers()),
+					len(p.Layerstore.GetCachedImages()),
+				)
+			case *afsproxypb.StatusResponse_Afslet:
+				fmt.Printf("afslet endpoint=%s reachable=%v running=%d cpu=%d/%d mem_mb=%d/%d err=%q\n",
+					p.Afslet.GetEndpoint(),
+					p.Afslet.GetReachable(),
+					p.Afslet.GetRunningContainers(),
+					p.Afslet.GetUsedCpuCores(),
+					p.Afslet.GetLimitCpuCores(),
+					p.Afslet.GetUsedMemoryMb(),
+					p.Afslet.GetLimitMemoryMb(),
+					p.Afslet.GetError(),
+				)
+			case *afsproxypb.StatusResponse_Error:
+				fmt.Printf("status_error source=%s msg=%q\n", p.Error.GetSource(), p.Error.GetMessage())
+			default:
+				fmt.Printf("status_unknown payload=%T\n", p)
+			}
+		}
 	}
 	stream, err := client.Execute(ctx)
 	if err != nil {

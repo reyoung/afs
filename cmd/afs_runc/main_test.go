@@ -43,6 +43,7 @@ func TestDefaultMountsHasProcAndDev(t *testing.T) {
 	}
 	foundProc := false
 	foundDev := false
+	foundResolv := false
 	for _, m := range mounts {
 		if m.Destination == "/proc" && m.Type == "proc" {
 			foundProc = true
@@ -50,9 +51,12 @@ func TestDefaultMountsHasProcAndDev(t *testing.T) {
 		if m.Destination == "/dev" && m.Type == "tmpfs" {
 			foundDev = true
 		}
+		if m.Destination == "/etc/resolv.conf" && m.Type == "bind" {
+			foundResolv = true
+		}
 	}
-	if !foundProc || !foundDev {
-		t.Fatalf("default mounts missing /proc or /dev: %v", mounts)
+	if !foundProc || !foundDev || !foundResolv {
+		t.Fatalf("default mounts missing /proc or /dev or /etc/resolv.conf: %v", mounts)
 	}
 }
 
@@ -69,5 +73,20 @@ func TestConfigDefaults(t *testing.T) {
 	cfg := config{cpuCores: 1, memoryMB: 256, timeout: time.Second}
 	if cfg.cpuCores != 1 || cfg.memoryMB != 256 || cfg.timeout != time.Second {
 		t.Fatalf("unexpected defaults template: %+v", cfg)
+	}
+}
+
+func TestBuildSpecUsesHostNetworkByDefault(t *testing.T) {
+	t.Parallel()
+	cfg := config{
+		cpuCores:    1,
+		memoryMB:    256,
+		containerID: "cid-test",
+	}
+	s := buildSpec(cfg, []string{"/bin/true"}, "/abs/rootfs")
+	for _, ns := range s.Linux.Namespaces {
+		if ns.Type == "network" {
+			t.Fatalf("unexpected network namespace in default spec: %+v", s.Linux.Namespaces)
+		}
 	}
 }

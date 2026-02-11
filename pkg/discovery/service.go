@@ -32,7 +32,9 @@ type serviceEntry struct {
 	endpoint     string
 	lastSeen     time.Time
 	layerDigests []string
+	layerStats   map[string]int64
 	cachedImages []string
+	cacheMax     int64
 }
 
 func NewService() *Service {
@@ -57,6 +59,10 @@ func (s *Service) Heartbeat(ctx context.Context, req *discoverypb.HeartbeatReque
 	}
 
 	layers := dedupeNonEmpty(req.GetLayerDigests())
+	layerStats := dedupeLayerStats(req.GetLayerStats())
+	if len(layerStats) > 0 {
+		layers = mergeLayerDigestLists(layers, layerStats)
+	}
 	now := s.now()
 
 	s.mu.Lock()
@@ -65,7 +71,9 @@ func (s *Service) Heartbeat(ctx context.Context, req *discoverypb.HeartbeatReque
 		endpoint:     endpoint,
 		lastSeen:     now,
 		layerDigests: layers,
+		layerStats:   layerStats,
 		cachedImages: dedupeNonEmpty(req.GetCachedImages()),
+		cacheMax:     req.GetCacheMaxBytes(),
 	}
 	s.mu.Unlock()
 
@@ -115,12 +123,21 @@ func (s *Service) pruneExpired() {
 func entryToProto(v serviceEntry) *discoverypb.ServiceInstance {
 	layers := make([]string, len(v.layerDigests))
 	copy(layers, v.layerDigests)
+	layerStats := make([]*discoverypb.LayerStat, 0, len(v.layerStats))
+	for _, digest := range layers {
+		layerStats = append(layerStats, &discoverypb.LayerStat{
+			Digest:  digest,
+			AfsSize: v.layerStats[digest],
+		})
+	}
 	return &discoverypb.ServiceInstance{
-		NodeId:       v.nodeID,
-		Endpoint:     v.endpoint,
-		LastSeenUnix: v.lastSeen.Unix(),
-		LayerDigests: layers,
-		CachedImages: append([]string(nil), v.cachedImages...),
+		NodeId:        v.nodeID,
+		Endpoint:      v.endpoint,
+		LastSeenUnix:  v.lastSeen.Unix(),
+		LayerDigests:  layers,
+		CachedImages:  append([]string(nil), v.cachedImages...),
+		LayerStats:    layerStats,
+		CacheMaxBytes: v.cacheMax,
 	}
 }
 
@@ -148,4 +165,43 @@ func contains(arr []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func dedupeLayerStats(in []*discoverypb.LayerStat) map[string]int64 {
+	out := make(map[string]int64, len(in))
+	for _, ls := range in {
+		if ls == nil {
+			continue
+		}
+		d := strings.TrimSpace(ls.GetDigest())
+		if d == "" {
+			continue
+		}
+		out[d] = ls.GetAfsSize()
+	}
+	return out
+}
+
+func mergeLayerDigestLists(digests []string, stats map[string]int64) []string {
+	seen := make(map[string]struct{}, len(digests)+len(stats))
+	out := make([]string, 0, len(digests)+len(stats))
+	for _, d := range digests {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	for d := range stats {
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
 }
