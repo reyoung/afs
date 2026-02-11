@@ -5,3 +5,7 @@ cmd/layer_mount/tmp
 cmd/layer_mount/workdir
 
 .env.layerstore
+
+__pycache__/
+*.pyc
+python/.venv/
