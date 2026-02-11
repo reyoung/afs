@@ -15,6 +15,7 @@ cd python
 - Low-level: `AfsClient.raw_execute(requests: AsyncIterator[ExecuteRequest])`
 - High-level: `AfsClient.execute(request: ExecuteInput)`
   - request is a single typed object (`image`, `command`, resources, and extra file entries)
+  - set `force_pull=True` to force registry download path (skip peer layer reuse)
   - response is `AsyncIterator[ExecuteEvent]`
   - tar.gz is parsed in streaming form into:
     - `TarDirectory`

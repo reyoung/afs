@@ -103,6 +103,7 @@ func main() {
 	if cacheMaxBytes > 0 {
 		svc.SetCacheLimitBytes(cacheMaxBytes)
 	}
+	svc.SetPeerFetchConfig(listenAddr, discoveryEndpoints)
 	log.Printf("layer cache limit bytes=%s", strconv.FormatInt(svc.CacheLimitBytes(), 10))
 	var pendingMu sync.RWMutex
 	pending := make(map[string]struct{})

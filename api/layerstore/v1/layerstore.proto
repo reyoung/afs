@@ -19,7 +19,7 @@ message PullImageRequest {
   string platform_os = 3;
   string platform_arch = 4;
   string platform_variant = 5;
-  bool force = 6;
+  bool force_local_fetch = 6;
 }
 
 message PullImageResponse {

@@ -27,7 +27,7 @@ type PullImageRequest struct {
 	PlatformOs      string                 `protobuf:"bytes,3,opt,name=platform_os,json=platformOs,proto3" json:"platform_os,omitempty"`
 	PlatformArch    string                 `protobuf:"bytes,4,opt,name=platform_arch,json=platformArch,proto3" json:"platform_arch,omitempty"`
 	PlatformVariant string                 `protobuf:"bytes,5,opt,name=platform_variant,json=platformVariant,proto3" json:"platform_variant,omitempty"`
-	Force           bool                   `protobuf:"varint,6,opt,name=force,proto3" json:"force,omitempty"`
+	ForceLocalFetch bool                   `protobuf:"varint,6,opt,name=force_local_fetch,json=forceLocalFetch,proto3" json:"force_local_fetch,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -97,9 +97,9 @@ func (x *PullImageRequest) GetPlatformVariant() string {
 	return ""
 }
 
-func (x *PullImageRequest) GetForce() bool {
+func (x *PullImageRequest) GetForceLocalFetch() bool {
 	if x != nil {
-		return x.Force
+		return x.ForceLocalFetch
 	}
 	return false
 }

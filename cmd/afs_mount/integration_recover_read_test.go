@@ -236,7 +236,7 @@ func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *
 		Tag:          tag,
 		PlatformOs:   "linux",
 		PlatformArch: "amd64",
-		Force:        false,
+		ForceLocalFetch: false,
 	})
 	if err != nil {
 		t.Fatalf("pull image from %s (%s:%s): %v", endpoint, image, tag, err)

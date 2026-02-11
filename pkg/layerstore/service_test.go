@@ -20,6 +20,97 @@ import (
 	"github.com/reyoung/afs/pkg/registry"
 )
 
+func TestPullImageSkipsLocalFetchWhenPeerHasImage(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerDigest := "sha256:abababababababababababababababababababababababababababababababab"
+	layerBytes := buildTarGzip(t, map[string]string{"peer.txt": "from peer"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+	svc.imagePeerChecker = func(ctx context.Context, imageKey string) (bool, error) {
+		_ = ctx
+		_ = imageKey
+		return true, nil
+	}
+
+	resp, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+	if got := len(resp.GetLayers()); got != 1 {
+		t.Fatalf("layers=%d, want 1", got)
+	}
+	if resp.GetLayers()[0].GetCached() {
+		t.Fatalf("layer should remain uncached locally when peer has image")
+	}
+	if got := resp.GetLayers()[0].GetAfsSize(); got != 0 {
+		t.Fatalf("afs_size=%d, want 0 when local fetch is skipped", got)
+	}
+	if got := resp.GetLayers()[0].GetCachePath(); got != "" {
+		t.Fatalf("cache_path=%q, want empty when local fetch is skipped", got)
+	}
+	if fake.downloadCalls != 0 {
+		t.Fatalf("download calls=%d, want 0 when peer has image", fake.downloadCalls)
+	}
+}
+
+func TestPullImageForceLocalFetchSkipsPeerImageCheck(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerDigest := "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	layerBytes := buildTarGzip(t, map[string]string{"force.txt": "from registry"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	peerCalls := 0
+	svc.imagePeerChecker = func(ctx context.Context, imageKey string) (bool, error) {
+		_ = ctx
+		_ = imageKey
+		peerCalls++
+		return true, nil
+	}
+
+	if _, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{
+		Image: "busybox",
+		Tag:   "latest",
+		ForceLocalFetch: true,
+	}); err != nil {
+		t.Fatalf("PullImage(force): %v", err)
+	}
+	if peerCalls != 0 {
+		t.Fatalf("peer fetch calls=%d, want 0 when force=true", peerCalls)
+	}
+	if fake.downloadCalls != 1 {
+		t.Fatalf("download calls=%d, want 1 when force=true", fake.downloadCalls)
+	}
+}
+
 func TestPullImageCachesByDigest(t *testing.T) {
 	t.Parallel()
 
@@ -136,7 +227,7 @@ func TestPullImageForceBypassesMetadataCache(t *testing.T) {
 	if _, err := svc.PullImage(context.Background(), req); err != nil {
 		t.Fatalf("second PullImage: %v", err)
 	}
-	if _, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest", Force: true}); err != nil {
+	if _, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest", ForceLocalFetch: true}); err != nil {
 		t.Fatalf("forced PullImage: %v", err)
 	}
 

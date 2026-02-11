@@ -44,7 +44,7 @@ type config struct {
 	platformOS      string
 	platformArch    string
 	platformVariant string
-	forcePull       bool
+	forceLocalFetch bool
 	pullTimeout     time.Duration
 	workDir         string
 	keepWorkDir     bool
@@ -58,7 +58,7 @@ type serviceInfo struct {
 
 func main() {
 	cfg := parseFlags()
-	log.Printf("starting mount client: image=%s tag=%s mountpoint=%s discovery=%s node-id=%s platform=%s/%s variant=%s force=%v", cfg.image, cfg.tag, cfg.mountpoint, cfg.discoveryAddr, cfg.nodeID, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forcePull)
+	log.Printf("starting mount client: image=%s tag=%s mountpoint=%s discovery=%s node-id=%s platform=%s/%s variant=%s force_local_fetch=%v", cfg.image, cfg.tag, cfg.mountpoint, cfg.discoveryAddr, cfg.nodeID, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forceLocalFetch)
 
 	if err := ensureMountpoint(cfg.mountpoint); err != nil {
 		log.Fatalf("invalid mountpoint: %v", err)
@@ -93,7 +93,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.platformOS, "platform-os", "linux", "target platform os for PullImage")
 	flag.StringVar(&cfg.platformArch, "platform-arch", "amd64", "target platform architecture for PullImage")
 	flag.StringVar(&cfg.platformVariant, "platform-variant", "", "target platform variant for PullImage")
-	flag.BoolVar(&cfg.forcePull, "force-pull", false, "force refresh image metadata from registry")
+	flag.BoolVar(&cfg.forceLocalFetch, "force-local-fetch", false, "force local layer fetch on this node")
 	flag.DurationVar(&cfg.pullTimeout, "pull-timeout", 20*time.Minute, "timeout for PullImage RPC")
 	flag.StringVar(&cfg.workDir, "work-dir", "", "working directory for per-layer mountpoints (default: temp dir)")
 	flag.BoolVar(&cfg.keepWorkDir, "keep-work-dir", false, "keep work directory after exit")
@@ -284,7 +284,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 }
 
 func pullImageWithDiscovery(imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, *layerstorepb.PullImageResponse, error) {
-	if !cfg.forcePull && len(imageProviders) > 0 {
+	if !cfg.forceLocalFetch && len(imageProviders) > 0 {
 		for _, s := range rankServicesForAffinity(imageProviders, cfg.nodeID) {
 			resp, err := pullImageFromService(s.endpoint, cfg, false)
 			if err == nil {
@@ -296,9 +296,9 @@ func pullImageWithDiscovery(imageProviders []serviceInfo, allServices []serviceI
 	}
 
 	for _, s := range rankServicesForAffinity(allServices, cfg.nodeID) {
-		resp, pullErr := pullImageFromService(s.endpoint, cfg, cfg.forcePull)
+		resp, pullErr := pullImageFromService(s.endpoint, cfg, cfg.forceLocalFetch)
 		if pullErr == nil {
-			log.Printf("pulled image on endpoint=%s force=%v", s.endpoint, cfg.forcePull)
+			log.Printf("pulled image on endpoint=%s force_local_fetch=%v", s.endpoint, cfg.forceLocalFetch)
 			return s, resp, nil
 		}
 		log.Printf("pull image failed on endpoint=%s: %v", s.endpoint, pullErr)
@@ -322,7 +322,7 @@ func pullImageFromService(endpoint string, cfg config, force bool) (*layerstorep
 		PlatformOs:      cfg.platformOS,
 		PlatformArch:    cfg.platformArch,
 		PlatformVariant: cfg.platformVariant,
-		Force:           force,
+		ForceLocalFetch: force,
 	})
 }
 
