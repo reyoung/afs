@@ -59,7 +59,30 @@ This means:
   - Schedules by `cpu_cores/memory_mb` using DNS-discovered afslet backends (A records re-resolved per dispatch)
   - Uses power-of-two-choices (P2C) among feasible backends
   - Supports dispatch retry (`proxy_dispatch_max_retries`, `proxy_dispatch_backoff_ms`)
-  - Provides HTTP `/dispatching` for local/cluster dispatching queue count
+  - Provides HTTP `/status` (`/dispatching` kept as compatibility alias) for local/cluster dispatching queue count
+  - Provides gRPC streaming `AfsProxy.Status` for layerstore + afslet cluster status
+
+- `afs_runc`
+  - Minimal OCI runner wrapper around `runc`
+  - Enforces cgroup CPU/memory limits and execution timeout
+  - Defaults to host network and host DNS (`/etc/resolv.conf`) bind
+
+- Clients
+  - `afs_cli`: execute workflow and runtime/proxy status query
+  - `python/afs_sdk`: asyncio + grpclib SDK with streaming execute/status APIs
+
+## Documentation
+
+- Architecture and component design docs: `docs/README.md`
+- End-to-end architecture: `docs/architecture.md`
+- Per-component design:
+  - `docs/components/afs_discovery_grpcd.md`
+  - `docs/components/afs_layerstore_grpcd.md`
+  - `docs/components/afs_mount.md`
+  - `docs/components/afs_runc.md`
+  - `docs/components/afslet.md`
+  - `docs/components/afs_proxy.md`
+  - `docs/components/clients.md`
 
 ## Quick Flow
 
