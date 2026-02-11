@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "afs.afsProxyHeadlessServiceName" . }}
+  labels:
+    {{- include "afs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: afs-proxy
+spec:
+  clusterIP: None
+  selector:
+    {{- include "afs.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: afs-proxy
+  ports:
+    - name: grpc
+      port: {{ .Values.afsProxy.service.port }}
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: {{ .Values.afsProxy.httpPort }}
+      targetPort: http
+      protocol: TCP

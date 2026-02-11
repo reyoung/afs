@@ -1,6 +1,6 @@
 image:
-  repository: ghcr.io/reyoung/afs
-  tag: v0.1.0-1-gd03f7d7
+  repository: mirrors.tencent.com/josephyu/afs
+  tag: latest
   pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -15,17 +15,17 @@ podAnnotations: {}
 discovery:
   replicas: 3
   containerPort: 60051
-  goMemLimit: 1792MiB
+  goMemLimit: 896MiB
   service:
     type: ClusterIP
     port: 60051
   resources:
     requests:
       cpu: "1"
-      memory: 2Gi
+      memory: 1Gi
     limits:
       cpu: "1"
-      memory: 2Gi
+      memory: 1Gi
 
 grpcd:
   containerPort: 50051
@@ -53,3 +53,45 @@ grpcd:
     limits:
       cpu: "2"
       memory: 4Gi
+
+afslet:
+  replicas: 50
+  containerPort: 61051
+  mountBinary: /usr/local/bin/afs_mount
+  runcBinary: /usr/local/bin/afs_runc
+  sudoBinaries: false
+  tarChunk: 262144
+  gracefulTimeout: 15s
+  tempDir: /var/lib/afslet/tmp
+  workDir: /var/lib/afslet/work
+  mountProcDev: false
+  limitCPUCores: 4
+  limitMemoryMB: 16384
+  service:
+    port: 61051
+  resources:
+    requests:
+      cpu: "4"
+      memory: 16Gi
+    limits:
+      cpu: "4"
+      memory: 16Gi
+
+afsProxy:
+  replicas: 3
+  grpcPort: 62051
+  httpPort: 62052
+  dispatchBackoff: 50ms
+  gracefulTimeout: 10s
+  service:
+    type: LoadBalancer
+    port: 62051
+    annotations:
+      service.kubernetes.io/qcloud-loadbalancer-internal-subnetid: subnet-bldyjtgd
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 512Mi
+    limits:
+      cpu: "500m"
+      memory: 512Mi

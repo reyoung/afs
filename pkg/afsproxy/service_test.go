@@ -47,15 +47,18 @@ func TestComputeBackoff(t *testing.T) {
 	}
 }
 
-func TestParseBoolQuery(t *testing.T) {
+func TestParseBoolDefaultTrue(t *testing.T) {
 	t.Parallel()
-	if !parseBoolQuery("1") {
+	if !parseBoolDefaultTrue("1") {
 		t.Fatalf("expected true for 1")
 	}
-	if !parseBoolQuery("true") {
+	if !parseBoolDefaultTrue("true") {
 		t.Fatalf("expected true for true")
 	}
-	if parseBoolQuery("no") {
+	if !parseBoolDefaultTrue("") {
+		t.Fatalf("expected true for empty")
+	}
+	if parseBoolDefaultTrue("no") {
 		t.Fatalf("expected false for no")
 	}
 }

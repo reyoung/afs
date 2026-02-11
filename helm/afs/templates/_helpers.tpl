@@ -42,3 +42,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "afs.discoveryHeadlessServiceName" -}}
 {{- printf "%s-discovery-headless" (include "afs.fullname" .) -}}
 {{- end -}}
+
+{{- define "afs.afsletName" -}}
+{{- printf "%s-afslet" (include "afs.fullname" .) -}}
+{{- end -}}
+
+{{- define "afs.afsletHeadlessServiceName" -}}
+{{- printf "%s-afslet-headless" (include "afs.fullname" .) -}}
+{{- end -}}
+
+{{- define "afs.afsProxyName" -}}
+{{- printf "%s-afs-proxy" (include "afs.fullname" .) -}}
+{{- end -}}
+
+{{- define "afs.afsProxyHeadlessServiceName" -}}
+{{- printf "%s-afs-proxy-headless" (include "afs.fullname" .) -}}
+{{- end -}}

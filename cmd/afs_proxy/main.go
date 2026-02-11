@@ -68,7 +68,9 @@ func main() {
 	reflection.Register(grpcServer)
 
 	httpMux := http.NewServeMux()
-	httpMux.HandleFunc("/dispatching", svc.HandleDispatchingHTTP)
+	httpMux.HandleFunc("/status", svc.HandleStatusHTTP)
+	// Backward compatibility for old clients.
+	httpMux.HandleFunc("/dispatching", svc.HandleStatusHTTP)
 	httpServer := &http.Server{Handler: httpMux}
 
 	go func() {

@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "afs.afsletName" . }}
+  labels:
+    {{- include "afs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: afslet
+spec:
+  replicas: {{ .Values.afslet.replicas }}
+  selector:
+    matchLabels:
+      {{- include "afs.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: afslet
+  template:
+    metadata:
+      labels:
+        {{- include "afs.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: afslet
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: afslet
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/afslet
+          args:
+            - -listen=:{{ .Values.afslet.containerPort }}
+            - -mount-binary={{ .Values.afslet.mountBinary }}
+            - -runc-binary={{ .Values.afslet.runcBinary }}
+            - -sudo-binaries={{ .Values.afslet.sudoBinaries }}
+            - -tar-chunk={{ .Values.afslet.tarChunk }}
+            - -graceful-timeout={{ .Values.afslet.gracefulTimeout }}
+            - -discovery-addr={{ include "afs.discoveryHeadlessServiceName" . }}:{{ .Values.discovery.service.port }}
+            - -temp-dir={{ .Values.afslet.tempDir }}
+            - -limit-cpu={{ .Values.afslet.limitCPUCores }}
+            - -limit-memory-mb={{ .Values.afslet.limitMemoryMB }}
+          env:
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: afslet
+                  resource: limits.cpu
+                  divisor: "1"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.afslet.containerPort }}
+              protocol: TCP
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+          volumeMounts:
+            - name: tmp
+              mountPath: {{ .Values.afslet.tempDir }}
+            - name: work
+              mountPath: {{ .Values.afslet.workDir }}
+            - name: cgroupfs
+              mountPath: /sys/fs/cgroup
+            - name: fuse-dev
+              mountPath: /dev/fuse
+          resources:
+            {{- toYaml .Values.afslet.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: work
+          emptyDir: {}
+        - name: cgroupfs
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: fuse-dev
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice

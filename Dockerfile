@@ -30,6 +30,12 @@ RUN mkdir -p /out && \
     go build -trimpath -o /out/afs_discovery_grpcd ./cmd/afs_discovery_grpcd && \
     echo "==> building afs_layerstore_grpcd (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afs_layerstore_grpcd ./cmd/afs_layerstore_grpcd && \
+    echo "==> building afslet (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
+    go build -trimpath -o /out/afslet ./cmd/afslet && \
+    echo "==> building afs_proxy (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
+    go build -trimpath -o /out/afs_proxy ./cmd/afs_proxy && \
+    echo "==> building afs_runc (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
+    go build -trimpath -o /out/afs_runc ./cmd/afs_runc && \
     echo "==> building afs_mount (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afs_mount ./cmd/afs_mount
 
@@ -41,6 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fuse3 \
     fuse-overlayfs \
     libfuse3-3 \
+    runc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

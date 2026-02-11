@@ -333,6 +333,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)
 	mountStdout := newProcessLogWriter("mount:stdout", logf)
 	mountStderr := newProcessLogWriter("mount:stderr", logf)
+	defer mountStdout.Flush()
+	defer mountStderr.Flush()
 	mountCmd.Stdout = mountStdout
 	mountCmd.Stderr = mountStderr
 	if err := mountCmd.Start(); err != nil {
@@ -378,6 +380,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	runcCmd := s.newCommandContext(ctx, s.runcBinary, runcArgs...)
 	runcStdout := newProcessLogWriter("runc:stdout", logf)
 	runcStderr := newProcessLogWriter("runc:stderr", logf)
+	defer runcStdout.Flush()
+	defer runcStderr.Flush()
 	runcCmd.Stdout = runcStdout
 	runcCmd.Stderr = runcStderr
 	if logf != nil {
@@ -790,6 +794,21 @@ func (w *processLogWriter) String() string {
 		out += w.line.String()
 	}
 	return strings.TrimSpace(out)
+}
+
+func (w *processLogWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.line.Len() == 0 {
+		return
+	}
+	if w.logf != nil {
+		w.logf(w.source, w.line.String())
+	}
+	if w.buf.Len() > 0 && !strings.HasSuffix(w.buf.String(), "\n") {
+		_, _ = w.buf.WriteString("\n")
+	}
+	w.line.Reset()
 }
 
 func isMounted(mountpoint string) (bool, error) {

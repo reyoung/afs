@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "afs.afsProxyName" . }}
+  labels:
+    {{- include "afs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: afs-proxy
+spec:
+  replicas: {{ .Values.afsProxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "afs.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: afs-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "afs.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: afs-proxy
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: afs-proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/afs_proxy
+          args:
+            - -listen=:{{ .Values.afsProxy.grpcPort }}
+            - -http-listen=:{{ .Values.afsProxy.httpPort }}
+            - -afslet-target={{ include "afs.afsletHeadlessServiceName" . }}:{{ .Values.afslet.service.port }}
+            - -proxy-peers-target={{ include "afs.afsProxyHeadlessServiceName" . }}:{{ .Values.afsProxy.httpPort }}
+            - -dispatch-backoff={{ .Values.afsProxy.dispatchBackoff }}
+            - -graceful-timeout={{ .Values.afsProxy.gracefulTimeout }}
+          env:
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  containerName: afs-proxy
+                  resource: limits.cpu
+                  divisor: "1"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.afsProxy.grpcPort }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ .Values.afsProxy.httpPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.afsProxy.resources | nindent 12 }}

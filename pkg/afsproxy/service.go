@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"math/rand"
 	"net"
@@ -62,6 +63,8 @@ type Service struct {
 
 	randMu sync.Mutex
 	rand   *rand.Rand
+
+	requestSeq atomic.Int64
 }
 
 type backendCandidate struct {
@@ -120,41 +123,53 @@ func NewService(cfg Config) *Service {
 }
 
 func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
+	reqID := s.requestSeq.Add(1)
+	logPrefix := fmt.Sprintf("[proxy-exec req=%d]", reqID)
+
 	firstReq, recvErr := stream.Recv()
 	if recvErr == io.EOF {
+		log.Printf("%s missing first frame: eof", logPrefix)
 		return status.Error(codes.InvalidArgument, "missing start request")
 	}
 	if recvErr != nil {
+		log.Printf("%s failed to recv first frame: %v", logPrefix, recvErr)
 		return recvErr
 	}
 	startPayload, ok := firstReq.GetPayload().(*afsletpb.ExecuteRequest_Start)
 	if !ok || startPayload.Start == nil {
+		log.Printf("%s invalid first frame: not start", logPrefix)
 		return status.Error(codes.InvalidArgument, "first request must be start")
 	}
 	start := startPayload.Start
 	cpu := start.GetCpuCores()
 	if cpu <= 0 {
+		log.Printf("%s invalid cpu_cores=%d", logPrefix, cpu)
 		return status.Error(codes.InvalidArgument, "start.cpu_cores must be > 0")
 	}
 	memoryMB := start.GetMemoryMb()
 	if memoryMB <= 0 {
+		log.Printf("%s invalid memory_mb=%d", logPrefix, memoryMB)
 		return status.Error(codes.InvalidArgument, "start.memory_mb must be > 0")
 	}
 	if strings.TrimSpace(start.GetImage()) == "" {
+		log.Printf("%s missing image", logPrefix)
 		return status.Error(codes.InvalidArgument, "start.image is required")
 	}
 	if len(start.GetCommand()) == 0 {
+		log.Printf("%s missing command", logPrefix)
 		return status.Error(codes.InvalidArgument, "start.command is required")
 	}
 
 	maxRetries := start.GetProxyDispatchMaxRetries()
 	if maxRetries < 0 {
+		log.Printf("%s invalid max_retries=%d", logPrefix, maxRetries)
 		return status.Error(codes.InvalidArgument, "start.proxy_dispatch_max_retries must be >= 0")
 	}
 	backoff := time.Duration(start.GetProxyDispatchBackoffMs()) * time.Millisecond
 	if backoff <= 0 {
 		backoff = s.defaultBackoff
 	}
+	log.Printf("%s start image=%s tag=%s cpu=%d memory_mb=%d cmd=%q max_retries=%d backoff=%s", logPrefix, start.GetImage(), start.GetTag(), cpu, memoryMB, start.GetCommand(), maxRetries, backoff)
 
 	s.dispatching.Add(1)
 	defer s.dispatching.Add(-1)
@@ -164,61 +179,81 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	var backendStream afsletpb.Afslet_ExecuteClient
 	var acceptedResp *afsletpb.ExecuteResponse
 	for {
+		attempt := failures + 1
 		candidate, selErr := s.selectCandidate(stream.Context(), cpu, memoryMB)
 		if selErr == nil {
+			log.Printf("%s attempt=%d selected backend=%s", logPrefix, attempt, candidate.address)
 			conn, down, accepted, runErr := s.dispatchHandshake(stream.Context(), candidate.address, firstReq)
 			if runErr == nil {
 				backendConn = conn
 				backendStream = down
 				acceptedResp = accepted
+				log.Printf("%s attempt=%d handshake ok backend=%s", logPrefix, attempt, candidate.address)
 				break
 			}
 			if conn != nil {
 				_ = conn.Close()
 			}
+			log.Printf("%s attempt=%d handshake failed backend=%s retryable=%t err=%v", logPrefix, attempt, candidate.address, isRetryableDispatchError(runErr), runErr)
 			if !isRetryableDispatchError(runErr) {
 				return runErr
 			}
 			selErr = runErr
+		} else {
+			log.Printf("%s attempt=%d no candidate: %v", logPrefix, attempt, selErr)
 		}
 
 		if errors.Is(selErr, errNoCapacityEver) {
+			log.Printf("%s reject permanently: requested cpu=%d memory_mb=%d exceeds cluster limits", logPrefix, cpu, memoryMB)
 			return status.Errorf(codes.InvalidArgument, "cannot run request cpu=%d memory_mb=%d: %v", cpu, memoryMB, selErr)
 		}
 		failures++
 		if maxRetries > 0 && failures > maxRetries {
+			log.Printf("%s retries exhausted failures=%d last_err=%v", logPrefix, failures, selErr)
 			return status.Errorf(codes.Unavailable, "dispatch retries exhausted after %d failures: %v", failures, selErr)
 		}
-		if waitErr := sleepWithContext(stream.Context(), s.computeBackoff(backoff, failures)); waitErr != nil {
+		waitFor := s.computeBackoff(backoff, failures)
+		log.Printf("%s attempt=%d backoff=%s before retry", logPrefix, attempt, waitFor)
+		if waitErr := sleepWithContext(stream.Context(), waitFor); waitErr != nil {
+			log.Printf("%s canceled during backoff: %v", logPrefix, waitErr)
 			return waitErr
 		}
 	}
 	defer backendConn.Close()
 
 	if err := stream.Send(acceptedResp); err != nil {
+		log.Printf("%s failed to send accepted response: %v", logPrefix, err)
 		return err
 	}
+	log.Printf("%s accepted marker forwarded to client", logPrefix)
 
 	uploadErrCh := make(chan error, 1)
 	go func() {
 		uploadErrCh <- forwardClientRequests(stream, backendStream)
 	}()
 
+	respFrames := 0
 	for {
 		resp, err := backendStream.Recv()
 		if err == io.EOF {
+			log.Printf("%s backend stream closed after %d response frames", logPrefix, respFrames)
 			break
 		}
 		if err != nil {
+			log.Printf("%s backend recv error after %d response frames: %v", logPrefix, respFrames, err)
 			return err
 		}
+		respFrames++
 		if sendErr := stream.Send(resp); sendErr != nil {
+			log.Printf("%s failed to forward response frame=%d: %v", logPrefix, respFrames, sendErr)
 			return sendErr
 		}
 	}
 	if err := <-uploadErrCh; err != nil {
+		log.Printf("%s upload forwarding error: %v", logPrefix, err)
 		return err
 	}
+	log.Printf("%s completed successfully", logPrefix)
 	return nil
 }
 
@@ -226,12 +261,12 @@ func (s *Service) GetRuntimeStatus(ctx context.Context, req *afsletpb.GetRuntime
 	return nil, status.Error(codes.Unimplemented, "afs_proxy does not implement GetRuntimeStatus")
 }
 
-func (s *Service) HandleDispatchingHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/dispatching" {
+func (s *Service) HandleStatusHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/status" && r.URL.Path != "/dispatching" {
 		http.NotFound(w, r)
 		return
 	}
-	includeCluster := parseBoolQuery(r.URL.Query().Get("include_cluster"))
+	includeCluster := parseBoolDefaultTrue(r.URL.Query().Get("include_cluster"))
 
 	local := s.dispatching.Load()
 	resp := dispatchStatusResponse{
@@ -253,6 +288,7 @@ func (s *Service) HandleDispatchingHTTP(w http.ResponseWriter, r *http.Request) 
 	totalByNode := map[string]int64{s.nodeID: local}
 	peers, err := resolveHostPorts(r.Context(), s.proxyPeersTarget)
 	if err != nil {
+		log.Printf("[proxy-status] resolve peers target=%s failed: %v", s.proxyPeersTarget, err)
 		resp.ClusterDispatching = local
 		resp.PeerErrors = 1
 		writeJSON(w, http.StatusOK, resp)
@@ -264,9 +300,11 @@ func (s *Service) HandleDispatchingHTTP(w http.ResponseWriter, r *http.Request) 
 	for _, peer := range peers {
 		peerResp, perr := s.queryPeerDispatching(r.Context(), client, peer)
 		if perr != nil {
+			log.Printf("[proxy-status] peer query failed peer=%s err=%v", peer, perr)
 			resp.PeerErrors++
 			continue
 		}
+		log.Printf("[proxy-status] peer=%s node=%s local_dispatching=%d", peer, peerResp.NodeID, peerResp.LocalDispatching)
 		totalByNode[peerResp.NodeID] = peerResp.LocalDispatching
 	}
 	for _, v := range totalByNode {
@@ -276,7 +314,7 @@ func (s *Service) HandleDispatchingHTTP(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) queryPeerDispatching(ctx context.Context, client *http.Client, peerAddr string) (*localDispatchResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+peerAddr+"/dispatching?include_cluster=false", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+peerAddr+"/status?include_cluster=false", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -301,9 +339,11 @@ func (s *Service) queryPeerDispatching(ctx context.Context, client *http.Client,
 func (s *Service) selectCandidate(ctx context.Context, cpu int64, memoryMB int64) (*backendCandidate, error) {
 	addresses, err := resolveHostPorts(ctx, s.afsletTarget)
 	if err != nil {
+		log.Printf("[proxy-select] resolve target=%s failed: %v", s.afsletTarget, err)
 		return nil, err
 	}
 	if len(addresses) == 0 {
+		log.Printf("[proxy-select] resolve target=%s returned 0 addresses", s.afsletTarget)
 		return nil, errNoAfsletResolved
 	}
 
@@ -314,6 +354,7 @@ func (s *Service) selectCandidate(ctx context.Context, cpu int64, memoryMB int64
 	for _, addr := range addresses {
 		st, err := s.fetchRuntimeStatus(ctx, addr)
 		if err != nil {
+			log.Printf("[proxy-select] status failed backend=%s err=%v", addr, err)
 			continue
 		}
 		observed++
@@ -333,12 +374,18 @@ func (s *Service) selectCandidate(ctx context.Context, cpu int64, memoryMB int64
 	}
 
 	if len(candidates) == 0 {
+		log.Printf("[proxy-select] no candidates requested cpu=%d memory_mb=%d resolved=%d observed=%d max_limit_cpu=%d max_limit_mem=%d", cpu, memoryMB, len(addresses), observed, maxCPU, maxMem)
 		if observed > 0 && (maxCPU < cpu || maxMem < memoryMB) {
 			return nil, errNoCapacityEver
 		}
 		return nil, errNoCapacityNow
 	}
 	picked := s.pickByPowerOfTwoChoices(candidates)
+	log.Printf("[proxy-select] picked backend=%s requested cpu=%d memory_mb=%d candidates=%d resolved=%d observed=%d backend_used_cpu=%d/%d backend_used_mem=%d/%d",
+		picked.address, cpu, memoryMB, len(candidates), len(addresses), observed,
+		picked.status.GetUsedCpuCores(), picked.status.GetLimitCpuCores(),
+		picked.status.GetUsedMemoryMb(), picked.status.GetLimitMemoryMb(),
+	)
 	return &picked, nil
 }
 
@@ -400,30 +447,37 @@ func (s *Service) fetchRuntimeStatus(ctx context.Context, addr string) (*afsletp
 }
 
 func (s *Service) dispatchHandshake(ctx context.Context, backendAddr string, startReq *afsletpb.ExecuteRequest) (*grpc.ClientConn, afsletpb.Afslet_ExecuteClient, *afsletpb.ExecuteResponse, error) {
+	log.Printf("[proxy-dispatch] dialing backend=%s", backendAddr)
 	dialCtx, dialCancel := context.WithTimeout(ctx, s.dialTimeout)
 	defer dialCancel()
 	conn, err := grpc.DialContext(dialCtx, backendAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
+		log.Printf("[proxy-dispatch] dial failed backend=%s err=%v", backendAddr, err)
 		return nil, nil, nil, err
 	}
 
 	backend := afsletpb.NewAfsletClient(conn)
 	backendStream, err := backend.Execute(ctx)
 	if err != nil {
+		log.Printf("[proxy-dispatch] open stream failed backend=%s err=%v", backendAddr, err)
 		return conn, nil, nil, err
 	}
 	if err := backendStream.Send(startReq); err != nil {
+		log.Printf("[proxy-dispatch] send start failed backend=%s err=%v", backendAddr, err)
 		return conn, nil, nil, err
 	}
 
 	firstResp, err := backendStream.Recv()
 	if err != nil {
+		log.Printf("[proxy-dispatch] recv accepted failed backend=%s err=%v", backendAddr, err)
 		return conn, nil, nil, err
 	}
 	acc, ok := firstResp.GetPayload().(*afsletpb.ExecuteResponse_Accepted)
 	if !ok || !acc.Accepted.GetAccepted() {
+		log.Printf("[proxy-dispatch] backend=%s did not accept", backendAddr)
 		return conn, nil, nil, fmt.Errorf("backend %s did not return accepted marker", backendAddr)
 	}
+	log.Printf("[proxy-dispatch] backend=%s accepted request", backendAddr)
 	return conn, backendStream, firstResp, nil
 }
 
@@ -493,12 +547,16 @@ func resolveHostPorts(ctx context.Context, target string) ([]string, error) {
 	return out, nil
 }
 
-func parseBoolQuery(v string) bool {
-	b, err := strconv.ParseBool(strings.TrimSpace(v))
+func parseBoolDefaultTrue(v string) bool {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return true
+	}
+	b, err := strconv.ParseBool(trimmed)
 	if err == nil {
 		return b
 	}
-	return strings.TrimSpace(v) == "1"
+	return trimmed == "1"
 }
 
 func (s *Service) computeBackoff(base time.Duration, failures int64) time.Duration {
