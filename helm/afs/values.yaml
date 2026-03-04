@@ -56,6 +56,9 @@ grpcd:
 
 afslet:
   replicas: 50
+  spreadAcrossNodes:
+    enabled: true
+    weight: 100
   containerPort: 61051
   mountBinary: /usr/local/bin/afs_mount
   runcBinary: /usr/local/bin/afs_runc

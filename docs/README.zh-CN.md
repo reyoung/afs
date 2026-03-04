@@ -4,6 +4,10 @@
 
 ## 文档导航
 
+- `docs/getting_started.md`
+  - Kubernetes 快速开始（`helm/start.sh` 与 `helm/stop.sh`）。
+- `docs/getting_started.zh-CN.md`
+  - Kubernetes 快速开始（中文）。
 - `docs/architecture.md`
   - 端到端运行链路与组件交互。
 - `docs/architecture.zh-CN.md`

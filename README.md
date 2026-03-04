@@ -74,6 +74,7 @@ This means:
 ## Documentation
 
 - Architecture and component design docs: `docs/README.md`
+- Kubernetes quick start: `docs/getting_started.md`
 - End-to-end architecture: `docs/architecture.md`
 - Per-component design:
   - `docs/components/afs_discovery_grpcd.md`
@@ -85,6 +86,15 @@ This means:
   - `docs/components/clients.md`
 
 ## Quick Flow
+
+Recommended (Kubernetes + Helm scripts):
+
+1. Create `helm/.env` with your registry/namespace and replica/resource settings
+2. Run `./helm/start.sh`
+3. Verify with `kubectl -n <namespace> get deploy,ds,svc`
+4. Stop with `./helm/stop.sh`
+
+Manual component-by-component flow:
 
 1. Start `afs_discovery_grpcd`
 2. Start `afs_layerstore_grpcd` on nodes and register to discovery

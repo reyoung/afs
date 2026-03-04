@@ -25,6 +25,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.afslet.spreadAcrossNodes.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: {{ .Values.afslet.spreadAcrossNodes.weight }}
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "afs.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: afslet
+      {{- end }}
       containers:
         - name: afslet
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

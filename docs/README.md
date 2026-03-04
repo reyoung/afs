@@ -4,6 +4,8 @@ This directory contains architecture and component design documents for AFS.
 
 ## Document Map
 
+- `docs/getting_started.md`
+  - Kubernetes quick start with `helm/start.sh` and `helm/stop.sh`.
 - `docs/architecture.md`
   - End-to-end runtime flow and component interaction map.
 - `docs/components/afs_discovery_grpcd.md`

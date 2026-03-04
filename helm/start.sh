@@ -14,6 +14,15 @@ IMAGE_REPOSITORY=registry.example.com/org/afs
 NAMESPACE=test-afs
 RELEASE_NAME=afs
 CHART_PATH=./helm/afs
+DISCOVERY_REPLICAS=3
+AFS_PROXY_REPLICAS=3
+AFSLET_REPLICAS=3
+AFSLET_LIMIT_CPU_CORES=4
+AFSLET_LIMIT_MEMORY_MB=16384
+AFSLET_REQUEST_CPU=4
+AFSLET_REQUEST_MEMORY=16Gi
+AFSLET_LIMIT_CPU=4
+AFSLET_LIMIT_MEMORY=16Gi
 EOF
 }
 
@@ -31,6 +40,15 @@ IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-}"
 NAMESPACE="${NAMESPACE:-test-afs}"
 RELEASE_NAME="${RELEASE_NAME:-afs}"
 CHART_PATH="${CHART_PATH:-${SCRIPT_DIR}/afs}"
+DISCOVERY_REPLICAS="${DISCOVERY_REPLICAS:-3}"
+AFS_PROXY_REPLICAS="${AFS_PROXY_REPLICAS:-3}"
+AFSLET_REPLICAS="${AFSLET_REPLICAS:-3}"
+AFSLET_LIMIT_CPU_CORES="${AFSLET_LIMIT_CPU_CORES:-4}"
+AFSLET_LIMIT_MEMORY_MB="${AFSLET_LIMIT_MEMORY_MB:-16384}"
+AFSLET_REQUEST_CPU="${AFSLET_REQUEST_CPU:-4}"
+AFSLET_REQUEST_MEMORY="${AFSLET_REQUEST_MEMORY:-16Gi}"
+AFSLET_LIMIT_CPU="${AFSLET_LIMIT_CPU:-4}"
+AFSLET_LIMIT_MEMORY="${AFSLET_LIMIT_MEMORY:-16Gi}"
 
 cd "${REPO_ROOT}"
 
@@ -102,17 +120,37 @@ has_set_override() {
 }
 
 EXTRA_HELM_ARGS=()
-# For debug convenience, default all Deployments to 1 replica unless caller overrides.
+# Deployment defaults.
 if ! has_set_override "discovery.replicas" "$@"; then
-  EXTRA_HELM_ARGS+=(--set discovery.replicas=1)
+  EXTRA_HELM_ARGS+=(--set "discovery.replicas=${DISCOVERY_REPLICAS}")
 fi
 if ! has_set_override "afslet.replicas" "$@"; then
-  EXTRA_HELM_ARGS+=(--set afslet.replicas=1)
+  EXTRA_HELM_ARGS+=(--set "afslet.replicas=${AFSLET_REPLICAS}")
 fi
 if ! has_set_override "afsProxy.replicas" "$@"; then
-  EXTRA_HELM_ARGS+=(--set afsProxy.replicas=1)
+  EXTRA_HELM_ARGS+=(--set "afsProxy.replicas=${AFS_PROXY_REPLICAS}")
 fi
-echo "[start] debug scale defaults: discovery=1 afslet=1 afsProxy=1 (override via --set ...replicas=)"
+if ! has_set_override "afslet.limitCPUCores" "$@"; then
+  EXTRA_HELM_ARGS+=(--set "afslet.limitCPUCores=${AFSLET_LIMIT_CPU_CORES}")
+fi
+if ! has_set_override "afslet.limitMemoryMB" "$@"; then
+  EXTRA_HELM_ARGS+=(--set "afslet.limitMemoryMB=${AFSLET_LIMIT_MEMORY_MB}")
+fi
+if ! has_set_override "afslet.resources.requests.cpu" "$@"; then
+  EXTRA_HELM_ARGS+=(--set-string "afslet.resources.requests.cpu=${AFSLET_REQUEST_CPU}")
+fi
+if ! has_set_override "afslet.resources.requests.memory" "$@"; then
+  EXTRA_HELM_ARGS+=(--set-string "afslet.resources.requests.memory=${AFSLET_REQUEST_MEMORY}")
+fi
+if ! has_set_override "afslet.resources.limits.cpu" "$@"; then
+  EXTRA_HELM_ARGS+=(--set-string "afslet.resources.limits.cpu=${AFSLET_LIMIT_CPU}")
+fi
+if ! has_set_override "afslet.resources.limits.memory" "$@"; then
+  EXTRA_HELM_ARGS+=(--set-string "afslet.resources.limits.memory=${AFSLET_LIMIT_MEMORY}")
+fi
+echo "[start] replicas: discovery=${DISCOVERY_REPLICAS} afslet=${AFSLET_REPLICAS} afsProxy=${AFS_PROXY_REPLICAS}"
+echo "[start] afslet limits: cpu_cores=${AFSLET_LIMIT_CPU_CORES} memory_mb=${AFSLET_LIMIT_MEMORY_MB}"
+echo "[start] afslet resources: requests(cpu=${AFSLET_REQUEST_CPU},mem=${AFSLET_REQUEST_MEMORY}) limits(cpu=${AFSLET_LIMIT_CPU},mem=${AFSLET_LIMIT_MEMORY})"
 
 # If tag is "sha-dirty", force pulling unless caller already set image.pullPolicy.
 if [[ "${DIRTY}" -eq 1 ]]; then
