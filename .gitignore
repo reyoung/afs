@@ -5,6 +5,7 @@ cmd/layer_mount/tmp
 cmd/layer_mount/workdir
 
 .env.layerstore
+helm/.env
 
 __pycache__/
 *.pyc

@@ -3,6 +3,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+
+print_env_template() {
+  cat <<'EOF'
+[start] missing env file: helm/.env
+Create helm/.env with:
+
+IMAGE_REPOSITORY=registry.example.com/org/afs
+NAMESPACE=test-afs
+RELEASE_NAME=afs
+CHART_PATH=./helm/afs
+EOF
+}
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  print_env_template
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+set +a
 
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-}"
 NAMESPACE="${NAMESPACE:-test-afs}"
@@ -32,13 +55,18 @@ if [[ -z "${IMAGE_REPOSITORY}" ]]; then
   exit 1
 fi
 
+run_without_proxy() {
+  env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY "$@"
+}
+
 GIT_SHA="$(git rev-parse --short=12 HEAD)"
+BUILD_TIME="$(date '+%Y%m%d%H%M%S')"
 DIRTY=0
 if [[ -n "$(git status --porcelain)" ]]; then
   DIRTY=1
-  IMAGE_TAG="${GIT_SHA}-dirty"
+  IMAGE_TAG="${GIT_SHA}-${BUILD_TIME}-dirty"
 else
-  IMAGE_TAG="${GIT_SHA}"
+  IMAGE_TAG="${GIT_SHA}-${BUILD_TIME}"
 fi
 
 IMAGE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
@@ -94,7 +122,7 @@ if [[ "${DIRTY}" -eq 1 ]]; then
   fi
 fi
 
-helm upgrade --install "${RELEASE_NAME}" "${CHART_PATH}" \
+run_without_proxy helm upgrade --install "${RELEASE_NAME}" "${CHART_PATH}" \
   -n "${NAMESPACE}" \
   --create-namespace \
   --set "image.repository=${IMAGE_REPOSITORY}" \
@@ -102,6 +130,6 @@ helm upgrade --install "${RELEASE_NAME}" "${CHART_PATH}" \
   "${EXTRA_HELM_ARGS[@]}" \
   "$@"
 
-kubectl -n "${NAMESPACE}" get deploy,ds,svc
+run_without_proxy kubectl -n "${NAMESPACE}" get deploy,ds,svc
 
 echo "[start] done"
