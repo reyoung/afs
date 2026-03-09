@@ -40,6 +40,7 @@ func main() {
 		authToken          string
 		authPairs          multiStringFlag
 		basicPairs         multiStringFlag
+		mirrorPairs        multiStringFlag
 		discoveryEndpoints multiStringFlag
 		cacheMaxBytes      int64
 	)
@@ -53,6 +54,7 @@ func main() {
 	flag.StringVar(&authToken, "auth-token", "", "registry bearer token")
 	flag.Var(&authPairs, "auth-registry-token", "repeatable registry token pair, format <registry>=<token>")
 	flag.Var(&basicPairs, "auth-registry-basic", "repeatable registry basic auth, format <registry>=<username>[:<password>]")
+	flag.Var(&mirrorPairs, "registry-mirror", "repeatable registry mirror mapping, format <registry>=<mirror>[,<mirror>...]")
 	flag.Var(&discoveryEndpoints, "discovery-endpoint", "repeatable discovery gRPC endpoint, e.g. 10.0.0.2:60051")
 	flag.Int64Var(&cacheMaxBytes, "cache-max-bytes", 0, "max layer cache bytes (0 means default: min(1TB, 60% of free space))")
 	flag.Parse()
@@ -94,6 +96,14 @@ func main() {
 			BearerToken:  authToken,
 		})
 	}
+	registryMirrors := make(map[string][]string)
+	for _, pair := range mirrorPairs {
+		host, mirrors, err := parseRegistryMirrorPair(pair)
+		if err != nil {
+			log.Fatalf("invalid -registry-mirror %q: %v", pair, err)
+		}
+		registryMirrors[host] = append(registryMirrors[host], mirrors...)
+	}
 	log.Printf("starting layerstore: node-id=%s listen=%s cache-dir=%s auth-configs=%d discovery-endpoints=%d", nodeID, listenAddr, cacheDir, len(authConfigs), len(discoveryEndpoints))
 
 	svc, err := layerstore.NewService(cacheDir, authConfigs)
@@ -102,6 +112,9 @@ func main() {
 	}
 	if cacheMaxBytes > 0 {
 		svc.SetCacheLimitBytes(cacheMaxBytes)
+	}
+	if len(registryMirrors) > 0 {
+		svc.SetRegistryMirrors(registryMirrors)
 	}
 	svc.SetPeerFetchConfig(listenAddr, discoveryEndpoints)
 	log.Printf("layer cache limit bytes=%s", strconv.FormatInt(svc.CacheLimitBytes(), 10))
@@ -470,4 +483,33 @@ func parseRegistryBasicPair(v string) (registryHost string, username string, pas
 		pass = userPass[1]
 	}
 	return host, user, pass, nil
+}
+
+func parseRegistryMirrorPair(v string) (registryHost string, mirrors []string, err error) {
+	parts := strings.SplitN(strings.TrimSpace(v), "=", 2)
+	if len(parts) != 2 {
+		return "", nil, fmt.Errorf("expected <registry>=<mirror>[,<mirror>...]")
+	}
+	host := strings.TrimSpace(parts[0])
+	rawMirrors := strings.TrimSpace(parts[1])
+	if host == "" || rawMirrors == "" {
+		return "", nil, fmt.Errorf("registry and mirror list must be non-empty")
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	for _, m := range strings.Split(rawMirrors, ",") {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return "", nil, fmt.Errorf("at least one mirror is required")
+	}
+	return host, out, nil
 }

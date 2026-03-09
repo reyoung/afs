@@ -63,6 +63,7 @@ type Service struct {
 	newFetcher    func() fetcher
 	maxReadSize   int
 	authByHost    map[string]RegistryAuthConfig
+	mirrorsByHost map[string][]string
 	metadataMu    sync.Mutex
 	pullReport    func(imageKey string, pulling bool)
 	pruneMu       sync.Mutex
@@ -136,9 +137,37 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		newFetcher:       func() fetcher { return registry.NewClient(nil) },
 		maxReadSize:      maxReadBytes,
 		authByHost:       authByHost,
+		mirrorsByHost:    make(map[string][]string),
 		cacheMax:         cacheMax,
 		peerFetchTimeout: 5 * time.Second,
 	}, nil
+}
+
+func (s *Service) SetRegistryMirrors(m map[string][]string) {
+	out := make(map[string][]string, len(m))
+	for host, mirrors := range m {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(mirrors))
+		cleaned := make([]string, 0, len(mirrors))
+		for _, mirror := range mirrors {
+			mirror = strings.TrimSpace(mirror)
+			if mirror == "" {
+				continue
+			}
+			if _, ok := seen[mirror]; ok {
+				continue
+			}
+			seen[mirror] = struct{}{}
+			cleaned = append(cleaned, mirror)
+		}
+		if len(cleaned) > 0 {
+			out[host] = cleaned
+		}
+	}
+	s.mirrorsByHost = out
 }
 
 func (s *Service) SetPeerFetchConfig(localEndpoint string, discoveryEndpoints []string) {
@@ -172,6 +201,9 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	f := s.newFetcher()
 	if err := s.applyConfiguredAuth(f, ref.Registry); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "registry auth config: %v", err)
+	}
+	if err := s.applyConfiguredMirrors(f); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "registry mirror config: %v", err)
 	}
 
 	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
@@ -506,6 +538,65 @@ func (s *Service) ReadLayer(ctx context.Context, req *layerstorepb.ReadLayerRequ
 		Data:   buf[:n],
 		Eof:    errors.Is(readErr, io.EOF),
 	}, nil
+}
+
+func (s *Service) ReadLayerStream(req *layerstorepb.ReadLayerRequest, stream layerstorepb.LayerStore_ReadLayerStreamServer) error {
+	if req == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	if req.GetOffset() < 0 {
+		return status.Error(codes.InvalidArgument, "offset must be >= 0")
+	}
+	if req.GetLength() <= 0 {
+		return status.Error(codes.InvalidArgument, "length must be > 0")
+	}
+	if int(req.GetLength()) > s.maxReadSize {
+		return status.Errorf(codes.InvalidArgument, "length exceeds max: %d", s.maxReadSize)
+	}
+
+	fullPath, err := s.layerPath(req.GetDigest())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	f, err := os.Open(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return status.Errorf(codes.NotFound, "layer is not cached: %s", req.GetDigest())
+		}
+		return status.Errorf(codes.Internal, "open layer: %v", err)
+	}
+	defer f.Close()
+
+	remaining := int(req.GetLength())
+	curOffset := req.GetOffset()
+	for remaining > 0 {
+		chunk := remaining
+		if chunk > s.maxReadSize {
+			chunk = s.maxReadSize
+		}
+		buf := make([]byte, chunk)
+		n, readErr := f.ReadAt(buf, curOffset)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return status.Errorf(codes.Internal, "read layer: %v", readErr)
+		}
+		resp := &layerstorepb.ReadLayerResponse{
+			Digest: req.GetDigest(),
+			Offset: curOffset,
+			Data:   buf[:n],
+			Eof:    errors.Is(readErr, io.EOF),
+		}
+		if sendErr := stream.Send(resp); sendErr != nil {
+			return sendErr
+		}
+		curOffset += int64(n)
+		remaining -= n
+		if n == 0 || errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	_ = touchFile(fullPath)
+	return nil
 }
 
 func (s *Service) HasLayer(ctx context.Context, req *layerstorepb.HasLayerRequest) (*layerstorepb.HasLayerResponse, error) {
@@ -917,6 +1008,19 @@ func (s *Service) applyConfiguredAuth(f fetcher, registryHost string) error {
 	}
 	if username != "" {
 		return f.Login(registryHost, username, password)
+	}
+	return nil
+}
+
+func (s *Service) applyConfiguredMirrors(f fetcher) error {
+	client, ok := f.(*registry.Client)
+	if !ok {
+		return nil
+	}
+	for host, mirrors := range s.mirrorsByHost {
+		if err := client.SetRegistryMirrors(host, mirrors); err != nil {
+			return err
+		}
 	}
 	return nil
 }

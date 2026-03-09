@@ -28,6 +28,7 @@ type Client struct {
 
 	mu             sync.RWMutex
 	authByRegistry map[string]authConfig
+	mirrorsByHost  map[string][]string
 }
 
 type authConfig struct {
@@ -45,7 +46,41 @@ func NewClient(httpClient *http.Client) *Client {
 		httpClient:     httpClient,
 		userAgent:      "afs-registry-client/1.0",
 		authByRegistry: make(map[string]authConfig),
+		mirrorsByHost:  make(map[string][]string),
 	}
+}
+
+// SetRegistryMirrors configures pull mirrors for one registry host.
+// Mirrors are tried in order; the original registry is used as fallback.
+func (c *Client) SetRegistryMirrors(registry string, mirrors []string) error {
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		return fmt.Errorf("registry must not be empty")
+	}
+	cleaned := make([]string, 0, len(mirrors))
+	seen := make(map[string]struct{}, len(mirrors))
+	for _, m := range mirrors {
+		h, err := normalizeMirrorHost(m)
+		if err != nil {
+			return fmt.Errorf("invalid mirror %q for registry %s: %w", m, registry, err)
+		}
+		if h == "" || h == registry {
+			continue
+		}
+		if _, ok := seen[h]; ok {
+			continue
+		}
+		seen[h] = struct{}{}
+		cleaned = append(cleaned, h)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(cleaned) == 0 {
+		delete(c.mirrorsByHost, registry)
+		return nil
+	}
+	c.mirrorsByHost[registry] = cleaned
+	return nil
 }
 
 // Login configures client to use basic auth credentials for a registry host.
@@ -115,65 +150,81 @@ func (c *Client) GetManifestForPlatform(ctx context.Context, image string, tag s
 }
 
 func (c *Client) getManifestForReference(ctx context.Context, ref ImageReference, manifestRef string, os string, arch string, variant string) (*Manifest, error) {
-	u := fmt.Sprintf("https://%s/v2/%s/manifests/%s", ref.Registry, ref.Repository, manifestRef)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", strings.Join([]string{manifestOCI, manifestV2, manifestIndexOCI, manifestListV2}, ", "))
-
-	resp, err := c.doWithAuth(ctx, req, ref.Registry, ref.Repository)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-		return nil, fmt.Errorf("manifest request failed: status=%d body=%q", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
-	}
-
-	mediaType := normalizeMediaType(resp.Header.Get("Content-Type"))
-	var probe struct {
-		MediaType string `json:"mediaType"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return nil, fmt.Errorf("decode manifest metadata: %w", err)
-	}
-	if mediaType == "" || mediaType == "application/json" || mediaType == "text/plain" {
-		mediaType = probe.MediaType
-	}
-
-	switch mediaType {
-	case manifestOCI, manifestV2:
-		var m Manifest
-		if err := json.Unmarshal(body, &m); err != nil {
-			return nil, fmt.Errorf("decode manifest: %w", err)
-		}
-		return &m, nil
-	case manifestIndexOCI, manifestListV2:
-		var ml ManifestList
-		if err := json.Unmarshal(body, &ml); err != nil {
-			return nil, fmt.Errorf("decode manifest list: %w", err)
-		}
-		entry, err := chooseManifestEntry(ml.Manifests, os, arch, variant)
+	hosts := c.requestHosts(ref.Registry)
+	var lastErr error
+	for i, host := range hosts {
+		u := fmt.Sprintf("https://%s/v2/%s/manifests/%s", host, ref.Repository, manifestRef)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, err
 		}
-		return c.getManifestForReference(ctx, ref, entry.Digest, os, arch, variant)
-	default:
-		// Fallback for registries that omit mediaType but still return single manifest.
-		var m Manifest
-		if err := json.Unmarshal(body, &m); err == nil && len(m.Layers) > 0 {
-			return &m, nil
+		req.Header.Set("Accept", strings.Join([]string{manifestOCI, manifestV2, manifestIndexOCI, manifestListV2}, ", "))
+
+		resp, err := c.doWithAuth(ctx, req, host, ref.Repository)
+		if err != nil {
+			lastErr = err
+			continue
 		}
-		return nil, fmt.Errorf("unsupported manifest media type: %q", mediaType)
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+			_ = resp.Body.Close()
+			reqErr := fmt.Errorf("manifest request failed host=%s status=%d body=%q", host, resp.StatusCode, strings.TrimSpace(string(b)))
+			lastErr = reqErr
+			if i < len(hosts)-1 && shouldFallbackToNextHost(resp.StatusCode) {
+				continue
+			}
+			return nil, reqErr
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("read manifest from host=%s: %w", host, err)
+			continue
+		}
+
+		mediaType := normalizeMediaType(resp.Header.Get("Content-Type"))
+		var probe struct {
+			MediaType string `json:"mediaType"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			return nil, fmt.Errorf("decode manifest metadata: %w", err)
+		}
+		if mediaType == "" || mediaType == "application/json" || mediaType == "text/plain" {
+			mediaType = probe.MediaType
+		}
+
+		switch mediaType {
+		case manifestOCI, manifestV2:
+			var m Manifest
+			if err := json.Unmarshal(body, &m); err != nil {
+				return nil, fmt.Errorf("decode manifest: %w", err)
+			}
+			return &m, nil
+		case manifestIndexOCI, manifestListV2:
+			var ml ManifestList
+			if err := json.Unmarshal(body, &ml); err != nil {
+				return nil, fmt.Errorf("decode manifest list: %w", err)
+			}
+			entry, err := chooseManifestEntry(ml.Manifests, os, arch, variant)
+			if err != nil {
+				return nil, err
+			}
+			return c.getManifestForReference(ctx, ref, entry.Digest, os, arch, variant)
+		default:
+			// Fallback for registries that omit mediaType but still return single manifest.
+			var m Manifest
+			if err := json.Unmarshal(body, &m); err == nil && len(m.Layers) > 0 {
+				return &m, nil
+			}
+			return nil, fmt.Errorf("unsupported manifest media type: %q", mediaType)
+		}
 	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("manifest request failed: no available hosts for %s", ref.Registry)
 }
 
 func normalizeMediaType(v string) string {
@@ -232,23 +283,36 @@ func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, di
 		return nil, err
 	}
 
-	u := fmt.Sprintf("https://%s/v2/%s/blobs/%s", ref.Registry, ref.Repository, digest)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
+	hosts := c.requestHosts(ref.Registry)
+	var lastErr error
+	for i, host := range hosts {
+		u := fmt.Sprintf("https://%s/v2/%s/blobs/%s", host, ref.Repository, digest)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
 
-	resp, err := c.doWithAuth(ctx, req, ref.Registry, ref.Repository)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		resp, err := c.doWithAuth(ctx, req, host, ref.Repository)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp.Body, nil
+		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-		return nil, fmt.Errorf("download layer failed: status=%d body=%q", resp.StatusCode, strings.TrimSpace(string(b)))
+		_ = resp.Body.Close()
+		reqErr := fmt.Errorf("download layer failed host=%s status=%d body=%q", host, resp.StatusCode, strings.TrimSpace(string(b)))
+		lastErr = reqErr
+		if i < len(hosts)-1 && shouldFallbackToNextHost(resp.StatusCode) {
+			continue
+		}
+		return nil, reqErr
 	}
-
-	return resp.Body, nil
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("download layer failed: no available hosts for %s", ref.Registry)
 }
 
 func (c *Client) doWithAuth(ctx context.Context, req *http.Request, registry, repository string) (*http.Response, error) {
@@ -377,6 +441,72 @@ func (c *Client) authSnapshot(registry string) authConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.authByRegistry[registry]
+}
+
+func (c *Client) mirrorSnapshot(registry string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := c.mirrorsByHost[registry]
+	if len(out) == 0 {
+		return nil
+	}
+	cp := make([]string, len(out))
+	copy(cp, out)
+	return cp
+}
+
+func (c *Client) requestHosts(registry string) []string {
+	registry = strings.TrimSpace(registry)
+	mirrors := c.mirrorSnapshot(registry)
+	out := make([]string, 0, len(mirrors)+1)
+	seen := make(map[string]struct{}, len(mirrors)+1)
+	for _, host := range mirrors {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	if registry != "" {
+		if _, ok := seen[registry]; !ok {
+			out = append(out, registry)
+		}
+	}
+	return out
+}
+
+func shouldFallbackToNextHost(code int) bool {
+	switch code {
+	case http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
+		return true
+	default:
+		return code >= 500
+	}
+}
+
+func normalizeMirrorHost(v string) (string, error) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "", nil
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(u.Host) == "" {
+			return "", fmt.Errorf("missing host")
+		}
+		return strings.ToLower(strings.TrimSpace(u.Host)), nil
+	}
+	if strings.Contains(s, "/") {
+		s = strings.SplitN(s, "/", 2)[0]
+	}
+	return strings.ToLower(strings.TrimSpace(s)), nil
 }
 
 func applyAuthHeader(req *http.Request, cfg authConfig) {

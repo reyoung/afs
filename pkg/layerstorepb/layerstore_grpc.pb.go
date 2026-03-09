@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LayerStore_PullImage_FullMethodName  = "/layerstore.v1.LayerStore/PullImage"
-	LayerStore_StatLayer_FullMethodName  = "/layerstore.v1.LayerStore/StatLayer"
-	LayerStore_ReadLayer_FullMethodName  = "/layerstore.v1.LayerStore/ReadLayer"
-	LayerStore_HasLayer_FullMethodName   = "/layerstore.v1.LayerStore/HasLayer"
-	LayerStore_HasImage_FullMethodName   = "/layerstore.v1.LayerStore/HasImage"
-	LayerStore_PruneCache_FullMethodName = "/layerstore.v1.LayerStore/PruneCache"
+	LayerStore_PullImage_FullMethodName       = "/layerstore.v1.LayerStore/PullImage"
+	LayerStore_StatLayer_FullMethodName       = "/layerstore.v1.LayerStore/StatLayer"
+	LayerStore_ReadLayer_FullMethodName       = "/layerstore.v1.LayerStore/ReadLayer"
+	LayerStore_ReadLayerStream_FullMethodName = "/layerstore.v1.LayerStore/ReadLayerStream"
+	LayerStore_HasLayer_FullMethodName        = "/layerstore.v1.LayerStore/HasLayer"
+	LayerStore_HasImage_FullMethodName        = "/layerstore.v1.LayerStore/HasImage"
+	LayerStore_PruneCache_FullMethodName      = "/layerstore.v1.LayerStore/PruneCache"
 )
 
 // LayerStoreClient is the client API for LayerStore service.
@@ -34,6 +35,7 @@ type LayerStoreClient interface {
 	PullImage(ctx context.Context, in *PullImageRequest, opts ...grpc.CallOption) (*PullImageResponse, error)
 	StatLayer(ctx context.Context, in *StatLayerRequest, opts ...grpc.CallOption) (*StatLayerResponse, error)
 	ReadLayer(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (*ReadLayerResponse, error)
+	ReadLayerStream(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadLayerResponse], error)
 	HasLayer(ctx context.Context, in *HasLayerRequest, opts ...grpc.CallOption) (*HasLayerResponse, error)
 	HasImage(ctx context.Context, in *HasImageRequest, opts ...grpc.CallOption) (*HasImageResponse, error)
 	PruneCache(ctx context.Context, in *PruneCacheRequest, opts ...grpc.CallOption) (*PruneCacheResponse, error)
@@ -77,6 +79,25 @@ func (c *layerStoreClient) ReadLayer(ctx context.Context, in *ReadLayerRequest, 
 	return out, nil
 }
 
+func (c *layerStoreClient) ReadLayerStream(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadLayerResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &LayerStore_ServiceDesc.Streams[0], LayerStore_ReadLayerStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReadLayerRequest, ReadLayerResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type LayerStore_ReadLayerStreamClient = grpc.ServerStreamingClient[ReadLayerResponse]
+
 func (c *layerStoreClient) HasLayer(ctx context.Context, in *HasLayerRequest, opts ...grpc.CallOption) (*HasLayerResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HasLayerResponse)
@@ -114,6 +135,7 @@ type LayerStoreServer interface {
 	PullImage(context.Context, *PullImageRequest) (*PullImageResponse, error)
 	StatLayer(context.Context, *StatLayerRequest) (*StatLayerResponse, error)
 	ReadLayer(context.Context, *ReadLayerRequest) (*ReadLayerResponse, error)
+	ReadLayerStream(*ReadLayerRequest, grpc.ServerStreamingServer[ReadLayerResponse]) error
 	HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error)
 	HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error)
 	PruneCache(context.Context, *PruneCacheRequest) (*PruneCacheResponse, error)
@@ -135,6 +157,9 @@ func (UnimplementedLayerStoreServer) StatLayer(context.Context, *StatLayerReques
 }
 func (UnimplementedLayerStoreServer) ReadLayer(context.Context, *ReadLayerRequest) (*ReadLayerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReadLayer not implemented")
+}
+func (UnimplementedLayerStoreServer) ReadLayerStream(*ReadLayerRequest, grpc.ServerStreamingServer[ReadLayerResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ReadLayerStream not implemented")
 }
 func (UnimplementedLayerStoreServer) HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HasLayer not implemented")
@@ -219,6 +244,17 @@ func _LayerStore_ReadLayer_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _LayerStore_ReadLayerStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReadLayerRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(LayerStoreServer).ReadLayerStream(m, &grpc.GenericServerStream[ReadLayerRequest, ReadLayerResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type LayerStore_ReadLayerStreamServer = grpc.ServerStreamingServer[ReadLayerResponse]
 
 func _LayerStore_HasLayer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HasLayerRequest)
@@ -306,6 +342,12 @@ var LayerStore_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _LayerStore_PruneCache_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ReadLayerStream",
+			Handler:       _LayerStore_ReadLayerStream_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "api/layerstore/v1/layerstore.proto",
 }

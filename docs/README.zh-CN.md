@@ -20,6 +20,8 @@
   - layer 缓存服务设计。
 - `docs/components/afs_layerstore_grpcd.zh-CN.md`
   - layer 缓存服务设计（中文）。
+- `docs/components/afs_layerstored_proxy.zh-CN.md`
+  - layerstore 代理与 LFU 本地缓存设计（草案，中文）。
 - `docs/components/afs_mount.md`
   - 镜像挂载设计。
 - `docs/components/afs_mount.zh-CN.md`

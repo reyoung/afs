@@ -292,3 +292,68 @@ func TestClient_LoginIsScopedByRegistryHost(t *testing.T) {
 		t.Fatal("expected hostB request to fail without host-specific credentials")
 	}
 }
+
+func TestClient_MirrorFallbackToOrigin(t *testing.T) {
+	const (
+		repo      = "library/ubuntu"
+		tag       = "latest"
+		digest    = "sha256:layer-mirror"
+		blobBytes = "mirror-fallback-content"
+	)
+
+	mirrorHits := 0
+	mirror := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mirrorHits++
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("forbidden"))
+	}))
+	defer mirror.Close()
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repo + "/manifests/" + tag:
+			w.Header().Set("Content-Type", manifestV2)
+			_, _ = w.Write([]byte(`{"schemaVersion":2,"mediaType":"` + manifestV2 + `","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":10,"digest":"sha256:cfg"},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":100,"digest":"` + digest + `"}]}`))
+		case "/v2/" + repo + "/blobs/" + digest:
+			_, _ = w.Write([]byte(blobBytes))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer origin.Close()
+
+	client := NewClient(&http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	})
+	originHost := strings.TrimPrefix(origin.URL, "https://")
+	mirrorHost := strings.TrimPrefix(mirror.URL, "https://")
+	if err := client.SetRegistryMirrors(originHost, []string{mirrorHost}); err != nil {
+		t.Fatalf("SetRegistryMirrors() error = %v", err)
+	}
+
+	image := originHost + "/" + repo
+	layers, err := client.GetLayers(context.Background(), image, tag)
+	if err != nil {
+		t.Fatalf("GetLayers() error = %v", err)
+	}
+	if len(layers) != 1 || layers[0].Digest != digest {
+		t.Fatalf("unexpected layers: %+v", layers)
+	}
+	rc, err := client.DownloadLayer(context.Background(), image, tag, digest)
+	if err != nil {
+		t.Fatalf("DownloadLayer() error = %v", err)
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(b) != blobBytes {
+		t.Fatalf("unexpected blob bytes: %q", string(b))
+	}
+	if mirrorHits == 0 {
+		t.Fatalf("expected mirror to be attempted before origin")
+	}
+}

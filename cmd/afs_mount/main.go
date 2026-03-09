@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +24,7 @@ import (
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerfuse"
+	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 )
 
@@ -85,7 +84,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.extraDir, "extra-dir", "", "extra read-only directory inserted between writable upper and image layers")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
-	flag.IntVar(&cfg.grpcMaxChunk, "grpc-max-chunk", 1<<20, "max bytes per gRPC read call")
+	flag.IntVar(&cfg.grpcMaxChunk, "grpc-max-chunk", 4<<20, "max bytes per gRPC read call")
 	flag.BoolVar(&cfg.grpcInsecure, "grpc-insecure", true, "use insecure gRPC transport")
 	flag.StringVar(&cfg.nodeID, "node-id", "", "node affinity id for preferring local layerstore")
 	flag.StringVar(&cfg.image, "image", "", "image reference for remote image mode")
@@ -192,7 +191,18 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 			return fmt.Errorf("create layer mount dir: %w", err)
 		}
 
-		reader, err := newDiscoveryBackedLayerReader(cfg, digest, chosen.endpoint, providers)
+		reader, err := layerreader.NewDiscoveryBackedLayerReader(
+			layerreader.Config{
+				DiscoveryAddr: cfg.discoveryAddr,
+				GRPCTimeout:   cfg.grpcTimeout,
+				GRPCMaxChunk:  cfg.grpcMaxChunk,
+				GRPCInsecure:  cfg.grpcInsecure,
+				NodeID:        cfg.nodeID,
+			},
+			digest,
+			chosen.endpoint,
+			toLayerReaderServices(providers),
+		)
 		if err != nil {
 			return fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)
 		}
@@ -396,202 +406,15 @@ func dedupeServiceInfos(in []serviceInfo) []serviceInfo {
 	return out
 }
 
-func newDiscoveryBackedLayerReader(cfg config, digest string, bootstrapEndpoint string, providers []serviceInfo) (*discoveryLayerReaderAt, error) {
-	r := &discoveryLayerReaderAt{
-		cfg:       cfg,
-		digest:    digest,
-		bootstrap: bootstrapEndpoint,
-		providers: append([]serviceInfo(nil), providers...),
-	}
-	if err := r.switchProvider(nil); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-type discoveryLayerReaderAt struct {
-	cfg       config
-	digest    string
-	bootstrap string
-	providers []serviceInfo
-
-	mu       sync.Mutex
-	endpoint string
-	conn     *grpc.ClientConn
-	client   layerstorepb.LayerStoreClient
-	size     int64
-}
-
-func (r *discoveryLayerReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.refreshProvidersLocked()
-
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if off < 0 {
-		return 0, fmt.Errorf("negative offset: %d", off)
-	}
-	if off >= r.size {
-		return 0, io.EOF
-	}
-
-	maxReadable := int64(len(p))
-	if off+maxReadable > r.size {
-		maxReadable = r.size - off
-	}
-
-	excluded := make(map[string]struct{})
-	for {
-		total, err := r.readOnceLocked(p[:maxReadable], off)
-		if err == nil || errors.Is(err, io.EOF) {
-			if int64(total) < int64(len(p)) {
-				return total, io.EOF
-			}
-			return total, err
-		}
-		log.Printf("layer read failed, trying failover: digest=%s endpoint=%s err=%v", r.digest, r.endpoint, err)
-		excluded[r.endpoint] = struct{}{}
-		if switchErr := r.switchProvider(excluded); switchErr != nil {
-			if total > 0 {
-				return total, err
-			}
-			return 0, fmt.Errorf("read failed and no failover provider: %w", switchErr)
-		}
-	}
-}
-
-func (r *discoveryLayerReaderAt) refreshProvidersLocked() {
-	fresh, err := findLayerServices(r.cfg.discoveryAddr, r.digest, r.cfg.grpcTimeout, r.cfg.grpcInsecure)
-	if err != nil {
-		return
-	}
-	if len(fresh) > 0 {
-		r.providers = fresh
-	}
-}
-
-func (r *discoveryLayerReaderAt) readOnceLocked(p []byte, off int64) (int, error) {
-	total := 0
-	for total < len(p) {
-		remaining := len(p) - total
-		if remaining > r.cfg.grpcMaxChunk {
-			remaining = r.cfg.grpcMaxChunk
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), r.cfg.grpcTimeout)
-		resp, err := r.client.ReadLayer(ctx, &layerstorepb.ReadLayerRequest{
-			Digest: r.digest,
-			Offset: off + int64(total),
-			Length: int32(remaining),
+func toLayerReaderServices(in []serviceInfo) []layerreader.ServiceInfo {
+	out := make([]layerreader.ServiceInfo, 0, len(in))
+	for _, s := range in {
+		out = append(out, layerreader.ServiceInfo{
+			NodeID:   s.nodeID,
+			Endpoint: s.endpoint,
 		})
-		cancel()
-		if err != nil {
-			return total, err
-		}
-		n := copy(p[total:], resp.GetData())
-		total += n
-		if n == 0 || resp.GetEof() {
-			break
-		}
 	}
-	if total < len(p) {
-		return total, io.EOF
-	}
-	return total, nil
-}
-
-func (r *discoveryLayerReaderAt) switchProvider(excluded map[string]struct{}) error {
-	candidates := r.findLayerProviders()
-	for _, c := range candidates {
-		if _, skip := excluded[c.endpoint]; skip {
-			continue
-		}
-		if err := r.connectProvider(c.endpoint); err != nil {
-			log.Printf("provider connect failed: digest=%s endpoint=%s err=%v", r.digest, c.endpoint, err)
-			continue
-		}
-		log.Printf("layer provider selected: digest=%s endpoint=%s", r.digest, c.endpoint)
-		return nil
-	}
-	return fmt.Errorf("no available provider for digest=%s", r.digest)
-}
-
-func (r *discoveryLayerReaderAt) findLayerProviders() []serviceInfo {
-	candidates := make([]serviceInfo, 0, len(r.providers)+1)
-	fresh, err := findLayerServices(r.cfg.discoveryAddr, r.digest, r.cfg.grpcTimeout, r.cfg.grpcInsecure)
-	if err == nil && len(fresh) > 0 {
-		candidates = append(candidates, fresh...)
-	} else {
-		candidates = append(candidates, r.providers...)
-	}
-	if r.bootstrap != "" {
-		found := false
-		for _, c := range candidates {
-			if c.endpoint == r.bootstrap {
-				found = true
-				break
-			}
-		}
-		if !found {
-			candidates = append(candidates, serviceInfo{endpoint: r.bootstrap})
-		}
-	}
-	return rankServicesForAffinity(candidates, r.cfg.nodeID)
-}
-
-func findLayerServices(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]serviceInfo, error) {
-	conn, err := dialGRPC(discoveryAddr, timeout, insecureTransport)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	client := discoverypb.NewServiceDiscoveryClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]serviceInfo, 0, len(resp.GetServices()))
-	for _, svc := range resp.GetServices() {
-		if svc == nil {
-			continue
-		}
-		for _, d := range svc.GetLayerDigests() {
-			if d == digest {
-				out = append(out, serviceInfo{
-					nodeID:   strings.TrimSpace(svc.GetNodeId()),
-					endpoint: strings.TrimSpace(svc.GetEndpoint()),
-				})
-				break
-			}
-		}
-	}
-	return dedupeServiceInfos(out), nil
-}
-
-func (r *discoveryLayerReaderAt) connectProvider(endpoint string) error {
-	conn, err := dialGRPC(endpoint, r.cfg.grpcTimeout, r.cfg.grpcInsecure)
-	if err != nil {
-		return err
-	}
-	client := layerstorepb.NewLayerStoreClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.grpcTimeout)
-	defer cancel()
-	statResp, err := client.StatLayer(ctx, &layerstorepb.StatLayerRequest{Digest: r.digest})
-	if err != nil {
-		_ = conn.Close()
-		return err
-	}
-	if r.conn != nil {
-		_ = r.conn.Close()
-	}
-	r.conn = conn
-	r.client = client
-	r.endpoint = endpoint
-	r.size = statResp.GetAfsSize()
-	return nil
+	return out
 }
 
 func tryUnmountUnion(goos string, mountpoint string) error {

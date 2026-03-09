@@ -64,6 +64,35 @@ func TestParseRegistryBasicPairInvalid(t *testing.T) {
 	}
 }
 
+func TestParseRegistryMirrorPair(t *testing.T) {
+	t.Parallel()
+
+	host, mirrors, err := parseRegistryMirrorPair("registry-1.docker.io=mirror.ccs.tencentyun.com, dockerhub.woa.com")
+	if err != nil {
+		t.Fatalf("parseRegistryMirrorPair returned error: %v", err)
+	}
+	if host != "registry-1.docker.io" {
+		t.Fatalf("host=%q, want %q", host, "registry-1.docker.io")
+	}
+	if len(mirrors) != 2 || mirrors[0] != "mirror.ccs.tencentyun.com" || mirrors[1] != "dockerhub.woa.com" {
+		t.Fatalf("mirrors=%v, want [mirror.ccs.tencentyun.com dockerhub.woa.com]", mirrors)
+	}
+}
+
+func TestParseRegistryMirrorPairInvalid(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := parseRegistryMirrorPair("registry-1.docker.io"); err == nil {
+		t.Fatalf("expected error for missing mirror list")
+	}
+	if _, _, err := parseRegistryMirrorPair("=mirror.ccs.tencentyun.com"); err == nil {
+		t.Fatalf("expected error for missing host")
+	}
+	if _, _, err := parseRegistryMirrorPair("registry-1.docker.io=, , "); err == nil {
+		t.Fatalf("expected error for empty mirrors")
+	}
+}
+
 func TestValidateListenEndpoint(t *testing.T) {
 	t.Parallel()
 
