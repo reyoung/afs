@@ -33,6 +33,11 @@ func main() {
 	var tempDir string
 	var limitCPUCores int64
 	var limitMemoryMB int64
+	var sharedSpillCache bool
+	var sharedSpillCacheDir string
+	var sharedSpillCacheSock string
+	var sharedSpillCacheMaxBytes int64
+	var sharedSpillCacheBinary string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -50,6 +55,11 @@ func main() {
 	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
 	flag.Int64Var(&limitCPUCores, "limit-cpu", 1, "total allocatable CPU cores for afslet admission control")
 	flag.Int64Var(&limitMemoryMB, "limit-memory-mb", 256, "total allocatable memory (MB) for afslet admission control")
+	flag.BoolVar(&sharedSpillCache, "shared-spill-cache", false, "enable shared spill cache for afs_mount")
+	flag.StringVar(&sharedSpillCacheDir, "shared-spill-cache-dir", "/var/lib/afslet/spillcache", "shared spill cache dir for afs_mount")
+	flag.StringVar(&sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache socket path for afs_mount")
+	flag.Int64Var(&sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes for afs_mount")
+	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -58,20 +68,25 @@ func main() {
 	}
 
 	svc := afslet.NewService(afslet.Config{
-		MountBinary:      mountBinary,
-		RuncBinary:       runcBinary,
-		RuncNoPivot:      runcNoPivot,
-		RuncNoNewKeyring: runcNoNewKeyring,
-		RuncNoCgroupNS:   runcNoCgroupNS,
-		RuncNoPIDNS:      runcNoPIDNS,
-		RuncNoIPCNS:      runcNoIPCNS,
-		RuncNoUTSNS:      runcNoUTSNS,
-		UseSudo:          useSudo,
-		TarChunk:         tarChunk,
-		DefaultDiscovery: defaultDiscoveryAddr,
-		TempDir:          tempDir,
-		LimitCPUCores:    limitCPUCores,
-		LimitMemoryMB:    limitMemoryMB,
+		MountBinary:                mountBinary,
+		RuncBinary:                 runcBinary,
+		RuncNoPivot:                runcNoPivot,
+		RuncNoNewKeyring:           runcNoNewKeyring,
+		RuncNoCgroupNS:             runcNoCgroupNS,
+		RuncNoPIDNS:                runcNoPIDNS,
+		RuncNoIPCNS:                runcNoIPCNS,
+		RuncNoUTSNS:                runcNoUTSNS,
+		UseSudo:                    useSudo,
+		TarChunk:                   tarChunk,
+		DefaultDiscovery:           defaultDiscoveryAddr,
+		TempDir:                    tempDir,
+		LimitCPUCores:              limitCPUCores,
+		LimitMemoryMB:              limitMemoryMB,
+		SharedSpillCacheEnabled:    sharedSpillCache,
+		SharedSpillCacheDir:        sharedSpillCacheDir,
+		SharedSpillCacheSock:       sharedSpillCacheSock,
+		SharedSpillCacheMaxBytes:   sharedSpillCacheMaxBytes,
+		SharedSpillCacheBinaryPath: sharedSpillCacheBinary,
 	})
 
 	grpcServer := grpc.NewServer()

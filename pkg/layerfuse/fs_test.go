@@ -1,6 +1,9 @@
 package layerfuse
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -8,6 +11,14 @@ import (
 
 	"github.com/reyoung/afs/pkg/layerformat"
 )
+
+type fakeSharedCache struct {
+	prepareFn func(digest string, filePath string, fill func(w io.Writer) (int64, error)) (string, int64, error)
+}
+
+func (f *fakeSharedCache) Prepare(digest string, filePath string, fill func(w io.Writer) (int64, error)) (string, int64, error) {
+	return f.prepareFn(digest, filePath, fill)
+}
 
 func TestSetAttrTimes(t *testing.T) {
 	t.Parallel()
@@ -55,5 +66,37 @@ func TestSetEntryOutAttrRegularFile(t *testing.T) {
 	}
 	if out.Mtime != 1700000000 {
 		t.Fatalf("Mtime=%d, want 1700000000", out.Mtime)
+	}
+}
+
+func TestFileNodePrepareTempFileUsesSharedCacheHit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "hit.spill")
+	if err := os.WriteFile(p, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+
+	f := &FileNode{
+		entry:       layerformat.Entry{Path: "/a/b"},
+		layerDigest: "sha256:abc",
+		sharedCache: &fakeSharedCache{
+			prepareFn: func(digest string, filePath string, fill func(w io.Writer) (int64, error)) (string, int64, error) {
+				if digest != "sha256:abc" || filePath != "/a/b" {
+					t.Fatalf("unexpected shared cache key digest=%q filePath=%q", digest, filePath)
+				}
+				return p, 5, nil
+			},
+		},
+	}
+
+	fd, n, err := f.prepareTempFile()
+	if err != nil {
+		t.Fatalf("prepareTempFile: %v", err)
+	}
+	defer fd.Close()
+	if n != 5 {
+		t.Fatalf("size=%d, want 5", n)
 	}
 }

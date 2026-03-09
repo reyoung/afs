@@ -37,7 +37,9 @@ RUN mkdir -p /out && \
     echo "==> building afs_runc (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afs_runc ./cmd/afs_runc && \
     echo "==> building afs_mount (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
-    go build -trimpath -o /out/afs_mount ./cmd/afs_mount
+    go build -trimpath -o /out/afs_mount ./cmd/afs_mount && \
+    echo "==> building afs_mount_cached (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
+    go build -trimpath -o /out/afs_mount_cached ./cmd/afs_mount_cached
 
 FROM ubuntu:latest
 

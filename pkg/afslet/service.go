@@ -31,61 +31,76 @@ const (
 )
 
 type Config struct {
-	MountBinary      string
-	RuncBinary       string
-	RuncNoPivot      bool
-	RuncNoNewKeyring bool
-	RuncNoCgroupNS   bool
-	RuncNoPIDNS      bool
-	RuncNoIPCNS      bool
-	RuncNoUTSNS      bool
-	UseSudo          bool
-	TarChunk         int
-	DefaultDiscovery string
-	TempDir          string
-	LimitCPUCores    int64
-	LimitMemoryMB    int64
+	MountBinary                string
+	RuncBinary                 string
+	RuncNoPivot                bool
+	RuncNoNewKeyring           bool
+	RuncNoCgroupNS             bool
+	RuncNoPIDNS                bool
+	RuncNoIPCNS                bool
+	RuncNoUTSNS                bool
+	UseSudo                    bool
+	TarChunk                   int
+	DefaultDiscovery           string
+	TempDir                    string
+	LimitCPUCores              int64
+	LimitMemoryMB              int64
+	SharedSpillCacheEnabled    bool
+	SharedSpillCacheDir        string
+	SharedSpillCacheSock       string
+	SharedSpillCacheMaxBytes   int64
+	SharedSpillCacheBinaryPath string
 }
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountBinary       string
-	runcBinary        string
-	runcNoPivot       bool
-	runcNoNewKeyring  bool
-	runcNoCgroupNS    bool
-	runcNoPIDNS       bool
-	runcNoIPCNS       bool
-	runcNoUTSNS       bool
-	useSudo           bool
-	tarChunk          int
-	defaultDiscovery  string
-	tempDir           string
-	mu                sync.Mutex
-	limitCPUCores     int64
-	limitMemoryMB     int64
-	usedCPUCores      int64
-	usedMemoryMB      int64
-	runningContainers int64
+	mountBinary                string
+	runcBinary                 string
+	runcNoPivot                bool
+	runcNoNewKeyring           bool
+	runcNoCgroupNS             bool
+	runcNoPIDNS                bool
+	runcNoIPCNS                bool
+	runcNoUTSNS                bool
+	useSudo                    bool
+	tarChunk                   int
+	defaultDiscovery           string
+	tempDir                    string
+	mu                         sync.Mutex
+	limitCPUCores              int64
+	limitMemoryMB              int64
+	usedCPUCores               int64
+	usedMemoryMB               int64
+	runningContainers          int64
+	sharedSpillCacheEnabled    bool
+	sharedSpillCacheDir        string
+	sharedSpillCacheSock       string
+	sharedSpillCacheMaxBytes   int64
+	sharedSpillCacheBinaryPath string
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountBinary:      strings.TrimSpace(cfg.MountBinary),
-		runcBinary:       strings.TrimSpace(cfg.RuncBinary),
-		runcNoPivot:      cfg.RuncNoPivot,
-		runcNoNewKeyring: cfg.RuncNoNewKeyring,
-		runcNoCgroupNS:   cfg.RuncNoCgroupNS,
-		runcNoPIDNS:      cfg.RuncNoPIDNS,
-		runcNoIPCNS:      cfg.RuncNoIPCNS,
-		runcNoUTSNS:      cfg.RuncNoUTSNS,
-		useSudo:          cfg.UseSudo,
-		tarChunk:         cfg.TarChunk,
-		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
-		tempDir:          strings.TrimSpace(cfg.TempDir),
-		limitCPUCores:    cfg.LimitCPUCores,
-		limitMemoryMB:    cfg.LimitMemoryMB,
+		mountBinary:                strings.TrimSpace(cfg.MountBinary),
+		runcBinary:                 strings.TrimSpace(cfg.RuncBinary),
+		runcNoPivot:                cfg.RuncNoPivot,
+		runcNoNewKeyring:           cfg.RuncNoNewKeyring,
+		runcNoCgroupNS:             cfg.RuncNoCgroupNS,
+		runcNoPIDNS:                cfg.RuncNoPIDNS,
+		runcNoIPCNS:                cfg.RuncNoIPCNS,
+		runcNoUTSNS:                cfg.RuncNoUTSNS,
+		useSudo:                    cfg.UseSudo,
+		tarChunk:                   cfg.TarChunk,
+		defaultDiscovery:           strings.TrimSpace(cfg.DefaultDiscovery),
+		tempDir:                    strings.TrimSpace(cfg.TempDir),
+		limitCPUCores:              cfg.LimitCPUCores,
+		limitMemoryMB:              cfg.LimitMemoryMB,
+		sharedSpillCacheEnabled:    cfg.SharedSpillCacheEnabled,
+		sharedSpillCacheDir:        strings.TrimSpace(cfg.SharedSpillCacheDir),
+		sharedSpillCacheSock:       strings.TrimSpace(cfg.SharedSpillCacheSock),
+		sharedSpillCacheMaxBytes:   cfg.SharedSpillCacheMaxBytes,
+		sharedSpillCacheBinaryPath: strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -101,6 +116,9 @@ func NewService(cfg Config) *Service {
 	}
 	if s.limitMemoryMB <= 0 {
 		s.limitMemoryMB = defaultMemoryMB
+	}
+	if s.sharedSpillCacheMaxBytes <= 0 {
+		s.sharedSpillCacheMaxBytes = 10 << 30
 	}
 	return s
 }
@@ -346,6 +364,21 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if strings.TrimSpace(start.GetPlatformVariant()) != "" {
 		mountArgs = append(mountArgs, "-platform-variant", start.GetPlatformVariant())
+	}
+	if s.sharedSpillCacheEnabled {
+		mountArgs = append(mountArgs, "-shared-spill-cache")
+		if s.sharedSpillCacheDir != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-dir", s.sharedSpillCacheDir)
+		}
+		if s.sharedSpillCacheSock != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-sock", s.sharedSpillCacheSock)
+		}
+		if s.sharedSpillCacheMaxBytes > 0 {
+			mountArgs = append(mountArgs, "-shared-spill-cache-max-bytes", strconv.FormatInt(s.sharedSpillCacheMaxBytes, 10))
+		}
+		if s.sharedSpillCacheBinaryPath != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-binary", s.sharedSpillCacheBinaryPath)
+		}
 	}
 
 	mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)

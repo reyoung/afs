@@ -72,6 +72,7 @@ services:
       - ./dist/linux_amd64:/usr/local/bin:ro
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
+      - afslet_spillcache:/var/lib/afslet/spillcache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     ports:
       - "61051:61051"
@@ -88,6 +89,12 @@ services:
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
+          -limit-cpu=4 \
+          -limit-memory-mb=4096 \
+          -shared-spill-cache \
+          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
+          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
+          -shared-spill-cache-max-bytes=10737418240 \
           -graceful-timeout=15s
     networks:
       - afsnet
@@ -123,3 +130,4 @@ volumes:
   layerstore_cache:
   afslet_tmp:
   afslet_work:
+  afslet_spillcache:

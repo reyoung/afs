@@ -24,20 +24,34 @@ import (
 
 // NewRoot builds a read-only inode tree backed by layerformat.Reader.
 func NewRoot(r *layerformat.Reader) *DirNode {
-	t := buildTree(r, "", false)
+	t := buildTree(r, rootOptions{})
 	return &DirNode{tree: t, relPath: ""}
 }
 
 // NewRootWithTempDir builds a read-only inode tree and uses tempDir to spill
 // decompressed file payloads, avoiding full-file memory buffering.
 func NewRootWithTempDir(r *layerformat.Reader, tempDir string) *DirNode {
-	t := buildTree(r, tempDir, false)
+	t := buildTree(r, rootOptions{tempDir: tempDir})
 	return &DirNode{tree: t, relPath: ""}
 }
 
 // NewRootWithOptions builds a read-only inode tree and supports spill cache knobs.
 func NewRootWithOptions(r *layerformat.Reader, tempDir string, noSpillCache bool) *DirNode {
-	t := buildTree(r, tempDir, noSpillCache)
+	t := buildTree(r, rootOptions{
+		tempDir:      tempDir,
+		noSpillCache: noSpillCache,
+	})
+	return &DirNode{tree: t, relPath: ""}
+}
+
+// NewRootWithSharedCache builds a read-only inode tree and enables shared spill cache.
+func NewRootWithSharedCache(r *layerformat.Reader, tempDir string, noSpillCache bool, layerDigest string, sharedCache SharedSpillCache) *DirNode {
+	t := buildTree(r, rootOptions{
+		tempDir:      tempDir,
+		noSpillCache: noSpillCache,
+		layerDigest:  layerDigest,
+		sharedCache:  sharedCache,
+	})
 	return &DirNode{tree: t, relPath: ""}
 }
 
@@ -48,16 +62,31 @@ type tree struct {
 	kinds        map[string]uint32
 	tempDir      string
 	noSpillCache bool
+	layerDigest  string
+	sharedCache  SharedSpillCache
 }
 
-func buildTree(r *layerformat.Reader, tempDir string, noSpillCache bool) *tree {
+type rootOptions struct {
+	tempDir      string
+	noSpillCache bool
+	layerDigest  string
+	sharedCache  SharedSpillCache
+}
+
+type SharedSpillCache interface {
+	Prepare(digest string, filePath string, fill func(w io.Writer) (int64, error)) (cachePath string, size int64, err error)
+}
+
+func buildTree(r *layerformat.Reader, opts rootOptions) *tree {
 	t := &tree{
 		reader:       r,
 		entries:      make(map[string]layerformat.Entry),
 		children:     make(map[string][]string),
 		kinds:        make(map[string]uint32),
-		tempDir:      strings.TrimSpace(tempDir),
-		noSpillCache: noSpillCache,
+		tempDir:      strings.TrimSpace(opts.tempDir),
+		noSpillCache: opts.noSpillCache,
+		layerDigest:  strings.TrimSpace(opts.layerDigest),
+		sharedCache:  opts.sharedCache,
 	}
 	seenChild := make(map[string]map[string]struct{})
 
@@ -190,7 +219,14 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 		node := &SymlinkNode{entry: e}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
 	default:
-		node := &FileNode{entry: e, reader: d.tree.reader, tempDir: d.tree.tempDir, noSpillCache: d.tree.noSpillCache}
+		node := &FileNode{
+			entry:        e,
+			reader:       d.tree.reader,
+			tempDir:      d.tree.tempDir,
+			noSpillCache: d.tree.noSpillCache,
+			layerDigest:  d.tree.layerDigest,
+			sharedCache:  d.tree.sharedCache,
+		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
 }
@@ -202,6 +238,8 @@ type FileNode struct {
 	reader       *layerformat.Reader
 	tempDir      string
 	noSpillCache bool
+	layerDigest  string
+	sharedCache  SharedSpillCache
 
 	once sync.Once
 	file *os.File
@@ -267,6 +305,27 @@ func (f *FileNode) ensurePrepared() syscall.Errno {
 }
 
 func (f *FileNode) prepareTempFile() (*os.File, int64, error) {
+	if !f.noSpillCache && f.sharedCache != nil && f.layerDigest != "" {
+		p, size, err := f.sharedCache.Prepare(f.layerDigest, f.entry.Path, func(w io.Writer) (int64, error) {
+			bw := bufio.NewWriterSize(w, 1<<20)
+			n, copyErr := f.reader.CopyFile(f.entry.Path, bw)
+			if copyErr != nil {
+				return n, copyErr
+			}
+			if flushErr := bw.Flush(); flushErr != nil {
+				return n, flushErr
+			}
+			return n, nil
+		})
+		if err == nil {
+			fd, openErr := os.Open(p)
+			if openErr != nil {
+				return nil, 0, openErr
+			}
+			return fd, size, nil
+		}
+	}
+
 	tmpDir := f.tempDir
 	if tmpDir == "" {
 		tmpDir = filepath.Join(os.TempDir(), "afs-fuse-spill")
