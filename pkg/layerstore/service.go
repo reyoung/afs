@@ -704,7 +704,7 @@ func (s *Service) PruneCache(ctx context.Context, req *layerstorepb.PruneCacheRe
 }
 
 func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer, allowDownload bool) (cachePath string, size int64, cached bool, err error) {
-	if layer.MediaType != layerformat.OCILayerTarGzipMediaType {
+	if !layerformat.IsSupportedLayerMediaType(layer.MediaType) {
 		return "", 0, false, status.Errorf(codes.FailedPrecondition, "unsupported layer media type %q for %s", layer.MediaType, layer.Digest)
 	}
 
