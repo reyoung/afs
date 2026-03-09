@@ -32,6 +32,7 @@ type config struct {
 	mountpoint      string
 	debug           bool
 	mountProcDev    bool
+	noSpillCache    bool
 	extraDir        string
 	discoveryAddr   string
 	grpcTimeout     time.Duration
@@ -81,6 +82,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "mount target directory")
 	flag.BoolVar(&cfg.debug, "debug", false, "enable go-fuse debug logs")
 	flag.BoolVar(&cfg.mountProcDev, "mount-proc-dev", true, "mount /proc and /dev into mounted rootfs (linux only)")
+	flag.BoolVar(&cfg.noSpillCache, "no-spill-cache", false, "disable on-disk spill cache reuse for decompressed file payloads")
 	flag.StringVar(&cfg.extraDir, "extra-dir", "", "extra read-only directory inserted between writable upper and image layers")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
@@ -210,7 +212,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 		if err != nil {
 			return fmt.Errorf("open layer %s: %w", digest, err)
 		}
-		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, cfg.debug, cfg.fuseTempDir)
+		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache)
 		if err != nil {
 			return fmt.Errorf("mount layer %s: %w", digest, err)
 		}
@@ -449,9 +451,24 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string) (*fuse.Server, error) {
-	root := layerfuse.NewRootWithTempDir(reader, tempDir)
-	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{MountOptions: fuse.MountOptions{Debug: debug, FsName: fmt.Sprintf("afslyr:%s", source), Name: "afslyr", Options: []string{"ro", "exec"}}})
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string, noSpillCache bool) (*fuse.Server, error) {
+	root := layerfuse.NewRootWithOptions(reader, tempDir, noSpillCache)
+	entryTimeout := 30 * time.Second
+	attrTimeout := 30 * time.Second
+	negativeTimeout := 5 * time.Second
+	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{
+		EntryTimeout:    &entryTimeout,
+		AttrTimeout:     &attrTimeout,
+		NegativeTimeout: &negativeTimeout,
+		MountOptions: fuse.MountOptions{
+			Debug:        debug,
+			FsName:       fmt.Sprintf("afslyr:%s", source),
+			Name:         "afslyr",
+			Options:      []string{"ro", "exec"},
+			MaxWrite:     1 << 20,
+			MaxReadAhead: 1 << 20,
+		},
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
 			return nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
