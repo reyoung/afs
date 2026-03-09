@@ -16,16 +16,19 @@ import (
 )
 
 type config struct {
-	rootfs      string
-	cpuCores    int64
-	memoryMB    int64
-	timeout     time.Duration
-	runcBinary  string
-	containerID string
-	keepBundle  bool
-	noPivot     bool
+	rootfs       string
+	cpuCores     int64
+	memoryMB     int64
+	timeout      time.Duration
+	runcBinary   string
+	containerID  string
+	keepBundle   bool
+	noPivot      bool
 	noNewKeyring bool
-	noCgroupNS  bool
+	noCgroupNS   bool
+	noPIDNS      bool
+	noIPCNS      bool
+	noUTSNS      bool
 }
 
 type ociSpec struct {
@@ -99,6 +102,9 @@ func parseFlags() (config, []string) {
 	flag.BoolVar(&cfg.noPivot, "no-pivot", false, "pass --no-pivot to runc run")
 	flag.BoolVar(&cfg.noNewKeyring, "no-new-keyring", false, "pass --no-new-keyring to runc run")
 	flag.BoolVar(&cfg.noCgroupNS, "no-cgroup-ns", false, "do not create cgroup namespace in OCI spec")
+	flag.BoolVar(&cfg.noPIDNS, "no-pid-ns", false, "do not create pid namespace in OCI spec")
+	flag.BoolVar(&cfg.noIPCNS, "no-ipc-ns", false, "do not create ipc namespace in OCI spec")
+	flag.BoolVar(&cfg.noUTSNS, "no-uts-ns", false, "do not create uts namespace in OCI spec")
 	flag.Parse()
 
 	cmdArgs := flag.Args()
@@ -231,14 +237,22 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 	quota := cfg.cpuCores * int64(period)
 	memLimit := cfg.memoryMB * 1024 * 1024
 
-	namespaces := []ociNS{
-		{Type: "pid"},
-		{Type: "ipc"},
-		{Type: "uts"},
-		{Type: "mount"},
+	namespaces := []ociNS{{Type: "mount"}}
+	if !cfg.noPIDNS {
+		namespaces = append(namespaces, ociNS{Type: "pid"})
+	}
+	if !cfg.noIPCNS {
+		namespaces = append(namespaces, ociNS{Type: "ipc"})
+	}
+	if !cfg.noUTSNS {
+		namespaces = append(namespaces, ociNS{Type: "uts"})
 	}
 	if !cfg.noCgroupNS {
 		namespaces = append(namespaces, ociNS{Type: "cgroup"})
+	}
+	hostname := ""
+	if !cfg.noUTSNS {
+		hostname = "afs-runc"
 	}
 
 	return ociSpec{
@@ -255,7 +269,7 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			},
 		},
-		Hostname: "afs-runc",
+		Hostname: hostname,
 		Linux: ociLinux{
 			CgroupsPath: filepath.Join("/afs_runc", cfg.containerID),
 			Resources: ociResources{

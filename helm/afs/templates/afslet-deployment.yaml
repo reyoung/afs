@@ -50,6 +50,9 @@ spec:
             - -runc-no-pivot={{ .Values.afslet.runcNoPivot }}
             - -runc-no-new-keyring={{ .Values.afslet.runcNoNewKeyring }}
             - -runc-no-cgroup-ns={{ .Values.afslet.runcNoCgroupNS }}
+            - -runc-no-pid-ns={{ .Values.afslet.runcNoPIDNS }}
+            - -runc-no-ipc-ns={{ .Values.afslet.runcNoIPCNS }}
+            - -runc-no-uts-ns={{ .Values.afslet.runcNoUTSNS }}
             - -sudo-binaries={{ .Values.afslet.sudoBinaries }}
             - -tar-chunk={{ .Values.afslet.tarChunk }}
             - -graceful-timeout={{ .Values.afslet.gracefulTimeout }}

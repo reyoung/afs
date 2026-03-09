@@ -65,6 +65,9 @@ afslet:
   runcNoPivot: true
   runcNoNewKeyring: true
   runcNoCgroupNS: true
+  runcNoPIDNS: true
+  runcNoIPCNS: true
+  runcNoUTSNS: true
   sudoBinaries: false
   tarChunk: 262144
   gracefulTimeout: 15s

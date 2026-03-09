@@ -36,6 +36,9 @@ type Config struct {
 	RuncNoPivot      bool
 	RuncNoNewKeyring bool
 	RuncNoCgroupNS   bool
+	RuncNoPIDNS      bool
+	RuncNoIPCNS      bool
+	RuncNoUTSNS      bool
 	UseSudo          bool
 	TarChunk         int
 	DefaultDiscovery string
@@ -52,6 +55,9 @@ type Service struct {
 	runcNoPivot       bool
 	runcNoNewKeyring  bool
 	runcNoCgroupNS    bool
+	runcNoPIDNS       bool
+	runcNoIPCNS       bool
+	runcNoUTSNS       bool
 	useSudo           bool
 	tarChunk          int
 	defaultDiscovery  string
@@ -71,6 +77,9 @@ func NewService(cfg Config) *Service {
 		runcNoPivot:      cfg.RuncNoPivot,
 		runcNoNewKeyring: cfg.RuncNoNewKeyring,
 		runcNoCgroupNS:   cfg.RuncNoCgroupNS,
+		runcNoPIDNS:      cfg.RuncNoPIDNS,
+		runcNoIPCNS:      cfg.RuncNoIPCNS,
+		runcNoUTSNS:      cfg.RuncNoUTSNS,
 		useSudo:          cfg.UseSudo,
 		tarChunk:         cfg.TarChunk,
 		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
@@ -306,7 +315,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if logf != nil {
 		logf("session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir))
-		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS))
+		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t runc_no_pid_ns=%t runc_no_ipc_ns=%t runc_no_uts_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS, s.runcNoPIDNS, s.runcNoIPCNS, s.runcNoUTSNS))
 		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
 	}
 
@@ -392,6 +401,15 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if s.runcNoCgroupNS {
 		runcArgs = append(runcArgs, "-no-cgroup-ns")
+	}
+	if s.runcNoPIDNS {
+		runcArgs = append(runcArgs, "-no-pid-ns")
+	}
+	if s.runcNoIPCNS {
+		runcArgs = append(runcArgs, "-no-ipc-ns")
+	}
+	if s.runcNoUTSNS {
+		runcArgs = append(runcArgs, "-no-uts-ns")
 	}
 	runcArgs = append(runcArgs, "--")
 	runcArgs = append(runcArgs, start.GetCommand()...)

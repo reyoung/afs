@@ -23,6 +23,9 @@ func main() {
 	var runcNoPivot bool
 	var runcNoNewKeyring bool
 	var runcNoCgroupNS bool
+	var runcNoPIDNS bool
+	var runcNoIPCNS bool
+	var runcNoUTSNS bool
 	var useSudo bool
 	var tarChunk int
 	var gracefulTimeout time.Duration
@@ -37,6 +40,9 @@ func main() {
 	flag.BoolVar(&runcNoPivot, "runc-no-pivot", false, "pass --no-pivot to afs_runc")
 	flag.BoolVar(&runcNoNewKeyring, "runc-no-new-keyring", false, "pass --no-new-keyring to afs_runc")
 	flag.BoolVar(&runcNoCgroupNS, "runc-no-cgroup-ns", false, "do not create cgroup namespace in afs_runc spec")
+	flag.BoolVar(&runcNoPIDNS, "runc-no-pid-ns", false, "do not create pid namespace in afs_runc spec")
+	flag.BoolVar(&runcNoIPCNS, "runc-no-ipc-ns", false, "do not create ipc namespace in afs_runc spec")
+	flag.BoolVar(&runcNoUTSNS, "runc-no-uts-ns", false, "do not create uts namespace in afs_runc spec")
 	flag.BoolVar(&useSudo, "sudo-binaries", false, "run afs_mount/afs_runc through sudo")
 	flag.IntVar(&tarChunk, "tar-chunk", 256*1024, "tar.gz stream chunk size in bytes")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
@@ -57,6 +63,9 @@ func main() {
 		RuncNoPivot:      runcNoPivot,
 		RuncNoNewKeyring: runcNoNewKeyring,
 		RuncNoCgroupNS:   runcNoCgroupNS,
+		RuncNoPIDNS:      runcNoPIDNS,
+		RuncNoIPCNS:      runcNoIPCNS,
+		RuncNoUTSNS:      runcNoUTSNS,
 		UseSudo:          useSudo,
 		TarChunk:         tarChunk,
 		DefaultDiscovery: defaultDiscoveryAddr,
