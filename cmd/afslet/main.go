@@ -20,6 +20,9 @@ func main() {
 	var listenAddr string
 	var mountBinary string
 	var runcBinary string
+	var runcNoPivot bool
+	var runcNoNewKeyring bool
+	var runcNoCgroupNS bool
 	var useSudo bool
 	var tarChunk int
 	var gracefulTimeout time.Duration
@@ -31,6 +34,9 @@ func main() {
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
 	flag.StringVar(&runcBinary, "runc-binary", "afs_runc", "afs_runc binary path")
+	flag.BoolVar(&runcNoPivot, "runc-no-pivot", false, "pass --no-pivot to afs_runc")
+	flag.BoolVar(&runcNoNewKeyring, "runc-no-new-keyring", false, "pass --no-new-keyring to afs_runc")
+	flag.BoolVar(&runcNoCgroupNS, "runc-no-cgroup-ns", false, "do not create cgroup namespace in afs_runc spec")
 	flag.BoolVar(&useSudo, "sudo-binaries", false, "run afs_mount/afs_runc through sudo")
 	flag.IntVar(&tarChunk, "tar-chunk", 256*1024, "tar.gz stream chunk size in bytes")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
@@ -48,6 +54,9 @@ func main() {
 	svc := afslet.NewService(afslet.Config{
 		MountBinary:      mountBinary,
 		RuncBinary:       runcBinary,
+		RuncNoPivot:      runcNoPivot,
+		RuncNoNewKeyring: runcNoNewKeyring,
+		RuncNoCgroupNS:   runcNoCgroupNS,
 		UseSudo:          useSudo,
 		TarChunk:         tarChunk,
 		DefaultDiscovery: defaultDiscoveryAddr,

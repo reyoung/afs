@@ -47,6 +47,9 @@ spec:
             - -listen=:{{ .Values.afslet.containerPort }}
             - -mount-binary={{ .Values.afslet.mountBinary }}
             - -runc-binary={{ .Values.afslet.runcBinary }}
+            - -runc-no-pivot={{ .Values.afslet.runcNoPivot }}
+            - -runc-no-new-keyring={{ .Values.afslet.runcNoNewKeyring }}
+            - -runc-no-cgroup-ns={{ .Values.afslet.runcNoCgroupNS }}
             - -sudo-binaries={{ .Values.afslet.sudoBinaries }}
             - -tar-chunk={{ .Values.afslet.tarChunk }}
             - -graceful-timeout={{ .Values.afslet.gracefulTimeout }}

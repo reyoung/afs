@@ -62,6 +62,9 @@ afslet:
   containerPort: 61051
   mountBinary: /usr/local/bin/afs_mount
   runcBinary: /usr/local/bin/afs_runc
+  runcNoPivot: true
+  runcNoNewKeyring: true
+  runcNoCgroupNS: true
   sudoBinaries: false
   tarChunk: 262144
   gracefulTimeout: 15s

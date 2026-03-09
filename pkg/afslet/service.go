@@ -33,6 +33,9 @@ const (
 type Config struct {
 	MountBinary      string
 	RuncBinary       string
+	RuncNoPivot      bool
+	RuncNoNewKeyring bool
+	RuncNoCgroupNS   bool
 	UseSudo          bool
 	TarChunk         int
 	DefaultDiscovery string
@@ -46,6 +49,9 @@ type Service struct {
 
 	mountBinary       string
 	runcBinary        string
+	runcNoPivot       bool
+	runcNoNewKeyring  bool
+	runcNoCgroupNS    bool
 	useSudo           bool
 	tarChunk          int
 	defaultDiscovery  string
@@ -62,6 +68,9 @@ func NewService(cfg Config) *Service {
 	s := &Service{
 		mountBinary:      strings.TrimSpace(cfg.MountBinary),
 		runcBinary:       strings.TrimSpace(cfg.RuncBinary),
+		runcNoPivot:      cfg.RuncNoPivot,
+		runcNoNewKeyring: cfg.RuncNoNewKeyring,
+		runcNoCgroupNS:   cfg.RuncNoCgroupNS,
 		useSudo:          cfg.UseSudo,
 		tarChunk:         cfg.TarChunk,
 		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
@@ -297,7 +306,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if logf != nil {
 		logf("session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir))
-		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs()))
+		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS))
 		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
 	}
 
@@ -374,8 +383,17 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		"-cpu", strconv.FormatInt(cpu, 10),
 		"-memory-mb", strconv.FormatInt(memory, 10),
 		"-timeout", timeout.String(),
-		"--",
 	}
+	if s.runcNoPivot {
+		runcArgs = append(runcArgs, "-no-pivot")
+	}
+	if s.runcNoNewKeyring {
+		runcArgs = append(runcArgs, "-no-new-keyring")
+	}
+	if s.runcNoCgroupNS {
+		runcArgs = append(runcArgs, "-no-cgroup-ns")
+	}
+	runcArgs = append(runcArgs, "--")
 	runcArgs = append(runcArgs, start.GetCommand()...)
 	runcCmd := s.newCommandContext(ctx, s.runcBinary, runcArgs...)
 	runcStdout := newProcessLogWriter("runc:stdout", logf)

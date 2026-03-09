@@ -23,6 +23,9 @@ type config struct {
 	runcBinary  string
 	containerID string
 	keepBundle  bool
+	noPivot     bool
+	noNewKeyring bool
+	noCgroupNS  bool
 }
 
 type ociSpec struct {
@@ -93,6 +96,9 @@ func parseFlags() (config, []string) {
 	flag.StringVar(&cfg.runcBinary, "runc-binary", "runc", "runc binary path")
 	flag.StringVar(&cfg.containerID, "container-id", "", "container id (default: auto generated)")
 	flag.BoolVar(&cfg.keepBundle, "keep-bundle", false, "keep generated OCI bundle for debugging")
+	flag.BoolVar(&cfg.noPivot, "no-pivot", false, "pass --no-pivot to runc run")
+	flag.BoolVar(&cfg.noNewKeyring, "no-new-keyring", false, "pass --no-new-keyring to runc run")
+	flag.BoolVar(&cfg.noCgroupNS, "no-cgroup-ns", false, "do not create cgroup namespace in OCI spec")
 	flag.Parse()
 
 	cmdArgs := flag.Args()
@@ -118,6 +124,7 @@ func parseFlags() (config, []string) {
 }
 
 func run(cfg config, cmdArgs []string) error {
+	totalStart := time.Now()
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("afs_runc only supports linux")
 	}
@@ -132,21 +139,34 @@ func run(cfg config, cmdArgs []string) error {
 		return fmt.Errorf("find runc binary %q: %w", cfg.runcBinary, err)
 	}
 
+	prepareStart := time.Now()
 	bundleDir, cleanup, err := prepareBundle(rootfsAbs, cfg, cmdArgs)
 	if err != nil {
 		return err
 	}
+	logTiming("prepare_bundle", time.Since(prepareStart))
 	if !cfg.keepBundle {
 		defer cleanup()
 	}
 
-	runCmd := exec.Command(cfg.runcBinary, "run", "--bundle", bundleDir, cfg.containerID)
+	runArgs := []string{"run", "--bundle", bundleDir}
+	if cfg.noPivot {
+		runArgs = append(runArgs, "--no-pivot")
+	}
+	if cfg.noNewKeyring {
+		runArgs = append(runArgs, "--no-new-keyring")
+	}
+	runArgs = append(runArgs, cfg.containerID)
+
+	runCmd := exec.Command(cfg.runcBinary, runArgs...)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr
 	runCmd.Stdin = os.Stdin
+	startStart := time.Now()
 	if err := runCmd.Start(); err != nil {
 		return fmt.Errorf("start runc run: %w", err)
 	}
+	logTiming("runc_start", time.Since(startStart))
 
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- runCmd.Wait() }()
@@ -154,7 +174,12 @@ func run(cfg config, cmdArgs []string) error {
 
 	select {
 	case err := <-waitCh:
+		waitDur := time.Since(startStart)
+		logTiming("runc_wait", waitDur)
+		delStart := time.Now()
 		deleteContainer(cfg.runcBinary, cfg.containerID)
+		logTiming("runc_delete", time.Since(delStart))
+		logTiming("total", time.Since(totalStart))
 		if err != nil {
 			return fmt.Errorf("runc run failed: %w", err)
 		}
@@ -165,7 +190,11 @@ func run(cfg config, cmdArgs []string) error {
 
 	_ = exec.Command(cfg.runcBinary, "kill", cfg.containerID, "KILL").Run()
 	err = <-waitCh
+	logTiming("runc_wait", time.Since(startStart))
+	delStart := time.Now()
 	deleteContainer(cfg.runcBinary, cfg.containerID)
+	logTiming("runc_delete", time.Since(delStart))
+	logTiming("total", time.Since(totalStart))
 	if err == nil {
 		return fmt.Errorf("container timed out after %s", cfg.timeout)
 	}
@@ -202,6 +231,16 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 	quota := cfg.cpuCores * int64(period)
 	memLimit := cfg.memoryMB * 1024 * 1024
 
+	namespaces := []ociNS{
+		{Type: "pid"},
+		{Type: "ipc"},
+		{Type: "uts"},
+		{Type: "mount"},
+	}
+	if !cfg.noCgroupNS {
+		namespaces = append(namespaces, ociNS{Type: "cgroup"})
+	}
+
 	return ociSpec{
 		Version: "1.0.2",
 		Root: ociRoot{
@@ -223,13 +262,7 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 				CPU:    ociCPU{Period: &period, Quota: &quota},
 				Memory: ociMemory{Limit: &memLimit},
 			},
-			Namespaces: []ociNS{
-				{Type: "pid"},
-				{Type: "ipc"},
-				{Type: "uts"},
-				{Type: "mount"},
-				{Type: "cgroup"},
-			},
+			Namespaces: namespaces,
 		},
 		Mounts: defaultMounts(),
 	}
@@ -264,4 +297,8 @@ func ensureDir(path string) error {
 
 func deleteContainer(runcBinary string, containerID string) {
 	_ = exec.Command(runcBinary, "delete", "-f", containerID).Run()
+}
+
+func logTiming(phase string, d time.Duration) {
+	_, _ = fmt.Fprintf(os.Stderr, "__AFS_RUNC_TIMING__ phase=%s ms=%d\n", phase, d.Milliseconds())
 }
