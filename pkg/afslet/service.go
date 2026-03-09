@@ -50,6 +50,7 @@ type Config struct {
 	SharedSpillCacheSock       string
 	SharedSpillCacheMaxBytes   int64
 	SharedSpillCacheBinaryPath string
+	LayerMountConcurrency      int
 }
 
 type Service struct {
@@ -78,6 +79,7 @@ type Service struct {
 	sharedSpillCacheSock       string
 	sharedSpillCacheMaxBytes   int64
 	sharedSpillCacheBinaryPath string
+	layerMountConcurrency      int
 }
 
 func NewService(cfg Config) *Service {
@@ -101,6 +103,7 @@ func NewService(cfg Config) *Service {
 		sharedSpillCacheSock:       strings.TrimSpace(cfg.SharedSpillCacheSock),
 		sharedSpillCacheMaxBytes:   cfg.SharedSpillCacheMaxBytes,
 		sharedSpillCacheBinaryPath: strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
+		layerMountConcurrency:      cfg.LayerMountConcurrency,
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -119,6 +122,9 @@ func NewService(cfg Config) *Service {
 	}
 	if s.sharedSpillCacheMaxBytes <= 0 {
 		s.sharedSpillCacheMaxBytes = 10 << 30
+	}
+	if s.layerMountConcurrency <= 0 {
+		s.layerMountConcurrency = 1
 	}
 	return s
 }
@@ -379,6 +385,9 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		if s.sharedSpillCacheBinaryPath != "" {
 			mountArgs = append(mountArgs, "-shared-spill-cache-binary", s.sharedSpillCacheBinaryPath)
 		}
+	}
+	if s.layerMountConcurrency > 0 {
+		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))
 	}
 
 	mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)

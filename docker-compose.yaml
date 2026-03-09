@@ -76,6 +76,8 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     ports:
       - "61051:61051"
+    environment:
+      - AFSLET_LAYER_MOUNT_CONCURRENCY=${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
@@ -95,6 +97,7 @@ services:
           -shared-spill-cache-dir=/var/lib/afslet/spillcache \
           -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
           -shared-spill-cache-max-bytes=10737418240 \
+          -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -graceful-timeout=15s
     networks:
       - afsnet

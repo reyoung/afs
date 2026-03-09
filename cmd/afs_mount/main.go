@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,6 +57,7 @@ type config struct {
 	sharedSpillCacheSock       string
 	sharedSpillCacheMaxBytes   int64
 	sharedSpillCacheBinaryPath string
+	layerMountConcurrency      int
 }
 
 type serviceInfo struct {
@@ -110,6 +113,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache unix socket path (default: <shared-spill-cache-dir>/daemon.sock)")
 	flag.Int64Var(&cfg.sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes")
 	flag.StringVar(&cfg.sharedSpillCacheBinaryPath, "shared-spill-cache-binary", "afs_mount_cached", "path of shared spill cache daemon binary")
+	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -117,6 +121,9 @@ func parseFlags() config {
 	}
 	if strings.TrimSpace(cfg.image) == "" {
 		log.Fatal("-image is required")
+	}
+	if cfg.layerMountConcurrency <= 0 {
+		log.Fatal("-layer-mount-concurrency must be > 0")
 	}
 	if cfg.grpcMaxChunk <= 0 {
 		log.Fatal("-grpc-max-chunk must be > 0")
@@ -213,40 +220,104 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 		}
 		log.Printf("shared spill cache enabled: dir=%s sock=%s max-bytes=%d", cfg.sharedSpillCacheDir, cfg.sharedSpillCacheSock, cfg.sharedSpillCacheMaxBytes)
 	}
-	for i, layer := range pullResp.GetLayers() {
-		digest := layer.GetDigest()
-		log.Printf("[%d/%d] preparing layer digest=%s", i+1, len(pullResp.GetLayers()), digest)
-		mountDir := filepath.Join(layersRoot, fmt.Sprintf("%03d_%s", i+1, sanitizeForPath(shortDigest(digest))))
-		if err := os.MkdirAll(mountDir, 0o755); err != nil {
-			return fmt.Errorf("create layer mount dir: %w", err)
-		}
+	layers := pullResp.GetLayers()
+	results := make([]mountedLayer, len(layers))
+	type mountResult struct {
+		idx   int
+		layer mountedLayer
+		err   error
+	}
+	resultCh := make(chan mountResult, len(layers))
+	sema := make(chan struct{}, effectiveLayerMountConcurrency(cfg.layerMountConcurrency, len(layers)))
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for i, layer := range layers {
+		i := i
+		layer := layer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sema <- struct{}{}
+			defer func() { <-sema }()
+			if stop.Load() {
+				return
+			}
+			digest := layer.GetDigest()
+			log.Printf("[%d/%d] preparing layer digest=%s", i+1, len(layers), digest)
+			mountDir := filepath.Join(layersRoot, fmt.Sprintf("%03d_%s", i+1, sanitizeForPath(shortDigest(digest))))
+			if err := os.MkdirAll(mountDir, 0o755); err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("create layer mount dir: %w", err)}
+				return
+			}
 
-		reader, err := layerreader.NewDiscoveryBackedLayerReader(
-			layerreader.Config{
-				DiscoveryAddr: cfg.discoveryAddr,
-				GRPCTimeout:   cfg.grpcTimeout,
-				GRPCMaxChunk:  cfg.grpcMaxChunk,
-				GRPCInsecure:  cfg.grpcInsecure,
-				NodeID:        cfg.nodeID,
-			},
-			digest,
-			chosen.endpoint,
-			toLayerReaderServices(providers),
-		)
-		if err != nil {
-			return fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)
+			reader, err := layerreader.NewDiscoveryBackedLayerReader(
+				layerreader.Config{
+					DiscoveryAddr: cfg.discoveryAddr,
+					GRPCTimeout:   cfg.grpcTimeout,
+					GRPCMaxChunk:  cfg.grpcMaxChunk,
+					GRPCInsecure:  cfg.grpcInsecure,
+					NodeID:        cfg.nodeID,
+				},
+				digest,
+				chosen.endpoint,
+				toLayerReaderServices(providers),
+			)
+			if err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)}
+				return
+			}
+			afslReader, err := layerformat.NewReader(reader)
+			if err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}
+				return
+			}
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient)
+			if err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("mount layer %s: %w", digest, err)}
+				return
+			}
+			resultCh <- mountResult{
+				idx: i,
+				layer: mountedLayer{
+					digest: digest,
+					dir:    mountDir,
+					server: server,
+				},
+			}
+		}()
+	}
+	wg.Wait()
+	close(resultCh)
+
+	var mountErr error
+	for r := range resultCh {
+		if r.err != nil {
+			if mountErr == nil {
+				mountErr = r.err
+			}
+			continue
 		}
-		afslReader, err := layerformat.NewReader(reader)
-		if err != nil {
-			return fmt.Errorf("open layer %s: %w", digest, err)
+		results[r.idx] = r.layer
+	}
+	if mountErr != nil {
+		for _, m := range results {
+			if m.server != nil {
+				mounted = append(mounted, m)
+			}
 		}
-		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient)
-		if err != nil {
-			return fmt.Errorf("mount layer %s: %w", digest, err)
+		return mountErr
+	}
+	for i, m := range results {
+		if m.server == nil {
+			return fmt.Errorf("layer %d mount result missing", i)
 		}
-		mounted = append(mounted, mountedLayer{digest: digest, dir: mountDir, server: server})
-		layerDirs = append(layerDirs, mountDir)
-		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(pullResp.GetLayers()), digest, mountDir)
+		mounted = append(mounted, m)
+		layerDirs = append(layerDirs, m.dir)
+		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(results), m.digest, m.dir)
 	}
 
 	var writableLayerDir string
@@ -434,6 +505,19 @@ func dedupeServiceInfos(in []serviceInfo) []serviceInfo {
 		out = append(out, serviceInfo{nodeID: strings.TrimSpace(s.nodeID), endpoint: ep})
 	}
 	return out
+}
+
+func effectiveLayerMountConcurrency(requested int, total int) int {
+	if total <= 0 {
+		return 1
+	}
+	if requested <= 0 {
+		return 1
+	}
+	if requested > total {
+		return total
+	}
+	return requested
 }
 
 func toLayerReaderServices(in []serviceInfo) []layerreader.ServiceInfo {

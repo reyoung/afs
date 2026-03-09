@@ -38,6 +38,7 @@ func main() {
 	var sharedSpillCacheSock string
 	var sharedSpillCacheMaxBytes int64
 	var sharedSpillCacheBinary string
+	var layerMountConcurrency int
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -60,6 +61,7 @@ func main() {
 	flag.StringVar(&sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache socket path for afs_mount")
 	flag.Int64Var(&sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes for afs_mount")
 	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
+	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -87,6 +89,7 @@ func main() {
 		SharedSpillCacheSock:       sharedSpillCacheSock,
 		SharedSpillCacheMaxBytes:   sharedSpillCacheMaxBytes,
 		SharedSpillCacheBinaryPath: sharedSpillCacheBinary,
+		LayerMountConcurrency:      layerMountConcurrency,
 	})
 
 	grpcServer := grpc.NewServer()

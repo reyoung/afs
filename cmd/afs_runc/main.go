@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -165,17 +168,32 @@ func run(cfg config, cmdArgs []string) error {
 	runArgs = append(runArgs, cfg.containerID)
 
 	runCmd := exec.Command(cfg.runcBinary, runArgs...)
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stderr
+	stdoutPipe, err := runCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("open runc stdout pipe: %w", err)
+	}
+	stderrPipe, err := runCmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("open runc stderr pipe: %w", err)
+	}
 	runCmd.Stdin = os.Stdin
 	startStart := time.Now()
 	if err := runCmd.Start(); err != nil {
 		return fmt.Errorf("start runc run: %w", err)
 	}
 	logTiming("runc_start", time.Since(startStart))
+	detector := newFirstOutputDetector(startStart, logTimingWithStream)
+	var streamWG sync.WaitGroup
+	streamWG.Add(2)
+	go copyObservedStream("stdout", stdoutPipe, os.Stdout, detector, &streamWG)
+	go copyObservedStream("stderr", stderrPipe, os.Stderr, detector, &streamWG)
 
 	waitCh := make(chan error, 1)
-	go func() { waitCh <- runCmd.Wait() }()
+	go func() {
+		waitErr := runCmd.Wait()
+		streamWG.Wait()
+		waitCh <- waitErr
+	}()
 	timedOut := false
 
 	select {
@@ -313,6 +331,79 @@ func deleteContainer(runcBinary string, containerID string) {
 	_ = exec.Command(runcBinary, "delete", "-f", containerID).Run()
 }
 
+type firstOutputDetector struct {
+	start     time.Time
+	emit      func(phase string, d time.Duration, stream string)
+	onceByte  sync.Once
+	onceLine  sync.Once
+	lineMu    sync.Mutex
+	lineBuf   []byte
+	lineLimit int
+}
+
+func newFirstOutputDetector(start time.Time, emit func(phase string, d time.Duration, stream string)) *firstOutputDetector {
+	return &firstOutputDetector{
+		start:     start,
+		emit:      emit,
+		lineBuf:   make([]byte, 0, 256),
+		lineLimit: 1 << 16,
+	}
+}
+
+func (d *firstOutputDetector) Observe(stream string, p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	d.onceByte.Do(func() {
+		d.emit("first_output_byte", time.Since(d.start), stream)
+	})
+	d.lineMu.Lock()
+	defer d.lineMu.Unlock()
+	if len(d.lineBuf) > d.lineLimit {
+		return
+	}
+	for _, b := range p {
+		d.lineBuf = append(d.lineBuf, b)
+		if b == '\n' {
+			d.onceLine.Do(func() {
+				d.emit("first_output_line", time.Since(d.start), stream)
+			})
+			return
+		}
+		if len(d.lineBuf) >= d.lineLimit {
+			return
+		}
+	}
+}
+
+func copyObservedStream(stream string, r io.Reader, dst io.Writer, detector *firstOutputDetector, wg *sync.WaitGroup) {
+	defer wg.Done()
+	br := bufio.NewReaderSize(r, 32*1024)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := br.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			detector.Observe(stream, chunk)
+			if _, werr := dst.Write(chunk); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 func logTiming(phase string, d time.Duration) {
 	_, _ = fmt.Fprintf(os.Stderr, "__AFS_RUNC_TIMING__ phase=%s ms=%d\n", phase, d.Milliseconds())
+}
+
+func logTimingWithStream(phase string, d time.Duration, stream string) {
+	stream = strings.TrimSpace(stream)
+	if stream == "" {
+		logTiming(phase, d)
+		return
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "__AFS_RUNC_TIMING__ phase=%s ms=%d stream=%s\n", phase, d.Milliseconds(), stream)
 }
