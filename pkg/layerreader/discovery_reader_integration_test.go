@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,7 +93,8 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 	if err != nil {
 		t.Fatalf("new discovery backed reader: %v", err)
 	}
-	remoteLayerReader, err := layerformat.NewReader(reader)
+	remoteTimed := &timedReaderAt{ra: reader}
+	remoteLayerReader, err := layerformat.NewReader(remoteTimed)
 	if err != nil {
 		t.Fatalf("open remote layer reader: %v", err)
 	}
@@ -102,7 +105,8 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 		t.Fatalf("open local cached layer: %v", err)
 	}
 	defer localFd.Close()
-	localLayerReader, err := layerformat.NewReader(localFd)
+	localTimed := &timedReaderAt{ra: localFd}
+	localLayerReader, err := layerformat.NewReader(localTimed)
 	if err != nil {
 		t.Fatalf("open local layer reader: %v", err)
 	}
@@ -130,7 +134,8 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 		bytesTotal int64
 		timeTotal  time.Duration
 	}
-	runPhase := func(reader *layerformat.Reader, phase string) (allBytes int64, elapsed time.Duration, peakBps float64, peakPath string, err error) {
+	runPhase := func(reader *layerformat.Reader, timed *timedReaderAt, phase string) (allBytes int64, elapsed time.Duration, peakBps float64, peakPath string, rs readAtStats, err error) {
+		startStats := timed.snapshot()
 		results := make([]workerResult, len(selected))
 		errCh := make(chan error, len(selected))
 
@@ -172,7 +177,7 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 		wg.Wait()
 		close(errCh)
 		for e := range errCh {
-			return 0, 0, 0, "", e
+			return 0, 0, 0, "", readAtStats{}, e
 		}
 		runElapsed := time.Since(runStart)
 
@@ -191,16 +196,17 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 			}
 		}
 		if totalBytes <= 0 {
-			return 0, 0, 0, "", fmt.Errorf("%s no bytes were read in perf test", phase)
+			return 0, 0, 0, "", readAtStats{}, fmt.Errorf("%s no bytes were read in perf test", phase)
 		}
-		return totalBytes, runElapsed, workerPeakBps, workerPeakPath, nil
+		endStats := timed.snapshot()
+		return totalBytes, runElapsed, workerPeakBps, workerPeakPath, endStats.delta(startStats), nil
 	}
 
-	remoteBytes, remoteElapsed, remotePeakBps, remotePeakPath, err := runPhase(remoteLayerReader, "remote")
+	remoteBytes, remoteElapsed, remotePeakBps, remotePeakPath, remoteStats, err := runPhase(remoteLayerReader, remoteTimed, "remote")
 	if err != nil {
 		t.Fatal(err)
 	}
-	localBytes, localElapsed, localPeakBps, localPeakPath, err := runPhase(localLayerReader, "local")
+	localBytes, localElapsed, localPeakBps, localPeakPath, localStats, err := runPhase(localLayerReader, localTimed, "local")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +223,15 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 		image, tag, target.GetDigest(), len(selected), iterations, localBytes, localElapsed,
 		localAggBps/(1024*1024), localPeakBps/(1024*1024), localPeakPath)
 	t.Logf("perf overhead remote_vs_local=%.2f%%", overhead)
+	logReadStats(t, "remote", remoteStats)
+	logReadStats(t, "local", localStats)
+	remoteNsPerMiB := nsPerMiB(remoteStats.gotBytes, remoteStats.durationNanos)
+	localNsPerMiB := nsPerMiB(localStats.gotBytes, localStats.durationNanos)
+	ratio := 0.0
+	if localNsPerMiB > 0 {
+		ratio = remoteNsPerMiB / localNsPerMiB
+	}
+	t.Logf("readat ns_per_mib remote=%.2f local=%.2f ratio=%.2fx", remoteNsPerMiB, localNsPerMiB, ratio)
 }
 
 func startDiscoveryServer(t *testing.T) (addr string, stop func()) {
@@ -516,4 +531,71 @@ func envIntOrDefault(name string, defaultVal int) int {
 		return defaultVal
 	}
 	return v
+}
+
+type timedReaderAt struct {
+	ra io.ReaderAt
+
+	calls    atomic.Int64
+	reqBytes atomic.Int64
+	gotBytes atomic.Int64
+	durNanos atomic.Int64
+}
+
+type readAtStats struct {
+	calls          int64
+	requestedBytes int64
+	gotBytes       int64
+	durationNanos  int64
+}
+
+func (t *timedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	begin := time.Now()
+	n, err := t.ra.ReadAt(p, off)
+	elapsed := time.Since(begin).Nanoseconds()
+	t.calls.Add(1)
+	t.reqBytes.Add(int64(len(p)))
+	t.gotBytes.Add(int64(n))
+	t.durNanos.Add(elapsed)
+	return n, err
+}
+
+func (t *timedReaderAt) snapshot() readAtStats {
+	return readAtStats{
+		calls:          t.calls.Load(),
+		requestedBytes: t.reqBytes.Load(),
+		gotBytes:       t.gotBytes.Load(),
+		durationNanos:  t.durNanos.Load(),
+	}
+}
+
+func (s readAtStats) delta(prev readAtStats) readAtStats {
+	return readAtStats{
+		calls:          s.calls - prev.calls,
+		requestedBytes: s.requestedBytes - prev.requestedBytes,
+		gotBytes:       s.gotBytes - prev.gotBytes,
+		durationNanos:  s.durationNanos - prev.durationNanos,
+	}
+}
+
+func logReadStats(t *testing.T, phase string, s readAtStats) {
+	avgReq := 0.0
+	avgGot := 0.0
+	if s.calls > 0 {
+		avgReq = float64(s.requestedBytes) / float64(s.calls)
+		avgGot = float64(s.gotBytes) / float64(s.calls)
+	}
+	t.Logf("readat %s calls=%d req_bytes=%d got_bytes=%d total_readat_time=%s avg_req=%.1f avg_got=%.1f",
+		phase, s.calls, s.requestedBytes, s.gotBytes, time.Duration(s.durationNanos), avgReq, avgGot)
+}
+
+func nsPerMiB(bytes, nanos int64) float64 {
+	if bytes <= 0 {
+		return 0
+	}
+	miB := float64(bytes) / (1024 * 1024)
+	if miB <= 0 {
+		return 0
+	}
+	return float64(nanos) / miB
 }

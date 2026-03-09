@@ -41,6 +41,9 @@ message FindImageRequest {
   // image_key format: image|tag|platform_os|platform_arch|platform_variant.
   // If empty, service returns all active services.
   string image_key = 1;
+  // Optional layer digest filter, e.g. sha256:...
+  // If set, service returns providers containing this layer.
+  string layer_digest = 2;
 }
 
 message FindImageResponse {

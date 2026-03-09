@@ -44,3 +44,23 @@ Result snapshot (`ubuntu:latest`, workers=8, iterations=8):
 ### Notes
 - `docker pull` may succeed while Go client fails when shell proxy env forces blocked CONNECT tunnel. Running tests without proxy env made the integration run stable.
 - The E2E integration test now auto-detects local Docker auth and Docker daemon mirrors for better parity with local Docker behavior.
+
+### Update: Overhead Root Cause + Optimization
+- Discovery API now supports layer-targeted lookup:
+  - `FindImageRequest.layer_digest` added, and discovery service uses index-based selection (`byLayer`/`byImageKey`) to avoid full scans.
+  - Mount reader now queries discovery with `LayerDigest` directly.
+- Added detailed `ReadAt` timing/counter instrumentation in integration perf test to identify overhead location.
+- Confirmed bottleneck is remote `ReadAt` call granularity (many tiny reads), not `CopyFile` itself.
+
+Optimization applied:
+- In `pkg/layerformat/format.go`, wrapped `io.SectionReader` with `bufio.NewReaderSize(..., 1<<20)` before `gzip.NewReader(...)`.
+- This increases gzip source-read buffering from default `4KiB` to `1MiB`, reducing remote `ReadAt` call count.
+
+Latest integration result (same command and dataset):
+- Remote throughput: `399.28 MiB/s`
+- Local baseline throughput: `454.76 MiB/s`
+- Overhead: `12.20%` (was ~`74.87%`)
+- `ReadAt` stats:
+  - remote: `calls=80`, `got_bytes=69854240`, `total_readat_time=258.565ms`, avg request `~873178 bytes`
+  - local: `calls=80`, `got_bytes=69854240`, `total_readat_time=7.522ms`
+- MD5 checks: all passed.

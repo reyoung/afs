@@ -77,3 +77,38 @@ func TestPruneExpired(t *testing.T) {
 		t.Fatalf("services=%d, want 0 after ttl", len(list.GetServices()))
 	}
 }
+
+func TestFindImageByLayerDigest(t *testing.T) {
+	t.Parallel()
+
+	s := NewService()
+	_, err := s.Heartbeat(context.Background(), &discoverypb.HeartbeatRequest{
+		NodeId:       "node-a",
+		Endpoint:     "10.0.0.1:50051",
+		LayerDigests: []string{"sha256:aaa", "sha256:bbb"},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat node-a: %v", err)
+	}
+	_, err = s.Heartbeat(context.Background(), &discoverypb.HeartbeatRequest{
+		NodeId:       "node-b",
+		Endpoint:     "10.0.0.2:50051",
+		LayerDigests: []string{"sha256:ccc"},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat node-b: %v", err)
+	}
+
+	resp, err := s.FindImage(context.Background(), &discoverypb.FindImageRequest{
+		LayerDigest: "sha256:bbb",
+	})
+	if err != nil {
+		t.Fatalf("FindImage by layer digest: %v", err)
+	}
+	if got := len(resp.GetServices()); got != 1 {
+		t.Fatalf("services=%d, want 1", got)
+	}
+	if got := resp.GetServices()[0].GetEndpoint(); got != "10.0.0.1:50051" {
+		t.Fatalf("endpoint=%q, want 10.0.0.1:50051", got)
+	}
+}

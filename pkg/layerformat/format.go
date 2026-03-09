@@ -2,6 +2,7 @@ package layerformat
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
@@ -17,6 +18,8 @@ import (
 const (
 	magic        = "AFSLYR01"
 	fixedHdrSize = len(magic) + 8
+	// Increase gzip source read buffer to reduce tiny ReaderAt calls (default is 4KiB).
+	gzipReadBufferSize = 1 << 20
 )
 
 type EntryType string
@@ -202,7 +205,7 @@ func (r *Reader) ReadFile(p string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is not a regular file", p)
 	}
 	section := io.NewSectionReader(r.ra, r.dataStart+e.CompressedOffset, e.CompressedSize)
-	gz, err := gzip.NewReader(section)
+	gz, err := gzip.NewReader(bufio.NewReaderSize(section, gzipReadBufferSize))
 	if err != nil {
 		return nil, fmt.Errorf("open file gzip %s: %w", p, err)
 	}
@@ -225,7 +228,7 @@ func (r *Reader) CopyFile(p string, dst io.Writer) (int64, error) {
 		return 0, fmt.Errorf("%s is not a regular file", p)
 	}
 	section := io.NewSectionReader(r.ra, r.dataStart+e.CompressedOffset, e.CompressedSize)
-	gz, err := gzip.NewReader(section)
+	gz, err := gzip.NewReader(bufio.NewReaderSize(section, gzipReadBufferSize))
 	if err != nil {
 		return 0, fmt.Errorf("open file gzip %s: %w", p, err)
 	}

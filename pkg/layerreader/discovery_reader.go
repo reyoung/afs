@@ -260,7 +260,7 @@ func findLayerServices(discoveryAddr, digest string, timeout time.Duration, inse
 	client := discoverypb.NewServiceDiscoveryClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{})
+	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{LayerDigest: digest})
 	if err != nil {
 		return nil, err
 	}
@@ -269,15 +269,10 @@ func findLayerServices(discoveryAddr, digest string, timeout time.Duration, inse
 		if svc == nil {
 			continue
 		}
-		for _, d := range svc.GetLayerDigests() {
-			if d == digest {
-				out = append(out, ServiceInfo{
-					NodeID:   strings.TrimSpace(svc.GetNodeId()),
-					Endpoint: strings.TrimSpace(svc.GetEndpoint()),
-				})
-				break
-			}
-		}
+		out = append(out, ServiceInfo{
+			NodeID:   strings.TrimSpace(svc.GetNodeId()),
+			Endpoint: strings.TrimSpace(svc.GetEndpoint()),
+		})
 	}
 	return dedupeServiceInfos(out), nil
 }
