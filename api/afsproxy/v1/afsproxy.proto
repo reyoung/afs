@@ -6,11 +6,28 @@ option go_package = "github.com/reyoung/afs/pkg/afsproxypb;afsproxypb";
 
 service AfsProxy {
   rpc Status(StatusRequest) returns (stream StatusResponse);
+  rpc ReconcileImageReplica(ReconcileImageReplicaRequest) returns (ReconcileImageReplicaResponse);
 }
 
 message StatusRequest {
   bool include_layerstores = 1;
   bool include_afslets = 2;
+}
+
+message ReconcileImageReplicaRequest {
+  string image = 1;
+  string tag = 2;
+  string platform_os = 3;
+  string platform_arch = 4;
+  string platform_variant = 5;
+  int32 replica = 6;
+}
+
+message ReconcileImageReplicaResponse {
+  string image_key = 1;
+  int32 current_replica = 2;
+  int32 requested_replica = 3;
+  bool ensured = 4;
 }
 
 message StatusSummary {
