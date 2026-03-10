@@ -83,11 +83,23 @@ func (l *Launcher) EnsureStarted() (*Client, error) {
 }
 
 func (l *Launcher) spawnDaemon() error {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", os.DevNull, err)
+	}
+	defer devNull.Close()
+
 	cmd := exec.Command(l.cfg.BinaryPath,
 		"-cache-dir", l.cfg.CacheDir,
 		"-sock", l.cfg.SockPath,
 		"-cache-max-bytes", strconv.FormatInt(l.cfg.MaxBytes, 10),
 	)
+	// Detach daemon stdio from the caller process, so it does not keep
+	// inherited pipe FDs open (for example afslet -> afs_mount log pipes).
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start cache daemon %s: %w", l.cfg.BinaryPath, err)
 	}
