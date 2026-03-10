@@ -216,7 +216,10 @@ func (c *cacheStore) evictIfNeededLocked(protectedKey string) error {
 	for c.totalBytes > c.maxBytes {
 		victimKey := c.pickApproxLRUVictimLocked(defaultSampleSize, protectedKey)
 		if victimKey == "" {
-			break
+			victimKey = c.pickDeterministicVictimLocked(protectedKey)
+			if victimKey == "" {
+				break
+			}
 		}
 		e := c.entries[victimKey]
 		if e == nil {
@@ -236,6 +239,31 @@ func (c *cacheStore) evictIfNeededLocked(protectedKey string) error {
 	return nil
 }
 
+func (c *cacheStore) pickDeterministicVictimLocked(protectedKey string) string {
+	if len(c.entries) == 0 {
+		return ""
+	}
+	allowProtected := len(c.entries) <= 1
+	var victim string
+	var victimAt int64
+	hasVictim := false
+	for k, e := range c.entries {
+		if !allowProtected && protectedKey != "" && k == protectedKey {
+			continue
+		}
+		candidateAt := int64(0)
+		if e != nil {
+			candidateAt = e.LastAccessUnix
+		}
+		if !hasVictim || candidateAt < victimAt || (candidateAt == victimAt && k < victim) {
+			victim = k
+			victimAt = candidateAt
+			hasVictim = true
+		}
+	}
+	return victim
+}
+
 func (c *cacheStore) pickApproxLRUVictimLocked(sampleSize int, protectedKey string) string {
 	if len(c.entries) == 0 {
 		return ""
@@ -244,6 +272,7 @@ func (c *cacheStore) pickApproxLRUVictimLocked(sampleSize int, protectedKey stri
 	for k := range c.entries {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	if sampleSize > len(keys) {
 		sampleSize = len(keys)
 	}

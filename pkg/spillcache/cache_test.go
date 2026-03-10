@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+type zeroSource struct{}
+
+func (zeroSource) Int63() int64 { return 0 }
+
+func (zeroSource) Seed(int64) {}
+
 func TestCacheStoreAcquireCommitAndHit(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -126,5 +132,62 @@ func TestClientPrepareSharedHitAcrossProcesses(t *testing.T) {
 	}
 	if p1 != p2 || s1 != s2 {
 		t.Fatalf("cache path/size mismatch p1=%q p2=%q s1=%d s2=%d", p1, p2, s1, s2)
+	}
+}
+
+func TestCacheStoreEvictionFallsBackWhenApproxSamplerMisses(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := newCacheStore(dir, 8)
+	if err != nil {
+		t.Fatalf("newCacheStore: %v", err)
+	}
+	store.rnd = rand.New(zeroSource{})
+
+	protectedKey := cacheKey{Digest: "sha256:a", FilePath: "/a"}.keyString()
+	victimKey := cacheKey{Digest: "sha256:b", FilePath: "/b"}.keyString()
+	protectedPath := filepath.Join(dir, "protected.spill")
+	victimPath := filepath.Join(dir, "victim.spill")
+	if err := os.WriteFile(protectedPath, []byte("12345678"), 0o644); err != nil {
+		t.Fatalf("write protected: %v", err)
+	}
+	if err := os.WriteFile(victimPath, []byte("abcdefgh"), 0o644); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	store.entries[protectedKey] = &entry{
+		Digest:         "sha256:a",
+		FilePath:       "/a",
+		Hash:           "a",
+		DataFile:       protectedPath,
+		Size:           8,
+		LastAccessUnix: time.Now().Unix(),
+	}
+	store.entries[victimKey] = &entry{
+		Digest:         "sha256:b",
+		FilePath:       "/b",
+		Hash:           "b",
+		DataFile:       victimPath,
+		Size:           8,
+		LastAccessUnix: time.Now().Unix() - 1,
+	}
+	store.totalBytes = 16
+
+	store.mu.Lock()
+	err = store.evictIfNeededLocked(protectedKey)
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("evictIfNeededLocked: %v", err)
+	}
+	if store.totalBytes > store.maxBytes {
+		t.Fatalf("cache bytes=%d exceeds max=%d", store.totalBytes, store.maxBytes)
+	}
+	if _, ok := store.entries[protectedKey]; !ok {
+		t.Fatalf("protected key should not be evicted when another entry exists")
+	}
+	if _, ok := store.entries[victimKey]; ok {
+		t.Fatalf("victim key should be evicted")
+	}
+	if _, statErr := os.Stat(victimPath); !os.IsNotExist(statErr) {
+		t.Fatalf("victim file should be removed, stat err=%v", statErr)
 	}
 }

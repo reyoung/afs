@@ -585,15 +585,6 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- unionCmd.Wait() }()
-	if cfg.onReady != nil {
-		readyWaitStarted := time.Now()
-		if err := waitForUnionMountReady(ctx, cfg.mountpoint, waitCh, unionMountReadyTimeout, nil); err != nil {
-			logTiming("wait_union_mount_ready", readyWaitStarted, "ok=false")
-			return err
-		}
-		logTiming("wait_union_mount_ready", readyWaitStarted, "ok=true")
-		safeInvokeReadyCallback(cfg.onReady)
-	}
 	stopUnion := func(reason string) {
 		stopUnionStarted := time.Now()
 		log.Printf("stopping union mount (%s)", reason)
@@ -611,17 +602,44 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		logTiming("stop_unmount_union", unmountUnionStarted)
 		_ = unionCmd.Process.Signal(syscall.SIGTERM)
 		waitUnionExitStarted := time.Now()
-		select {
-		case err := <-waitCh:
+		waitForExit := func(timeout time.Duration) (error, bool) {
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case err := <-waitCh:
+				return err, true
+			case <-timer.C:
+				return nil, false
+			}
+		}
+		if err, exited := waitForExit(5 * time.Second); exited {
 			if err != nil {
 				log.Printf("union mount exited with error: %v", err)
 			}
-		case <-time.After(5 * time.Second):
-			_ = unionCmd.Process.Kill()
-			<-waitCh
+		} else {
+			if killErr := unionCmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				log.Printf("force kill union mount failed: %v", killErr)
+			}
+			if err, killedExited := waitForExit(2 * time.Second); killedExited {
+				if err != nil {
+					log.Printf("union mount exited with error after kill: %v", err)
+				}
+			} else {
+				log.Printf("union mount did not report exit after SIGKILL")
+			}
 		}
 		logTiming("stop_wait_union_exit", waitUnionExitStarted)
 		logTiming("stop_union_total", stopUnionStarted)
+	}
+	if cfg.onReady != nil {
+		readyWaitStarted := time.Now()
+		if err := waitForUnionMountReady(ctx, cfg.mountpoint, waitCh, unionMountReadyTimeout, nil); err != nil {
+			logTiming("wait_union_mount_ready", readyWaitStarted, "ok=false")
+			stopUnion("ready wait failed")
+			return err
+		}
+		logTiming("wait_union_mount_ready", readyWaitStarted, "ok=true")
+		safeInvokeReadyCallback(cfg.onReady)
 	}
 
 	select {
