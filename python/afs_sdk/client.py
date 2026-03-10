@@ -30,6 +30,8 @@ from .models import (
     ProxyLayerstoreInstance,
     ProxyAfsletInstance,
     ProxyStatusError,
+    ReconcileImageInput,
+    ReconcileImageResult,
 )
 
 
@@ -183,6 +185,28 @@ class AfsClient:
             elif kind == "error":
                 p = resp.error
                 yield ProxyStatusError(source=p.source, message=p.message)
+
+    async def reconcile_image(self, request: ReconcileImageInput) -> ReconcileImageResult:
+        if request.replica < 0:
+            raise ValueError("replica must be >= 0")
+        if not request.image.strip():
+            raise ValueError("image is required")
+        resp = await self._proxy_stub.ReconcileImageReplica(
+            proxypb.ReconcileImageReplicaRequest(
+                image=request.image,
+                tag=request.tag,
+                platform_os=request.platform_os,
+                platform_arch=request.platform_arch,
+                platform_variant=request.platform_variant,
+                replica=request.replica,
+            )
+        )
+        return ReconcileImageResult(
+            image_key=resp.image_key,
+            current_replica=resp.current_replica,
+            requested_replica=resp.requested_replica,
+            ensured=resp.ensured,
+        )
 
     async def raw_execute(self, requests: AsyncIterator[pb.ExecuteRequest]) -> AsyncIterator[pb.ExecuteResponse]:
         """Low-level Execute API using raw protobuf frames."""

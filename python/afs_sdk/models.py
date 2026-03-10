@@ -115,6 +115,24 @@ class ProxyStatusError:
 
 
 @dataclass(slots=True)
+class ReconcileImageInput:
+    image: str
+    replica: int
+    tag: str = ""
+    platform_os: str = "linux"
+    platform_arch: str = "amd64"
+    platform_variant: str = ""
+
+
+@dataclass(slots=True)
+class ReconcileImageResult:
+    image_key: str
+    current_replica: int
+    requested_replica: int
+    ensured: bool
+
+
+@dataclass(slots=True)
 class AcceptedEvent:
     accepted: bool
 

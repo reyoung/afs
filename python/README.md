@@ -19,10 +19,13 @@ cd python
   - response is `AsyncIterator[ExecuteEvent]`
 - Proxy status stream: `AfsClient.status(include_layerstores=True, include_afslets=True)`
   - returns `AsyncIterator[ProxyStatusEvent]`
-  - tar.gz is parsed in streaming form into:
-    - `TarDirectory`
-    - `TarSymlink`
-    - `TarFilePart` (chunked file data; no full-file buffering)
+- Reconcile image replica: `AfsClient.reconcile_image(request: ReconcileImageInput)`
+  - request: image/tag/platform/replica
+  - response: `ReconcileImageResult(image_key, current_replica, requested_replica, ensured)`
+- Execute tar.gz output is parsed in streaming form into:
+  - `TarDirectory`
+  - `TarSymlink`
+  - `TarFilePart` (chunked file data; no full-file buffering)
 - CPU-heavy tar.gz decode/untar is offloaded via executor:
   - pass `tar_executor=...` to `AfsClient`
   - default is an internal `ThreadPoolExecutor(max_workers=1)`
@@ -67,4 +70,12 @@ PYTHONPATH=python ~/.local/bin/uv run python python/examples/execute_stream.py \
   --dir ./extra-dir \
   --image alpine --tag latest \
   -- /bin/sh -c 'echo ok >/tmp/ok.txt'
+```
+
+Reconcile image replica demo:
+
+```bash
+PYTHONPATH=python ~/.local/bin/uv run python python/examples/reconcile_image.py \
+  --addr 127.0.0.1:62051 \
+  --image alpine --tag latest --replica 0
 ```
