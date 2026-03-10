@@ -45,6 +45,7 @@ spec:
             - /usr/local/bin/afslet
           args:
             - -listen=:{{ .Values.afslet.containerPort }}
+            - -mount-in-process={{ .Values.afslet.mountInProcess }}
             - -mount-binary={{ .Values.afslet.mountBinary }}
             - -runc-binary={{ .Values.afslet.runcBinary }}
             - -runc-no-pivot={{ .Values.afslet.runcNoPivot }}

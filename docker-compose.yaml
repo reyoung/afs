@@ -78,6 +78,7 @@ services:
       - "61051:61051"
     environment:
       - AFSLET_LAYER_MOUNT_CONCURRENCY=${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
+      - AFSLET_MOUNT_IN_PROCESS=${AFSLET_MOUNT_IN_PROCESS:-false}
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
@@ -87,6 +88,7 @@ services:
         rm -rf /var/lib/apt/lists/*
         exec /usr/local/bin/afslet \
           -listen=:61051 \
+          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
           -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \

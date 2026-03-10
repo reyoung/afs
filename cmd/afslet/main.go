@@ -19,6 +19,7 @@ import (
 func main() {
 	var listenAddr string
 	var mountBinary string
+	var mountInProcess bool
 	var runcBinary string
 	var runcNoPivot bool
 	var runcNoNewKeyring bool
@@ -42,6 +43,7 @@ func main() {
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
+	flag.BoolVar(&mountInProcess, "mount-in-process", false, "run mount flow in-process instead of spawning afs_mount binary")
 	flag.StringVar(&runcBinary, "runc-binary", "afs_runc", "afs_runc binary path")
 	flag.BoolVar(&runcNoPivot, "runc-no-pivot", false, "pass --no-pivot to afs_runc")
 	flag.BoolVar(&runcNoNewKeyring, "runc-no-new-keyring", false, "pass --no-new-keyring to afs_runc")
@@ -71,6 +73,7 @@ func main() {
 
 	svc := afslet.NewService(afslet.Config{
 		MountBinary:                mountBinary,
+		MountInProcess:             mountInProcess,
 		RuncBinary:                 runcBinary,
 		RuncNoPivot:                runcNoPivot,
 		RuncNoNewKeyring:           runcNoNewKeyring,

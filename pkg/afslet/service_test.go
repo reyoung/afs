@@ -2,6 +2,7 @@ package afslet
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/reyoung/afs/pkg/afsletpb"
+	"github.com/reyoung/afs/pkg/afsmount"
 )
 
 func TestRunCommandRequiresExplicitCPUAndMemory(t *testing.T) {
@@ -39,6 +41,44 @@ func TestRunCommandRequiresExplicitCPUAndMemory(t *testing.T) {
 	}, nil)
 	if res.Success || !strings.Contains(res.Err, "memory_mb must be > 0") {
 		t.Fatalf("expected memory validation error, got success=%v err=%q", res.Success, res.Err)
+	}
+}
+
+func TestRunCommandInProcessMountRunnerError(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Config{MountInProcess: true, LimitCPUCores: 8, LimitMemoryMB: 2048})
+	called := make(chan struct{}, 1)
+	svc.mountRunner = func(ctx context.Context, _ afsmount.Config) error {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+		return fmt.Errorf("synthetic mount failure")
+	}
+
+	sess, cleanup, err := newSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("newSession() error: %v", err)
+	}
+	defer cleanup()
+
+	res := svc.runCommand(context.Background(), sess, &afsletpb.StartRequest{
+		Image:    "alpine",
+		Command:  []string{"echo", "ok"},
+		CpuCores: 1,
+		MemoryMb: 256,
+	}, nil)
+	select {
+	case <-called:
+	default:
+		t.Fatalf("expected in-process mount runner to be called")
+	}
+	if res.Success {
+		t.Fatalf("expected runCommand failure, got success")
+	}
+	if !strings.Contains(res.Err, "mount not ready") || !strings.Contains(res.Err, "synthetic mount failure") {
+		t.Fatalf("unexpected error: %q", res.Err)
 	}
 }
 
@@ -189,6 +229,34 @@ func TestWaitForMountReadyReturnsWhenMountProcessExits(t *testing.T) {
 	mountWait <- context.DeadlineExceeded
 
 	err := waitForMountReady(t.TempDir(), mountWait, 5*time.Second, nil)
+	if err == nil {
+		t.Fatalf("expected error when mount process exits")
+	}
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitForInProcessMountReadyReturnsWhenReadySignalArrives(t *testing.T) {
+	t.Parallel()
+
+	mountWait := make(chan error, 1)
+	ready := make(chan struct{}, 1)
+	ready <- struct{}{}
+
+	if err := waitForInProcessMountReady(mountWait, ready, time.Second, nil); err != nil {
+		t.Fatalf("waitForInProcessMountReady() error: %v", err)
+	}
+}
+
+func TestWaitForInProcessMountReadyReturnsWhenMountProcessExits(t *testing.T) {
+	t.Parallel()
+
+	mountWait := make(chan error, 1)
+	ready := make(chan struct{}, 1)
+	mountWait <- context.DeadlineExceeded
+
+	err := waitForInProcessMountReady(mountWait, ready, time.Second, nil)
 	if err == nil {
 		t.Fatalf("expected error when mount process exits")
 	}

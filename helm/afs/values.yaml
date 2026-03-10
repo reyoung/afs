@@ -60,6 +60,7 @@ afslet:
     enabled: true
     weight: 100
   containerPort: 61051
+  mountInProcess: false
   mountBinary: /usr/local/bin/afs_mount
   runcBinary: /usr/local/bin/afs_runc
   runcNoPivot: true
