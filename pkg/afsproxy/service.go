@@ -32,6 +32,8 @@ const (
 	defaultDialTimeout   = 3 * time.Second
 	defaultStatusTimeout = 2 * time.Second
 	defaultBackoff       = 50 * time.Millisecond
+	defaultPlatformOS    = "linux"
+	defaultPlatformArch  = "amd64"
 )
 
 var (
@@ -355,6 +357,41 @@ func (s *Service) Status(req *afsproxypb.StatusRequest, stream afsproxypb.AfsPro
 	})
 }
 
+func (s *Service) EnsureImage(ctx context.Context, req *afsproxypb.EnsureImageRequest) (*afsproxypb.EnsureImageResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	image := strings.TrimSpace(req.GetImage())
+	if image == "" {
+		return nil, status.Error(codes.InvalidArgument, "image is required")
+	}
+	if req.GetReplica() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "replica must be >= 0")
+	}
+
+	imageKey := imageKey(
+		image,
+		req.GetTag(),
+		valueOrDefault(req.GetPlatformOs(), defaultPlatformOS),
+		valueOrDefault(req.GetPlatformArch(), defaultPlatformArch),
+		req.GetPlatformVariant(),
+	)
+
+	services, err := s.fetchDiscoveryServices(ctx, imageKey)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "query discovery: %v", err)
+	}
+
+	currentReplica := countImageReplica(services, imageKey)
+	requestedReplica := req.GetReplica()
+	return &afsproxypb.EnsureImageResponse{
+		ImageKey:         imageKey,
+		CurrentReplica:   int32(currentReplica),
+		RequestedReplica: requestedReplica,
+		Ensured:          int32(currentReplica) >= requestedReplica,
+	}, nil
+}
+
 func (s *Service) HandleStatusHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/status" && r.URL.Path != "/dispatching" {
 		http.NotFound(w, r)
@@ -541,6 +578,38 @@ func (s *Service) fetchRuntimeStatus(ctx context.Context, addr string) (*afsletp
 }
 
 func (s *Service) fetchLayerstoreServices(ctx context.Context) ([]*afsproxypb.LayerstoreInstance, error) {
+	services, err := s.fetchDiscoveryServices(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*afsproxypb.LayerstoreInstance, 0, len(services))
+	for _, svc := range services {
+		layerInfos := make([]*afsproxypb.LayerInfo, 0, len(svc.GetLayerStats()))
+		if len(svc.GetLayerStats()) > 0 {
+			for _, ls := range svc.GetLayerStats() {
+				layerInfos = append(layerInfos, &afsproxypb.LayerInfo{
+					Digest:  ls.GetDigest(),
+					AfsSize: ls.GetAfsSize(),
+				})
+			}
+		} else {
+			for _, digest := range svc.GetLayerDigests() {
+				layerInfos = append(layerInfos, &afsproxypb.LayerInfo{Digest: digest})
+			}
+		}
+		out = append(out, &afsproxypb.LayerstoreInstance{
+			NodeId:        svc.GetNodeId(),
+			Endpoint:      svc.GetEndpoint(),
+			LastSeenUnix:  svc.GetLastSeenUnix(),
+			CacheMaxBytes: svc.GetCacheMaxBytes(),
+			Layers:        layerInfos,
+			CachedImages:  append([]string(nil), svc.GetCachedImages()...),
+		})
+	}
+	return out, nil
+}
+
+func (s *Service) fetchDiscoveryServices(ctx context.Context, imageKey string) ([]*discoverypb.ServiceInstance, error) {
 	if strings.TrimSpace(s.discoveryTarget) == "" {
 		return nil, fmt.Errorf("discovery target is empty")
 	}
@@ -559,44 +628,74 @@ func (s *Service) fetchLayerstoreServices(ctx context.Context) ([]*afsproxypb.La
 		}
 		client := discoverypb.NewServiceDiscoveryClient(conn)
 		callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
-		resp, err := client.FindImage(callCtx, &discoverypb.FindImageRequest{})
+		resp, err := client.FindImage(callCtx, &discoverypb.FindImageRequest{
+			ImageKey: strings.TrimSpace(imageKey),
+		})
 		callCancel()
 		_ = conn.Close()
 		if err != nil {
 			lastErr = err
 			continue
 		}
-
-		out := make([]*afsproxypb.LayerstoreInstance, 0, len(resp.GetServices()))
-		for _, svc := range resp.GetServices() {
-			layerInfos := make([]*afsproxypb.LayerInfo, 0, len(svc.GetLayerStats()))
-			if len(svc.GetLayerStats()) > 0 {
-				for _, ls := range svc.GetLayerStats() {
-					layerInfos = append(layerInfos, &afsproxypb.LayerInfo{
-						Digest:  ls.GetDigest(),
-						AfsSize: ls.GetAfsSize(),
-					})
-				}
-			} else {
-				for _, digest := range svc.GetLayerDigests() {
-					layerInfos = append(layerInfos, &afsproxypb.LayerInfo{Digest: digest})
-				}
-			}
-			out = append(out, &afsproxypb.LayerstoreInstance{
-				NodeId:        svc.GetNodeId(),
-				Endpoint:      svc.GetEndpoint(),
-				LastSeenUnix:  svc.GetLastSeenUnix(),
-				CacheMaxBytes: svc.GetCacheMaxBytes(),
-				Layers:        layerInfos,
-				CachedImages:  append([]string(nil), svc.GetCachedImages()...),
-			})
-		}
-		return out, nil
+		return resp.GetServices(), nil
 	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("no discovery targets available")
+}
+
+func countImageReplica(services []*discoverypb.ServiceInstance, imageKey string) int {
+	imageKey = strings.TrimSpace(imageKey)
+	if imageKey == "" {
+		return 0
+	}
+	seen := make(map[string]struct{}, len(services))
+	count := 0
+	for _, svc := range services {
+		if svc == nil {
+			continue
+		}
+		if !containsImageKey(svc.GetCachedImages(), imageKey) {
+			continue
+		}
+		endpoint := strings.TrimSpace(svc.GetEndpoint())
+		if endpoint == "" {
+			continue
+		}
+		if _, ok := seen[endpoint]; ok {
+			continue
+		}
+		seen[endpoint] = struct{}{}
+		count++
+	}
+	return count
+}
+
+func containsImageKey(keys []string, imageKey string) bool {
+	for _, k := range keys {
+		if strings.TrimSpace(k) == imageKey {
+			return true
+		}
+	}
+	return false
+}
+
+func valueOrDefault(v, d string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		return s
+	}
+	return d
+}
+
+func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(image),
+		strings.TrimSpace(tag),
+		strings.TrimSpace(platformOS),
+		strings.TrimSpace(platformArch),
+		strings.TrimSpace(platformVariant),
+	}, "|")
 }
 
 func (s *Service) dispatchHandshake(ctx context.Context, backendAddr string, startReq *afsletpb.ExecuteRequest) (*grpc.ClientConn, afsletpb.Afslet_ExecuteClient, *afsletpb.ExecuteResponse, error) {

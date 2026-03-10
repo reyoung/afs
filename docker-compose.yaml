@@ -107,6 +107,7 @@ services:
           -listen=:62051 \
           -http-listen=:62052 \
           -afslet-target=afslet:61051 \
+          -discovery-target=discovery:60051 \
           -proxy-peers-target=afs_proxy:62052 \
           -dispatch-backoff=50ms
     ports:

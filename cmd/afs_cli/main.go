@@ -45,6 +45,12 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "ensure-image" {
+		if err := runEnsureImageSubcommand(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("afs_cli ensure-image failed: %v", err)
+		}
+		return
+	}
 	cfg, cmdArgs := parseFlags()
 	if err := run(cfg, cmdArgs); err != nil {
 		log.Fatalf("afs_cli failed: %v", err)
@@ -141,8 +147,8 @@ func run(cfg config, cmdArgs []string) error {
 	}
 	defer conn.Close()
 
-	client := afsletpb.NewAfsletClient(conn)
 	if cfg.statusOnly {
+		client := afsletpb.NewAfsletClient(conn)
 		resp, err := client.GetRuntimeStatus(ctx, &afsletpb.GetRuntimeStatusRequest{})
 		if err != nil {
 			return fmt.Errorf("get runtime status: %w", err)
@@ -210,6 +216,7 @@ func run(cfg config, cmdArgs []string) error {
 			}
 		}
 	}
+	client := afsletpb.NewAfsletClient(conn)
 	stream, err := client.Execute(ctx)
 	if err != nil {
 		return fmt.Errorf("execute stream: %w", err)
@@ -428,5 +435,76 @@ func ensureDir(path string) error {
 	if !st.IsDir() {
 		return fmt.Errorf("%s is not a directory", path)
 	}
+	return nil
+}
+
+func runEnsureImageSubcommand(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("ensure-image", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var (
+		addr            string
+		image           string
+		tag             string
+		platformOS      string
+		platformArch    string
+		platformVariant string
+		replica         int
+		grpcTimeout     time.Duration
+	)
+	fs.StringVar(&addr, "addr", "127.0.0.1:62051", "afs_proxy gRPC address")
+	fs.StringVar(&image, "image", "", "image name")
+	fs.StringVar(&tag, "tag", "", "image tag")
+	fs.StringVar(&platformOS, "platform-os", "linux", "platform os")
+	fs.StringVar(&platformArch, "platform-arch", "amd64", "platform arch")
+	fs.StringVar(&platformVariant, "platform-variant", "", "platform variant")
+	fs.IntVar(&replica, "replica", 1, "required replica count (>=0)")
+	fs.DurationVar(&grpcTimeout, "grpc-timeout", 30*time.Second, "overall grpc timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(image) == "" {
+		return fmt.Errorf("-image is required")
+	}
+	if replica < 0 {
+		return fmt.Errorf("-replica must be >= 0")
+	}
+	if grpcTimeout <= 0 {
+		return fmt.Errorf("-grpc-timeout must be > 0")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), grpcTimeout)
+	defer cancel()
+	conn, err := grpc.DialContext(
+		ctx,
+		addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	client := afsproxypb.NewAfsProxyClient(conn)
+	resp, err := client.EnsureImage(ctx, &afsproxypb.EnsureImageRequest{
+		Image:           image,
+		Tag:             tag,
+		PlatformOs:      platformOS,
+		PlatformArch:    platformArch,
+		PlatformVariant: platformVariant,
+		Replica:         int32(replica),
+	})
+	if err != nil {
+		return fmt.Errorf("ensure image: %w", err)
+	}
+	_, _ = fmt.Fprintf(
+		out,
+		"image_key=%s current_replica=%d requested_replica=%d ensured=%v\n",
+		resp.GetImageKey(),
+		resp.GetCurrentReplica(),
+		resp.GetRequestedReplica(),
+		resp.GetEnsured(),
+	)
 	return nil
 }
