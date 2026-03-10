@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/reyoung/afs/pkg/afsletpb"
+	"github.com/reyoung/afs/pkg/afsmount"
 )
 
 const (
@@ -31,43 +32,84 @@ const (
 )
 
 type Config struct {
-	MountBinary      string
-	RuncBinary       string
-	UseSudo          bool
-	TarChunk         int
-	DefaultDiscovery string
-	TempDir          string
-	LimitCPUCores    int64
-	LimitMemoryMB    int64
+	MountBinary                string
+	MountInProcess             bool
+	RuncBinary                 string
+	RuncNoPivot                bool
+	RuncNoNewKeyring           bool
+	RuncNoCgroupNS             bool
+	RuncNoPIDNS                bool
+	RuncNoIPCNS                bool
+	RuncNoUTSNS                bool
+	UseSudo                    bool
+	TarChunk                   int
+	DefaultDiscovery           string
+	TempDir                    string
+	LimitCPUCores              int64
+	LimitMemoryMB              int64
+	SharedSpillCacheEnabled    bool
+	SharedSpillCacheDir        string
+	SharedSpillCacheSock       string
+	SharedSpillCacheMaxBytes   int64
+	SharedSpillCacheBinaryPath string
+	LayerMountConcurrency      int
 }
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountBinary       string
-	runcBinary        string
-	useSudo           bool
-	tarChunk          int
-	defaultDiscovery  string
-	tempDir           string
-	mu                sync.Mutex
-	limitCPUCores     int64
-	limitMemoryMB     int64
-	usedCPUCores      int64
-	usedMemoryMB      int64
-	runningContainers int64
+	mountBinary                string
+	mountInProcess             bool
+	mountRunner                func(context.Context, afsmount.Config) error
+	runcBinary                 string
+	runcNoPivot                bool
+	runcNoNewKeyring           bool
+	runcNoCgroupNS             bool
+	runcNoPIDNS                bool
+	runcNoIPCNS                bool
+	runcNoUTSNS                bool
+	useSudo                    bool
+	tarChunk                   int
+	defaultDiscovery           string
+	tempDir                    string
+	mu                         sync.Mutex
+	limitCPUCores              int64
+	limitMemoryMB              int64
+	usedCPUCores               int64
+	usedMemoryMB               int64
+	runningContainers          int64
+	sharedSpillCacheEnabled    bool
+	sharedSpillCacheDir        string
+	sharedSpillCacheSock       string
+	sharedSpillCacheMaxBytes   int64
+	sharedSpillCacheBinaryPath string
+	layerMountConcurrency      int
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountBinary:      strings.TrimSpace(cfg.MountBinary),
-		runcBinary:       strings.TrimSpace(cfg.RuncBinary),
-		useSudo:          cfg.UseSudo,
-		tarChunk:         cfg.TarChunk,
-		defaultDiscovery: strings.TrimSpace(cfg.DefaultDiscovery),
-		tempDir:          strings.TrimSpace(cfg.TempDir),
-		limitCPUCores:    cfg.LimitCPUCores,
-		limitMemoryMB:    cfg.LimitMemoryMB,
+		mountBinary:                strings.TrimSpace(cfg.MountBinary),
+		mountInProcess:             cfg.MountInProcess,
+		mountRunner:                afsmount.Run,
+		runcBinary:                 strings.TrimSpace(cfg.RuncBinary),
+		runcNoPivot:                cfg.RuncNoPivot,
+		runcNoNewKeyring:           cfg.RuncNoNewKeyring,
+		runcNoCgroupNS:             cfg.RuncNoCgroupNS,
+		runcNoPIDNS:                cfg.RuncNoPIDNS,
+		runcNoIPCNS:                cfg.RuncNoIPCNS,
+		runcNoUTSNS:                cfg.RuncNoUTSNS,
+		useSudo:                    cfg.UseSudo,
+		tarChunk:                   cfg.TarChunk,
+		defaultDiscovery:           strings.TrimSpace(cfg.DefaultDiscovery),
+		tempDir:                    strings.TrimSpace(cfg.TempDir),
+		limitCPUCores:              cfg.LimitCPUCores,
+		limitMemoryMB:              cfg.LimitMemoryMB,
+		sharedSpillCacheEnabled:    cfg.SharedSpillCacheEnabled,
+		sharedSpillCacheDir:        strings.TrimSpace(cfg.SharedSpillCacheDir),
+		sharedSpillCacheSock:       strings.TrimSpace(cfg.SharedSpillCacheSock),
+		sharedSpillCacheMaxBytes:   cfg.SharedSpillCacheMaxBytes,
+		sharedSpillCacheBinaryPath: strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
+		layerMountConcurrency:      cfg.LayerMountConcurrency,
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -83,6 +125,12 @@ func NewService(cfg Config) *Service {
 	}
 	if s.limitMemoryMB <= 0 {
 		s.limitMemoryMB = defaultMemoryMB
+	}
+	if s.sharedSpillCacheMaxBytes <= 0 {
+		s.sharedSpillCacheMaxBytes = 10 << 30
+	}
+	if s.layerMountConcurrency <= 0 {
+		s.layerMountConcurrency = 1
 	}
 	return s
 }
@@ -297,10 +345,31 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if logf != nil {
 		logf("session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir))
-		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs()))
+		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t runc_no_pid_ns=%t runc_no_ipc_ns=%t runc_no_uts_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS, s.runcNoPIDNS, s.runcNoIPCNS, s.runcNoUTSNS))
 		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
 	}
 
+	discoveryAddr := pickDiscoveryAddr(start.GetDiscoveryAddr(), s.defaultDiscovery)
+	mountCfg := afsmount.Config{
+		Mountpoint:                 sess.mountpoint,
+		WorkDir:                    sess.workDir,
+		ExtraDir:                   sess.extraDir,
+		MountProcDev:               false,
+		Image:                      image,
+		Tag:                        tag,
+		DiscoveryAddr:              discoveryAddr,
+		NodeID:                     strings.TrimSpace(start.GetNodeId()),
+		PlatformOS:                 strings.TrimSpace(start.GetPlatformOs()),
+		PlatformArch:               strings.TrimSpace(start.GetPlatformArch()),
+		PlatformVariant:            strings.TrimSpace(start.GetPlatformVariant()),
+		ForceLocalFetch:            start.GetForceLocalFetch(),
+		SharedSpillCacheEnabled:    s.sharedSpillCacheEnabled,
+		SharedSpillCacheDir:        s.sharedSpillCacheDir,
+		SharedSpillCacheSock:       s.sharedSpillCacheSock,
+		SharedSpillCacheMaxBytes:   s.sharedSpillCacheMaxBytes,
+		SharedSpillCacheBinaryPath: s.sharedSpillCacheBinaryPath,
+		LayerMountConcurrency:      s.layerMountConcurrency,
+	}
 	mountArgs := []string{
 		"-mountpoint", sess.mountpoint,
 		"-work-dir", sess.workDir,
@@ -311,56 +380,134 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	if strings.TrimSpace(tag) != "" {
 		mountArgs = append(mountArgs, "-tag", tag)
 	}
-	if discoveryAddr := pickDiscoveryAddr(start.GetDiscoveryAddr(), s.defaultDiscovery); discoveryAddr != "" {
+	if discoveryAddr != "" {
 		mountArgs = append(mountArgs, "-discovery-addr", discoveryAddr)
 	}
 	if start.GetForceLocalFetch() {
 		mountArgs = append(mountArgs, "-force-local-fetch")
 	}
-	if strings.TrimSpace(start.GetNodeId()) != "" {
-		mountArgs = append(mountArgs, "-node-id", start.GetNodeId())
+	if mountCfg.NodeID != "" {
+		mountArgs = append(mountArgs, "-node-id", mountCfg.NodeID)
 	}
-	if strings.TrimSpace(start.GetPlatformOs()) != "" {
-		mountArgs = append(mountArgs, "-platform-os", start.GetPlatformOs())
+	if mountCfg.PlatformOS != "" {
+		mountArgs = append(mountArgs, "-platform-os", mountCfg.PlatformOS)
 	}
-	if strings.TrimSpace(start.GetPlatformArch()) != "" {
-		mountArgs = append(mountArgs, "-platform-arch", start.GetPlatformArch())
+	if mountCfg.PlatformArch != "" {
+		mountArgs = append(mountArgs, "-platform-arch", mountCfg.PlatformArch)
 	}
-	if strings.TrimSpace(start.GetPlatformVariant()) != "" {
-		mountArgs = append(mountArgs, "-platform-variant", start.GetPlatformVariant())
+	if mountCfg.PlatformVariant != "" {
+		mountArgs = append(mountArgs, "-platform-variant", mountCfg.PlatformVariant)
 	}
-
-	mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)
-	mountStdout := newProcessLogWriter("mount:stdout", logf)
-	mountStderr := newProcessLogWriter("mount:stderr", logf)
-	defer mountStdout.Flush()
-	defer mountStderr.Flush()
-	mountCmd.Stdout = mountStdout
-	mountCmd.Stderr = mountStderr
-	if err := mountCmd.Start(); err != nil {
-		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_mount: %v", err)}
+	if s.sharedSpillCacheEnabled {
+		mountArgs = append(mountArgs, "-shared-spill-cache")
+		if s.sharedSpillCacheDir != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-dir", s.sharedSpillCacheDir)
+		}
+		if s.sharedSpillCacheSock != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-sock", s.sharedSpillCacheSock)
+		}
+		if s.sharedSpillCacheMaxBytes > 0 {
+			mountArgs = append(mountArgs, "-shared-spill-cache-max-bytes", strconv.FormatInt(s.sharedSpillCacheMaxBytes, 10))
+		}
+		if s.sharedSpillCacheBinaryPath != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-binary", s.sharedSpillCacheBinaryPath)
+		}
 	}
-	if logf != nil {
-		logf("mount", fmt.Sprintf("started: %s %s", s.mountBinary, strings.Join(mountArgs, " ")))
+	if s.layerMountConcurrency > 0 {
+		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))
 	}
 
 	mountWait := make(chan error, 1)
-	go func() { mountWait <- mountCmd.Wait() }()
+	var mountReady <-chan struct{}
+	var mountStdout *processLogWriter
+	var mountStderr *processLogWriter
+	stopMount := func() {}
+	var stopMountOnce sync.Once
+	stopMountSafe := func() { stopMountOnce.Do(stopMount) }
+	mountStart := time.Now()
 
-	readyErr := waitForMountReady(sess.mountpoint, mountWait, 120*time.Second, func(msg string) {
+	if s.mountInProcess {
+		readyCh := make(chan struct{}, 1)
+		mountReady = readyCh
+		mountCfg.OnReady = func() {
+			select {
+			case readyCh <- struct{}{}:
+			default:
+			}
+		}
+		mountCtx, cancelMount := context.WithCancel(ctx)
+		mountDone := make(chan struct{})
+		var mountErr error
+		go func() {
+			mountErr = s.mountRunner(mountCtx, mountCfg)
+			select {
+			case mountWait <- mountErr:
+			default:
+			}
+			close(mountDone)
+		}()
+		stopMount = func() {
+			cancelMount()
+			select {
+			case <-mountDone:
+				if mountErr != nil && !errors.Is(mountErr, context.Canceled) && logf != nil {
+					logf("mount", fmt.Sprintf("in-process mount exited: %v", mountErr))
+				}
+			case <-time.After(10 * time.Second):
+				if logf != nil {
+					logf("mount", "in-process mount stop timeout")
+				}
+			}
+		}
+		if logf != nil {
+			logf("mount", fmt.Sprintf("started in-process mount for image=%s tag=%s", image, tag))
+		}
+	} else {
+		mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)
+		mountStdout = newProcessLogWriter("mount:stdout", logf)
+		mountStderr = newProcessLogWriter("mount:stderr", logf)
+		defer mountStdout.Flush()
+		defer mountStderr.Flush()
+		mountCmd.Stdout = mountStdout
+		mountCmd.Stderr = mountStderr
+		if err := mountCmd.Start(); err != nil {
+			return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_mount: %v", err)}
+		}
+		go func() { mountWait <- mountCmd.Wait() }()
+		stopMount = func() { _ = terminateProcess(mountCmd, mountWait) }
+		if logf != nil {
+			logf("mount", fmt.Sprintf("started: %s %s", s.mountBinary, strings.Join(mountArgs, " ")))
+		}
+	}
+
+	waitMountReadyStart := time.Now()
+	progressLogf := func(msg string) {
 		if logf != nil {
 			logf("mount", msg)
 		}
-	})
+	}
+	var readyErr error
+	if mountReady != nil {
+		readyErr = waitForInProcessMountReady(mountWait, mountReady, 120*time.Second, progressLogf)
+	} else {
+		readyErr = waitForMountReady(sess.mountpoint, mountWait, 120*time.Second, progressLogf)
+	}
 	if readyErr != nil {
-		_ = terminateProcess(mountCmd, mountWait)
-		combined := strings.TrimSpace(mountStdout.String() + "\n" + mountStderr.String())
-		if combined != "" {
-			readyErr = fmt.Errorf("%w: %s", readyErr, combined)
+		if logf != nil {
+			logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=wait_mount_ready ms=%d ok=false", time.Since(waitMountReadyStart).Milliseconds()))
+		}
+		stopMountSafe()
+		if mountStdout != nil && mountStderr != nil {
+			combined := strings.TrimSpace(mountStdout.String() + "\n" + mountStderr.String())
+			if combined != "" {
+				readyErr = fmt.Errorf("%w: %s", readyErr, combined)
+			}
 		}
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("mount not ready: %v", readyErr)}
 	}
 	if logf != nil {
+		logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=wait_mount_ready ms=%d ok=true", time.Since(waitMountReadyStart).Milliseconds()))
+		logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=mount_start_to_ready ms=%d", time.Since(mountStart).Milliseconds()))
 		logf("mount", "mountpoint is ready")
 	}
 
@@ -374,8 +521,26 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		"-cpu", strconv.FormatInt(cpu, 10),
 		"-memory-mb", strconv.FormatInt(memory, 10),
 		"-timeout", timeout.String(),
-		"--",
 	}
+	if s.runcNoPivot {
+		runcArgs = append(runcArgs, "-no-pivot")
+	}
+	if s.runcNoNewKeyring {
+		runcArgs = append(runcArgs, "-no-new-keyring")
+	}
+	if s.runcNoCgroupNS {
+		runcArgs = append(runcArgs, "-no-cgroup-ns")
+	}
+	if s.runcNoPIDNS {
+		runcArgs = append(runcArgs, "-no-pid-ns")
+	}
+	if s.runcNoIPCNS {
+		runcArgs = append(runcArgs, "-no-ipc-ns")
+	}
+	if s.runcNoUTSNS {
+		runcArgs = append(runcArgs, "-no-uts-ns")
+	}
+	runcArgs = append(runcArgs, "--")
 	runcArgs = append(runcArgs, start.GetCommand()...)
 	runcCmd := s.newCommandContext(ctx, s.runcBinary, runcArgs...)
 	runcStdout := newProcessLogWriter("runc:stdout", logf)
@@ -388,7 +553,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		logf("runc", fmt.Sprintf("running: %s %s", s.runcBinary, strings.Join(runcArgs, " ")))
 	}
 	if err := runcCmd.Start(); err != nil {
-		_ = terminateProcess(mountCmd, mountWait)
+		stopMountSafe()
 		_ = tryForceUmount(sess.mountpoint)
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
 	}
@@ -396,7 +561,12 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	defer s.addRunningContainers(-1)
 	runErr := runcCmd.Wait()
 
-	_ = terminateProcess(mountCmd, mountWait)
+	stopMountStarted := time.Now()
+	stopMountSafe()
+	if logf != nil {
+		logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=stop_mount_runner ms=%d", time.Since(stopMountStarted).Milliseconds()))
+		logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=mount_lifetime ms=%d", time.Since(mountStart).Milliseconds()))
+	}
 	if umErr := tryForceUmount(sess.mountpoint); umErr != nil {
 		if logf != nil {
 			logf("cleanup", fmt.Sprintf("umount warning: %v", umErr))
@@ -736,8 +906,38 @@ func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.D
 			if err != nil {
 				return err
 			}
-			return fmt.Errorf("afs_mount exited before mount became ready")
+			return fmt.Errorf("mount runner exited before mount became ready")
 		case <-time.After(sleep):
+		}
+	}
+}
+
+func waitForInProcessMountReady(mountWait <-chan error, mountReady <-chan struct{}, timeout time.Duration, onProgress func(string)) error {
+	if onProgress != nil {
+		onProgress("waiting for in-process mount ready ...")
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	progressTicker := time.NewTicker(2 * time.Second)
+	defer progressTicker.Stop()
+	for {
+		select {
+		case <-mountReady:
+			if err, exited := tryReadMountWait(mountWait); exited {
+				return err
+			}
+			return nil
+		case err := <-mountWait:
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("mount runner exited before mount became ready")
+		case <-progressTicker.C:
+			if onProgress != nil {
+				onProgress("waiting for in-process mount ready ...")
+			}
+		case <-deadline.C:
+			return fmt.Errorf("timeout waiting for mount")
 		}
 	}
 }
@@ -748,7 +948,7 @@ func tryReadMountWait(mountWait <-chan error) (error, bool) {
 		if err != nil {
 			return err, true
 		}
-		return fmt.Errorf("afs_mount exited before mount became ready"), true
+		return fmt.Errorf("mount runner exited before mount became ready"), true
 	default:
 		return nil, false
 	}

@@ -160,6 +160,51 @@ func TestPullImageCachesByDigest(t *testing.T) {
 	}
 }
 
+func TestPullImageSupportsDockerLayerMediaType(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerDigest := "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	layerBytes := buildTarGzip(t, map[string]string{"docker.txt": "docker layer media type"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.DockerLayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	resp, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+	if got := len(resp.GetLayers()); got != 1 {
+		t.Fatalf("layers=%d, want 1", got)
+	}
+	layer := resp.GetLayers()[0]
+	if layer.GetCached() {
+		t.Fatalf("first PullImage should not be cached")
+	}
+	if strings.TrimSpace(layer.GetCachePath()) == "" {
+		t.Fatalf("cache path should not be empty")
+	}
+
+	data, err := os.ReadFile(layer.GetCachePath())
+	if err != nil {
+		t.Fatalf("read converted layer: %v", err)
+	}
+	if len(data) < 8 || string(data[:8]) != "AFSLYR01" {
+		t.Fatalf("converted layer missing AFSLYR01 magic")
+	}
+}
+
 func TestReadLayerReturnsMagicBytes(t *testing.T) {
 	t.Parallel()
 

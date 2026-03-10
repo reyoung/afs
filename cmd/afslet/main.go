@@ -19,7 +19,14 @@ import (
 func main() {
 	var listenAddr string
 	var mountBinary string
+	var mountInProcess bool
 	var runcBinary string
+	var runcNoPivot bool
+	var runcNoNewKeyring bool
+	var runcNoCgroupNS bool
+	var runcNoPIDNS bool
+	var runcNoIPCNS bool
+	var runcNoUTSNS bool
 	var useSudo bool
 	var tarChunk int
 	var gracefulTimeout time.Duration
@@ -27,10 +34,23 @@ func main() {
 	var tempDir string
 	var limitCPUCores int64
 	var limitMemoryMB int64
+	var sharedSpillCache bool
+	var sharedSpillCacheDir string
+	var sharedSpillCacheSock string
+	var sharedSpillCacheMaxBytes int64
+	var sharedSpillCacheBinary string
+	var layerMountConcurrency int
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
+	flag.BoolVar(&mountInProcess, "mount-in-process", false, "run mount flow in-process instead of spawning afs_mount binary")
 	flag.StringVar(&runcBinary, "runc-binary", "afs_runc", "afs_runc binary path")
+	flag.BoolVar(&runcNoPivot, "runc-no-pivot", false, "pass --no-pivot to afs_runc")
+	flag.BoolVar(&runcNoNewKeyring, "runc-no-new-keyring", false, "pass --no-new-keyring to afs_runc")
+	flag.BoolVar(&runcNoCgroupNS, "runc-no-cgroup-ns", false, "do not create cgroup namespace in afs_runc spec")
+	flag.BoolVar(&runcNoPIDNS, "runc-no-pid-ns", false, "do not create pid namespace in afs_runc spec")
+	flag.BoolVar(&runcNoIPCNS, "runc-no-ipc-ns", false, "do not create ipc namespace in afs_runc spec")
+	flag.BoolVar(&runcNoUTSNS, "runc-no-uts-ns", false, "do not create uts namespace in afs_runc spec")
 	flag.BoolVar(&useSudo, "sudo-binaries", false, "run afs_mount/afs_runc through sudo")
 	flag.IntVar(&tarChunk, "tar-chunk", 256*1024, "tar.gz stream chunk size in bytes")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
@@ -38,6 +58,12 @@ func main() {
 	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
 	flag.Int64Var(&limitCPUCores, "limit-cpu", 1, "total allocatable CPU cores for afslet admission control")
 	flag.Int64Var(&limitMemoryMB, "limit-memory-mb", 256, "total allocatable memory (MB) for afslet admission control")
+	flag.BoolVar(&sharedSpillCache, "shared-spill-cache", false, "enable shared spill cache for afs_mount")
+	flag.StringVar(&sharedSpillCacheDir, "shared-spill-cache-dir", "/var/lib/afslet/spillcache", "shared spill cache dir for afs_mount")
+	flag.StringVar(&sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache socket path for afs_mount")
+	flag.Int64Var(&sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes for afs_mount")
+	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
+	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -46,14 +72,27 @@ func main() {
 	}
 
 	svc := afslet.NewService(afslet.Config{
-		MountBinary:      mountBinary,
-		RuncBinary:       runcBinary,
-		UseSudo:          useSudo,
-		TarChunk:         tarChunk,
-		DefaultDiscovery: defaultDiscoveryAddr,
-		TempDir:          tempDir,
-		LimitCPUCores:    limitCPUCores,
-		LimitMemoryMB:    limitMemoryMB,
+		MountBinary:                mountBinary,
+		MountInProcess:             mountInProcess,
+		RuncBinary:                 runcBinary,
+		RuncNoPivot:                runcNoPivot,
+		RuncNoNewKeyring:           runcNoNewKeyring,
+		RuncNoCgroupNS:             runcNoCgroupNS,
+		RuncNoPIDNS:                runcNoPIDNS,
+		RuncNoIPCNS:                runcNoIPCNS,
+		RuncNoUTSNS:                runcNoUTSNS,
+		UseSudo:                    useSudo,
+		TarChunk:                   tarChunk,
+		DefaultDiscovery:           defaultDiscoveryAddr,
+		TempDir:                    tempDir,
+		LimitCPUCores:              limitCPUCores,
+		LimitMemoryMB:              limitMemoryMB,
+		SharedSpillCacheEnabled:    sharedSpillCache,
+		SharedSpillCacheDir:        sharedSpillCacheDir,
+		SharedSpillCacheSock:       sharedSpillCacheSock,
+		SharedSpillCacheMaxBytes:   sharedSpillCacheMaxBytes,
+		SharedSpillCacheBinaryPath: sharedSpillCacheBinary,
+		LayerMountConcurrency:      layerMountConcurrency,
 	})
 
 	grpcServer := grpc.NewServer()

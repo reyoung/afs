@@ -6,11 +6,16 @@ import (
 )
 
 const OCILayerTarGzipMediaType = "application/vnd.oci.image.layer.v1.tar+gzip"
+const DockerLayerTarGzipMediaType = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 
-// ConvertOCILayer converts a layer with OCI media type
-// application/vnd.oci.image.layer.v1.tar+gzip into archive format.
+// IsSupportedLayerMediaType reports whether this layer media type can be converted.
+func IsSupportedLayerMediaType(mediaType string) bool {
+	return mediaType == OCILayerTarGzipMediaType || mediaType == DockerLayerTarGzipMediaType
+}
+
+// ConvertOCILayer converts a supported gzip-compressed tar layer into archive format.
 func ConvertOCILayer(mediaType string, layer io.Reader, out io.Writer) error {
-	if mediaType != OCILayerTarGzipMediaType {
+	if !IsSupportedLayerMediaType(mediaType) {
 		return fmt.Errorf("unsupported media type: %s", mediaType)
 	}
 	return ConvertTarGzipToArchive(layer, out)

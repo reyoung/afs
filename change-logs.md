@@ -64,3 +64,89 @@ Latest integration result (same command and dataset):
   - remote: `calls=80`, `got_bytes=69854240`, `total_readat_time=258.565ms`, avg request `~873178 bytes`
   - local: `calls=80`, `got_bytes=69854240`, `total_readat_time=7.522ms`
 - MD5 checks: all passed.
+
+### Update: `afs_mount` Cold First-Read Optimization (`/bin/true` E2E)
+- Added `afs_mount` flag:
+  - `-no-spill-cache` to disable on-disk spill-file reuse for decompressed payloads.
+- Optimized layer FUSE read path:
+  - `pkg/layerfuse/fs.go` now serves reads via `fuse.ReadResultFd(...)` to avoid per-read userspace copy/allocation in `FileNode.Read`.
+  - spill write path now uses `bufio.NewWriterSize(..., 1<<20)` for smoother large writes.
+  - `no-spill-cache` mode keeps fd-backed temp storage and removes temp path, so cache files do not accumulate.
+- Tuned layer FUSE mount options in `cmd/afs_mount/main.go`:
+  - `MaxWrite=1<<20`, `MaxReadAhead=1<<20`
+  - `EntryTimeout=30s`, `AttrTimeout=30s`, `NegativeTimeout=5s`
+
+#### Validation Snapshot
+- Cold first-run `afs_runc -- /bin/true` on image:
+  - `mirrors.tencent.com/josephyu/ioi_docker:ioi_it_1772788528_aplusb_2023_builder`
+- Before (same environment): `runc_wait` around `~1.2s`.
+- After current optimization:
+  - `default`: `runc_total=344ms`, `runc_wait=338ms`
+  - `--no-spill-cache`: `runc_total=329ms`, `runc_wait=322ms`
+
+#### E2E (current branch)
+- One cold + five warm rounds (`afs_mount + afs_runc /bin/true`):
+  - cold: `mount_ready=63001ms`, `runc_total=319ms`, `e2e=63327ms`
+  - warm `runc_total`: `p50=348ms`, `p95=363ms`
+  - warm `e2e`: `p50=1062ms`, `p95=1073ms`
+
+## 2026-03-10
+
+### Summary
+- Added `afs_mount` reusable package (`pkg/afsmount`) and switched `afslet` to support in-process mount execution path.
+- Added shared gRPC client cache (`pkg/grpcclientcache`) to reuse connections with bounded cache size.
+- Added mount/readiness timing instrumentation across `afsmount` and `afslet` for phase-level benchmark analysis.
+- Replaced in-process mount readiness polling with event-driven ready notification (`OnReady` callback), removing fixed `200ms` polling delay on the hot path.
+- Added layer-provider discovery cache and optimistic provider reuse/failover enhancements in discovery-backed layer reader.
+- Added Helm / compose knobs for `mount-in-process` rollout.
+
+### Key Code Changes
+- New package:
+  - `pkg/afsmount/runner.go`: extracted mount flow from CLI style into reusable in-process runner.
+  - `pkg/grpcclientcache/cache.go`: shared gRPC connection cache for discovery/layerstore clients.
+- `afslet`:
+  - `pkg/afslet/service.go`: in-process mount path, mount lifecycle timing logs, and in-process ready event wait (`waitForInProcessMountReady`).
+  - `pkg/afslet/service_test.go`: added unit tests for in-process ready signal and early mount-exit behavior.
+  - `cmd/afslet/main.go`: added/propagated `-mount-in-process`.
+- reader/cache:
+  - `pkg/layerreader/discovery_reader.go`: optimistic provider strategy, discovery failover hooks, known layer size propagation, close lifecycle handling.
+- deployment config:
+  - `docker-compose.yaml`: `AFSLET_MOUNT_IN_PROCESS` env wiring.
+  - `helm/afs/values.yaml`: `afslet.mountInProcess` value.
+  - `helm/afs/templates/afslet-deployment.yaml`: pass `-mount-in-process` arg.
+
+### Performance Validation
+
+#### A) Local bare processes (host, root-run afslet/layerstore/discovery)
+- Command pattern:
+  - start `afs_discovery_grpcd` / `afs_layerstore_grpcd` / `afslet` directly, then run `afs_cli` 10 times.
+- Result (`alpine`, warm):
+  - `wait_mount_ready`: `avg=12.00ms` (max `65ms`)
+  - `mount_lifetime`: `avg=84.40ms`
+  - `runc_total`: `avg=65.30ms`
+
+#### B) Docker Compose
+- Config:
+  - `AFSLET_MOUNT_IN_PROCESS=true`, `AFSLET_LAYER_MOUNT_CONCURRENCY=1`
+- Warm benchmark (`alpine`, 20 runs):
+  - `wait_mount_ready`: `avg=6.05ms` (max `8ms`)
+  - `mount_lifetime`: `avg=75.35ms`
+  - `run_image_mode_total` observed mostly `60-84ms`
+- Before this ready-event change (same setup, prior measurement):
+  - `wait_mount_ready` was about `200ms` due polling step.
+  - New change removes that fixed wait from hot path.
+
+#### C) Kubernetes Helm
+- Deployed with:
+  - `afslet.mountInProcess=true` (Helm revision 19+)
+- Warm benchmark (`mirrors.tencent.com/josephyu/afs:<deployed-tag>`, 10 runs):
+  - `wait_mount_ready`: `avg=36.80ms` (max `84ms`)
+  - `mount_lifetime`: `avg=160.60ms`
+  - `runc_total`: `avg=115.50ms`
+- Cold run on first request included remote image resolution/pull cost (`wait_mount_ready` seconds-level), then warm runs dropped to sub-100ms ready wait.
+
+### Notes
+- Helm environment image source constraints were significant:
+  - `docker.io/library/alpine` often timed out from cluster nodes.
+  - `mirrors.tencent.com/library/alpine:latest` returned manifest unknown.
+- For stable Helm verification, benchmark used an existing deploy image (`mirrors.tencent.com/josephyu/afs:<tag>`), which is resolvable in-cluster.

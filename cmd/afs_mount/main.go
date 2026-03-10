@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,28 +28,36 @@ import (
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
+	"github.com/reyoung/afs/pkg/spillcache"
 )
 
 type config struct {
-	mountpoint      string
-	debug           bool
-	mountProcDev    bool
-	extraDir        string
-	discoveryAddr   string
-	grpcTimeout     time.Duration
-	grpcMaxChunk    int
-	grpcInsecure    bool
-	nodeID          string
-	image           string
-	tag             string
-	platformOS      string
-	platformArch    string
-	platformVariant string
-	forceLocalFetch bool
-	pullTimeout     time.Duration
-	workDir         string
-	keepWorkDir     bool
-	fuseTempDir     string
+	mountpoint                 string
+	debug                      bool
+	mountProcDev               bool
+	noSpillCache               bool
+	extraDir                   string
+	discoveryAddr              string
+	grpcTimeout                time.Duration
+	grpcMaxChunk               int
+	grpcInsecure               bool
+	nodeID                     string
+	image                      string
+	tag                        string
+	platformOS                 string
+	platformArch               string
+	platformVariant            string
+	forceLocalFetch            bool
+	pullTimeout                time.Duration
+	workDir                    string
+	keepWorkDir                bool
+	fuseTempDir                string
+	sharedSpillCacheEnabled    bool
+	sharedSpillCacheDir        string
+	sharedSpillCacheSock       string
+	sharedSpillCacheMaxBytes   int64
+	sharedSpillCacheBinaryPath string
+	layerMountConcurrency      int
 }
 
 type serviceInfo struct {
@@ -81,6 +91,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "mount target directory")
 	flag.BoolVar(&cfg.debug, "debug", false, "enable go-fuse debug logs")
 	flag.BoolVar(&cfg.mountProcDev, "mount-proc-dev", true, "mount /proc and /dev into mounted rootfs (linux only)")
+	flag.BoolVar(&cfg.noSpillCache, "no-spill-cache", false, "disable on-disk spill cache reuse for decompressed file payloads")
 	flag.StringVar(&cfg.extraDir, "extra-dir", "", "extra read-only directory inserted between writable upper and image layers")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
@@ -97,6 +108,12 @@ func parseFlags() config {
 	flag.StringVar(&cfg.workDir, "work-dir", "", "working directory for per-layer mountpoints (default: temp dir)")
 	flag.BoolVar(&cfg.keepWorkDir, "keep-work-dir", false, "keep work directory after exit")
 	flag.StringVar(&cfg.fuseTempDir, "fuse-temp-dir", "", "local temp directory for decompressed file spill during FUSE reads")
+	flag.BoolVar(&cfg.sharedSpillCacheEnabled, "shared-spill-cache", false, "enable shared multi-process spill cache daemon")
+	flag.StringVar(&cfg.sharedSpillCacheDir, "shared-spill-cache-dir", ".cache/afs_mount_cached", "shared spill cache root directory")
+	flag.StringVar(&cfg.sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache unix socket path (default: <shared-spill-cache-dir>/daemon.sock)")
+	flag.Int64Var(&cfg.sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes")
+	flag.StringVar(&cfg.sharedSpillCacheBinaryPath, "shared-spill-cache-binary", "afs_mount_cached", "path of shared spill cache daemon binary")
+	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -104,6 +121,9 @@ func parseFlags() config {
 	}
 	if strings.TrimSpace(cfg.image) == "" {
 		log.Fatal("-image is required")
+	}
+	if cfg.layerMountConcurrency <= 0 {
+		log.Fatal("-layer-mount-concurrency must be > 0")
 	}
 	if cfg.grpcMaxChunk <= 0 {
 		log.Fatal("-grpc-max-chunk must be > 0")
@@ -183,40 +203,121 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 	}()
 
 	layerDirs := make([]string, 0, len(pullResp.GetLayers()))
-	for i, layer := range pullResp.GetLayers() {
-		digest := layer.GetDigest()
-		log.Printf("[%d/%d] preparing layer digest=%s", i+1, len(pullResp.GetLayers()), digest)
-		mountDir := filepath.Join(layersRoot, fmt.Sprintf("%03d_%s", i+1, sanitizeForPath(shortDigest(digest))))
-		if err := os.MkdirAll(mountDir, 0o755); err != nil {
-			return fmt.Errorf("create layer mount dir: %w", err)
+	var sharedCacheClient *spillcache.Client
+	if cfg.sharedSpillCacheEnabled {
+		launcher, err := spillcache.NewLauncher(spillcache.LauncherConfig{
+			CacheDir:   cfg.sharedSpillCacheDir,
+			SockPath:   cfg.sharedSpillCacheSock,
+			MaxBytes:   cfg.sharedSpillCacheMaxBytes,
+			BinaryPath: cfg.sharedSpillCacheBinaryPath,
+		})
+		if err != nil {
+			return fmt.Errorf("configure shared spill cache: %w", err)
 		}
+		sharedCacheClient, err = launcher.EnsureStarted()
+		if err != nil {
+			return fmt.Errorf("start shared spill cache daemon: %w", err)
+		}
+		log.Printf("shared spill cache enabled: dir=%s sock=%s max-bytes=%d", cfg.sharedSpillCacheDir, cfg.sharedSpillCacheSock, cfg.sharedSpillCacheMaxBytes)
+	}
+	layers := pullResp.GetLayers()
+	results := make([]mountedLayer, len(layers))
+	type mountResult struct {
+		idx   int
+		layer mountedLayer
+		err   error
+	}
+	resultCh := make(chan mountResult, len(layers))
+	sema := make(chan struct{}, effectiveLayerMountConcurrency(cfg.layerMountConcurrency, len(layers)))
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for i, layer := range layers {
+		i := i
+		layer := layer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sema <- struct{}{}
+			defer func() { <-sema }()
+			if stop.Load() {
+				return
+			}
+			digest := layer.GetDigest()
+			log.Printf("[%d/%d] preparing layer digest=%s", i+1, len(layers), digest)
+			mountDir := filepath.Join(layersRoot, fmt.Sprintf("%03d_%s", i+1, sanitizeForPath(shortDigest(digest))))
+			if err := os.MkdirAll(mountDir, 0o755); err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("create layer mount dir: %w", err)}
+				return
+			}
 
-		reader, err := layerreader.NewDiscoveryBackedLayerReader(
-			layerreader.Config{
-				DiscoveryAddr: cfg.discoveryAddr,
-				GRPCTimeout:   cfg.grpcTimeout,
-				GRPCMaxChunk:  cfg.grpcMaxChunk,
-				GRPCInsecure:  cfg.grpcInsecure,
-				NodeID:        cfg.nodeID,
-			},
-			digest,
-			chosen.endpoint,
-			toLayerReaderServices(providers),
-		)
-		if err != nil {
-			return fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)
+			reader, err := layerreader.NewDiscoveryBackedLayerReader(
+				layerreader.Config{
+					DiscoveryAddr: cfg.discoveryAddr,
+					GRPCTimeout:   cfg.grpcTimeout,
+					GRPCMaxChunk:  cfg.grpcMaxChunk,
+					GRPCInsecure:  cfg.grpcInsecure,
+					NodeID:        cfg.nodeID,
+				},
+				digest,
+				chosen.endpoint,
+				toLayerReaderServices(providers),
+			)
+			if err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)}
+				return
+			}
+			afslReader, err := layerformat.NewReader(reader)
+			if err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}
+				return
+			}
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient)
+			if err != nil {
+				stop.Store(true)
+				resultCh <- mountResult{idx: i, err: fmt.Errorf("mount layer %s: %w", digest, err)}
+				return
+			}
+			resultCh <- mountResult{
+				idx: i,
+				layer: mountedLayer{
+					digest: digest,
+					dir:    mountDir,
+					server: server,
+				},
+			}
+		}()
+	}
+	wg.Wait()
+	close(resultCh)
+
+	var mountErr error
+	for r := range resultCh {
+		if r.err != nil {
+			if mountErr == nil {
+				mountErr = r.err
+			}
+			continue
 		}
-		afslReader, err := layerformat.NewReader(reader)
-		if err != nil {
-			return fmt.Errorf("open layer %s: %w", digest, err)
+		results[r.idx] = r.layer
+	}
+	if mountErr != nil {
+		for _, m := range results {
+			if m.server != nil {
+				mounted = append(mounted, m)
+			}
 		}
-		server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, cfg.debug, cfg.fuseTempDir)
-		if err != nil {
-			return fmt.Errorf("mount layer %s: %w", digest, err)
+		return mountErr
+	}
+	for i, m := range results {
+		if m.server == nil {
+			return fmt.Errorf("layer %d mount result missing", i)
 		}
-		mounted = append(mounted, mountedLayer{digest: digest, dir: mountDir, server: server})
-		layerDirs = append(layerDirs, mountDir)
-		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(pullResp.GetLayers()), digest, mountDir)
+		mounted = append(mounted, m)
+		layerDirs = append(layerDirs, m.dir)
+		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(results), m.digest, m.dir)
 	}
 
 	var writableLayerDir string
@@ -406,6 +507,19 @@ func dedupeServiceInfos(in []serviceInfo) []serviceInfo {
 	return out
 }
 
+func effectiveLayerMountConcurrency(requested int, total int) int {
+	if total <= 0 {
+		return 1
+	}
+	if requested <= 0 {
+		return 1
+	}
+	if requested > total {
+		return total
+	}
+	return requested
+}
+
 func toLayerReaderServices(in []serviceInfo) []layerreader.ServiceInfo {
 	out := make([]layerreader.ServiceInfo, 0, len(in))
 	for _, s := range in {
@@ -449,9 +563,24 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source string, debug bool, tempDir string) (*fuse.Server, error) {
-	root := layerfuse.NewRootWithTempDir(reader, tempDir)
-	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{MountOptions: fuse.MountOptions{Debug: debug, FsName: fmt.Sprintf("afslyr:%s", source), Name: "afslyr", Options: []string{"ro", "exec"}}})
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache) (*fuse.Server, error) {
+	root := layerfuse.NewRootWithSharedCache(reader, tempDir, noSpillCache, layerDigest, sharedCache)
+	entryTimeout := 30 * time.Second
+	attrTimeout := 30 * time.Second
+	negativeTimeout := 5 * time.Second
+	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{
+		EntryTimeout:    &entryTimeout,
+		AttrTimeout:     &attrTimeout,
+		NegativeTimeout: &negativeTimeout,
+		MountOptions: fuse.MountOptions{
+			Debug:        debug,
+			FsName:       fmt.Sprintf("afslyr:%s", source),
+			Name:         "afslyr",
+			Options:      []string{"ro", "exec"},
+			MaxWrite:     1 << 20,
+			MaxReadAhead: 1 << 20,
+		},
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
 			return nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)

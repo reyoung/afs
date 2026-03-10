@@ -26,35 +26,56 @@ type ServiceInfo struct {
 }
 
 type Config struct {
-	DiscoveryAddr string
-	GRPCTimeout   time.Duration
-	GRPCMaxChunk  int
-	GRPCInsecure  bool
-	NodeID        string
+	DiscoveryAddr        string
+	GRPCTimeout          time.Duration
+	GRPCMaxChunk         int
+	GRPCInsecure         bool
+	NodeID               string
+	KnownLayerAfsSize    int64
+	ProviderRefreshEvery time.Duration
+	DialGRPCAcquire      func(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error)
+	FindLayerServices    func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]ServiceInfo, error)
 }
 
 type DiscoveryBackedReaderAt struct {
-	cfg       Config
-	digest    string
-	bootstrap string
-	providers []ServiceInfo
+	cfg               Config
+	digest            string
+	bootstrap         string
+	providers         []ServiceInfo
+	dialGRPCAcquire   func(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error)
+	findLayerServices func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]ServiceInfo, error)
 
 	mu                   sync.Mutex
 	nextRefreshAt        time.Time
 	providerRefreshEvery time.Duration
 	endpoint             string
 	conn                 *grpc.ClientConn
+	connRelease          func()
 	client               layerstorepb.LayerStoreClient
 	size                 int64
 }
 
 func NewDiscoveryBackedLayerReader(cfg Config, digest string, bootstrapEndpoint string, providers []ServiceInfo) (*DiscoveryBackedReaderAt, error) {
+	dialer := cfg.DialGRPCAcquire
+	if dialer == nil {
+		dialer = defaultDialGRPCAcquire
+	}
+	finder := cfg.FindLayerServices
+	if finder == nil {
+		finder = findLayerServices
+	}
+	refreshEvery := cfg.ProviderRefreshEvery
+	if refreshEvery <= 0 {
+		refreshEvery = 30 * time.Second
+	}
 	r := &DiscoveryBackedReaderAt{
 		cfg:                  cfg,
 		digest:               digest,
 		bootstrap:            strings.TrimSpace(bootstrapEndpoint),
 		providers:            append([]ServiceInfo(nil), providers...),
-		providerRefreshEvery: 2 * time.Second,
+		providerRefreshEvery: refreshEvery,
+		dialGRPCAcquire:      dialer,
+		findLayerServices:    finder,
 	}
 	if err := r.switchProvider(nil); err != nil {
 		return nil, err
@@ -103,6 +124,9 @@ func (r *DiscoveryBackedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (r *DiscoveryBackedReaderAt) maybeRefreshProviders() {
+	if r.providerRefreshEvery <= 0 {
+		return
+	}
 	now := time.Now()
 	r.mu.Lock()
 	if now.Before(r.nextRefreshAt) {
@@ -112,7 +136,7 @@ func (r *DiscoveryBackedReaderAt) maybeRefreshProviders() {
 	r.nextRefreshAt = now.Add(r.providerRefreshEvery)
 	r.mu.Unlock()
 
-	fresh, err := findLayerServices(r.cfg.DiscoveryAddr, r.digest, r.cfg.GRPCTimeout, r.cfg.GRPCInsecure)
+	fresh, err := r.findLayerServices(r.cfg.DiscoveryAddr, r.digest, r.cfg.GRPCTimeout, r.cfg.GRPCInsecure)
 	if err != nil {
 		return
 	}
@@ -205,7 +229,7 @@ func (r *DiscoveryBackedReaderAt) readOnceStream(client layerstorepb.LayerStoreC
 }
 
 func (r *DiscoveryBackedReaderAt) switchProvider(excluded map[string]struct{}) error {
-	candidates := r.findLayerProviders()
+	candidates := r.currentCandidates()
 	for _, c := range candidates {
 		if _, skip := excluded[c.Endpoint]; skip {
 			continue
@@ -217,25 +241,35 @@ func (r *DiscoveryBackedReaderAt) switchProvider(excluded map[string]struct{}) e
 		log.Printf("layer provider selected: digest=%s endpoint=%s", r.digest, c.Endpoint)
 		return nil
 	}
+	fresh, err := r.findLayerServices(r.cfg.DiscoveryAddr, r.digest, r.cfg.GRPCTimeout, r.cfg.GRPCInsecure)
+	if err == nil && len(fresh) > 0 {
+		r.mu.Lock()
+		r.providers = fresh
+		r.mu.Unlock()
+		for _, c := range rankServicesForAffinity(append([]ServiceInfo(nil), fresh...), r.cfg.NodeID) {
+			if _, skip := excluded[c.Endpoint]; skip {
+				continue
+			}
+			if err := r.connectProvider(c.Endpoint); err != nil {
+				log.Printf("provider connect failed after refresh: digest=%s endpoint=%s err=%v", r.digest, c.Endpoint, err)
+				continue
+			}
+			log.Printf("layer provider selected after refresh: digest=%s endpoint=%s", r.digest, c.Endpoint)
+			return nil
+		}
+	}
+
 	return fmt.Errorf("no available provider for digest=%s", r.digest)
 }
 
-func (r *DiscoveryBackedReaderAt) findLayerProviders() []ServiceInfo {
+func (r *DiscoveryBackedReaderAt) currentCandidates() []ServiceInfo {
 	r.mu.Lock()
 	baseProviders := append([]ServiceInfo(nil), r.providers...)
 	bootstrap := r.bootstrap
 	r.mu.Unlock()
 
 	candidates := make([]ServiceInfo, 0, len(baseProviders)+1)
-	fresh, err := findLayerServices(r.cfg.DiscoveryAddr, r.digest, r.cfg.GRPCTimeout, r.cfg.GRPCInsecure)
-	if err == nil && len(fresh) > 0 {
-		r.mu.Lock()
-		r.providers = fresh
-		r.mu.Unlock()
-		candidates = append(candidates, fresh...)
-	} else {
-		candidates = append(candidates, baseProviders...)
-	}
+	candidates = append(candidates, baseProviders...)
 	if bootstrap != "" {
 		found := false
 		for _, c := range candidates {
@@ -248,7 +282,7 @@ func (r *DiscoveryBackedReaderAt) findLayerProviders() []ServiceInfo {
 			candidates = append(candidates, ServiceInfo{Endpoint: bootstrap})
 		}
 	}
-	return rankServicesForAffinity(candidates, r.cfg.NodeID)
+	return rankServicesForAffinity(dedupeServiceInfos(candidates), r.cfg.NodeID)
 }
 
 func findLayerServices(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]ServiceInfo, error) {
@@ -278,29 +312,57 @@ func findLayerServices(discoveryAddr, digest string, timeout time.Duration, inse
 }
 
 func (r *DiscoveryBackedReaderAt) connectProvider(endpoint string) error {
-	conn, err := dialGRPC(endpoint, r.cfg.GRPCTimeout, r.cfg.GRPCInsecure)
+	conn, release, err := r.dialGRPCAcquire(endpoint, r.cfg.GRPCTimeout, r.cfg.GRPCInsecure)
 	if err != nil {
 		return err
 	}
 	client := layerstorepb.NewLayerStoreClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
-	defer cancel()
-	statResp, err := client.StatLayer(ctx, &layerstorepb.StatLayerRequest{Digest: r.digest})
-	if err != nil {
-		_ = conn.Close()
-		return err
+	size := r.cfg.KnownLayerAfsSize
+	if size <= 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
+		statResp, err := client.StatLayer(ctx, &layerstorepb.StatLayerRequest{Digest: r.digest})
+		cancel()
+		if err != nil {
+			release()
+			return err
+		}
+		size = statResp.GetAfsSize()
 	}
 
 	r.mu.Lock()
 	oldConn := r.conn
+	oldRelease := r.connRelease
 	r.conn = conn
+	r.connRelease = release
 	r.client = client
 	r.endpoint = endpoint
-	r.size = statResp.GetAfsSize()
+	r.size = size
 	r.mu.Unlock()
 
-	if oldConn != nil {
+	if oldRelease != nil {
+		oldRelease()
+	} else if oldConn != nil {
 		_ = oldConn.Close()
+	}
+	return nil
+}
+
+func (r *DiscoveryBackedReaderAt) Close() error {
+	r.mu.Lock()
+	conn := r.conn
+	release := r.connRelease
+	r.conn = nil
+	r.connRelease = nil
+	r.client = nil
+	r.endpoint = ""
+	r.mu.Unlock()
+
+	if release != nil {
+		release()
+		return nil
+	}
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
@@ -348,4 +410,12 @@ func dialGRPC(addr string, timeout time.Duration, insecureTransport bool) (*grpc
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+}
+
+func defaultDialGRPCAcquire(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error) {
+	conn, err := dialGRPC(addr, timeout, insecureTransport)
+	if err != nil {
+		return nil, nil, err
+	}
+	return conn, func() { _ = conn.Close() }, nil
 }

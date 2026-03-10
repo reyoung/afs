@@ -163,3 +163,27 @@ func TestExtraMountSpecsDisabledOrNonLinux(t *testing.T) {
 		t.Fatalf("extraMountSpecs non-linux should be nil, got %v", got)
 	}
 }
+
+func TestEffectiveLayerMountConcurrency(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		requested int
+		total     int
+		want      int
+	}{
+		{name: "default when requested non-positive", requested: 0, total: 4, want: 1},
+		{name: "cap at total", requested: 8, total: 3, want: 3},
+		{name: "keep requested", requested: 2, total: 6, want: 2},
+		{name: "fallback when total invalid", requested: 4, total: 0, want: 1},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := effectiveLayerMountConcurrency(tc.requested, tc.total); got != tc.want {
+				t.Fatalf("effectiveLayerMountConcurrency(%d,%d)=%d, want %d", tc.requested, tc.total, got, tc.want)
+			}
+		})
+	}
+}

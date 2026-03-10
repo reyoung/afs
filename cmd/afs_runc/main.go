@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -12,17 +14,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 type config struct {
-	rootfs      string
-	cpuCores    int64
-	memoryMB    int64
-	timeout     time.Duration
-	runcBinary  string
-	containerID string
-	keepBundle  bool
+	rootfs       string
+	cpuCores     int64
+	memoryMB     int64
+	timeout      time.Duration
+	runcBinary   string
+	containerID  string
+	keepBundle   bool
+	noPivot      bool
+	noNewKeyring bool
+	noCgroupNS   bool
+	noPIDNS      bool
+	noIPCNS      bool
+	noUTSNS      bool
 }
 
 type ociSpec struct {
@@ -93,6 +102,12 @@ func parseFlags() (config, []string) {
 	flag.StringVar(&cfg.runcBinary, "runc-binary", "runc", "runc binary path")
 	flag.StringVar(&cfg.containerID, "container-id", "", "container id (default: auto generated)")
 	flag.BoolVar(&cfg.keepBundle, "keep-bundle", false, "keep generated OCI bundle for debugging")
+	flag.BoolVar(&cfg.noPivot, "no-pivot", false, "pass --no-pivot to runc run")
+	flag.BoolVar(&cfg.noNewKeyring, "no-new-keyring", false, "pass --no-new-keyring to runc run")
+	flag.BoolVar(&cfg.noCgroupNS, "no-cgroup-ns", false, "do not create cgroup namespace in OCI spec")
+	flag.BoolVar(&cfg.noPIDNS, "no-pid-ns", false, "do not create pid namespace in OCI spec")
+	flag.BoolVar(&cfg.noIPCNS, "no-ipc-ns", false, "do not create ipc namespace in OCI spec")
+	flag.BoolVar(&cfg.noUTSNS, "no-uts-ns", false, "do not create uts namespace in OCI spec")
 	flag.Parse()
 
 	cmdArgs := flag.Args()
@@ -118,6 +133,7 @@ func parseFlags() (config, []string) {
 }
 
 func run(cfg config, cmdArgs []string) error {
+	totalStart := time.Now()
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("afs_runc only supports linux")
 	}
@@ -132,29 +148,62 @@ func run(cfg config, cmdArgs []string) error {
 		return fmt.Errorf("find runc binary %q: %w", cfg.runcBinary, err)
 	}
 
+	prepareStart := time.Now()
 	bundleDir, cleanup, err := prepareBundle(rootfsAbs, cfg, cmdArgs)
 	if err != nil {
 		return err
 	}
+	logTiming("prepare_bundle", time.Since(prepareStart))
 	if !cfg.keepBundle {
 		defer cleanup()
 	}
 
-	runCmd := exec.Command(cfg.runcBinary, "run", "--bundle", bundleDir, cfg.containerID)
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stderr
+	runArgs := []string{"run", "--bundle", bundleDir}
+	if cfg.noPivot {
+		runArgs = append(runArgs, "--no-pivot")
+	}
+	if cfg.noNewKeyring {
+		runArgs = append(runArgs, "--no-new-keyring")
+	}
+	runArgs = append(runArgs, cfg.containerID)
+
+	runCmd := exec.Command(cfg.runcBinary, runArgs...)
+	stdoutPipe, err := runCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("open runc stdout pipe: %w", err)
+	}
+	stderrPipe, err := runCmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("open runc stderr pipe: %w", err)
+	}
 	runCmd.Stdin = os.Stdin
+	startStart := time.Now()
 	if err := runCmd.Start(); err != nil {
 		return fmt.Errorf("start runc run: %w", err)
 	}
+	logTiming("runc_start", time.Since(startStart))
+	detector := newFirstOutputDetector(startStart, logTimingWithStream)
+	var streamWG sync.WaitGroup
+	streamWG.Add(2)
+	go copyObservedStream("stdout", stdoutPipe, os.Stdout, detector, &streamWG)
+	go copyObservedStream("stderr", stderrPipe, os.Stderr, detector, &streamWG)
 
 	waitCh := make(chan error, 1)
-	go func() { waitCh <- runCmd.Wait() }()
+	go func() {
+		waitErr := runCmd.Wait()
+		streamWG.Wait()
+		waitCh <- waitErr
+	}()
 	timedOut := false
 
 	select {
 	case err := <-waitCh:
+		waitDur := time.Since(startStart)
+		logTiming("runc_wait", waitDur)
+		delStart := time.Now()
 		deleteContainer(cfg.runcBinary, cfg.containerID)
+		logTiming("runc_delete", time.Since(delStart))
+		logTiming("total", time.Since(totalStart))
 		if err != nil {
 			return fmt.Errorf("runc run failed: %w", err)
 		}
@@ -165,7 +214,11 @@ func run(cfg config, cmdArgs []string) error {
 
 	_ = exec.Command(cfg.runcBinary, "kill", cfg.containerID, "KILL").Run()
 	err = <-waitCh
+	logTiming("runc_wait", time.Since(startStart))
+	delStart := time.Now()
 	deleteContainer(cfg.runcBinary, cfg.containerID)
+	logTiming("runc_delete", time.Since(delStart))
+	logTiming("total", time.Since(totalStart))
 	if err == nil {
 		return fmt.Errorf("container timed out after %s", cfg.timeout)
 	}
@@ -202,6 +255,24 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 	quota := cfg.cpuCores * int64(period)
 	memLimit := cfg.memoryMB * 1024 * 1024
 
+	namespaces := []ociNS{{Type: "mount"}}
+	if !cfg.noPIDNS {
+		namespaces = append(namespaces, ociNS{Type: "pid"})
+	}
+	if !cfg.noIPCNS {
+		namespaces = append(namespaces, ociNS{Type: "ipc"})
+	}
+	if !cfg.noUTSNS {
+		namespaces = append(namespaces, ociNS{Type: "uts"})
+	}
+	if !cfg.noCgroupNS {
+		namespaces = append(namespaces, ociNS{Type: "cgroup"})
+	}
+	hostname := ""
+	if !cfg.noUTSNS {
+		hostname = "afs-runc"
+	}
+
 	return ociSpec{
 		Version: "1.0.2",
 		Root: ociRoot{
@@ -216,20 +287,14 @@ func buildSpec(cfg config, cmdArgs []string, rootfsPath string) ociSpec {
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			},
 		},
-		Hostname: "afs-runc",
+		Hostname: hostname,
 		Linux: ociLinux{
 			CgroupsPath: filepath.Join("/afs_runc", cfg.containerID),
 			Resources: ociResources{
 				CPU:    ociCPU{Period: &period, Quota: &quota},
 				Memory: ociMemory{Limit: &memLimit},
 			},
-			Namespaces: []ociNS{
-				{Type: "pid"},
-				{Type: "ipc"},
-				{Type: "uts"},
-				{Type: "mount"},
-				{Type: "cgroup"},
-			},
+			Namespaces: namespaces,
 		},
 		Mounts: defaultMounts(),
 	}
@@ -264,4 +329,81 @@ func ensureDir(path string) error {
 
 func deleteContainer(runcBinary string, containerID string) {
 	_ = exec.Command(runcBinary, "delete", "-f", containerID).Run()
+}
+
+type firstOutputDetector struct {
+	start     time.Time
+	emit      func(phase string, d time.Duration, stream string)
+	onceByte  sync.Once
+	onceLine  sync.Once
+	lineMu    sync.Mutex
+	lineBuf   []byte
+	lineLimit int
+}
+
+func newFirstOutputDetector(start time.Time, emit func(phase string, d time.Duration, stream string)) *firstOutputDetector {
+	return &firstOutputDetector{
+		start:     start,
+		emit:      emit,
+		lineBuf:   make([]byte, 0, 256),
+		lineLimit: 1 << 16,
+	}
+}
+
+func (d *firstOutputDetector) Observe(stream string, p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	d.onceByte.Do(func() {
+		d.emit("first_output_byte", time.Since(d.start), stream)
+	})
+	d.lineMu.Lock()
+	defer d.lineMu.Unlock()
+	if len(d.lineBuf) > d.lineLimit {
+		return
+	}
+	for _, b := range p {
+		d.lineBuf = append(d.lineBuf, b)
+		if b == '\n' {
+			d.onceLine.Do(func() {
+				d.emit("first_output_line", time.Since(d.start), stream)
+			})
+			return
+		}
+		if len(d.lineBuf) >= d.lineLimit {
+			return
+		}
+	}
+}
+
+func copyObservedStream(stream string, r io.Reader, dst io.Writer, detector *firstOutputDetector, wg *sync.WaitGroup) {
+	defer wg.Done()
+	br := bufio.NewReaderSize(r, 32*1024)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := br.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			detector.Observe(stream, chunk)
+			if _, werr := dst.Write(chunk); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func logTiming(phase string, d time.Duration) {
+	_, _ = fmt.Fprintf(os.Stderr, "__AFS_RUNC_TIMING__ phase=%s ms=%d\n", phase, d.Milliseconds())
+}
+
+func logTimingWithStream(phase string, d time.Duration, stream string) {
+	stream = strings.TrimSpace(stream)
+	if stream == "" {
+		logTiming(phase, d)
+		return
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "__AFS_RUNC_TIMING__ phase=%s ms=%d stream=%s\n", phase, d.Milliseconds(), stream)
 }

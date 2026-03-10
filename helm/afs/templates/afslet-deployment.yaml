@@ -45,8 +45,15 @@ spec:
             - /usr/local/bin/afslet
           args:
             - -listen=:{{ .Values.afslet.containerPort }}
+            - -mount-in-process={{ .Values.afslet.mountInProcess }}
             - -mount-binary={{ .Values.afslet.mountBinary }}
             - -runc-binary={{ .Values.afslet.runcBinary }}
+            - -runc-no-pivot={{ .Values.afslet.runcNoPivot }}
+            - -runc-no-new-keyring={{ .Values.afslet.runcNoNewKeyring }}
+            - -runc-no-cgroup-ns={{ .Values.afslet.runcNoCgroupNS }}
+            - -runc-no-pid-ns={{ .Values.afslet.runcNoPIDNS }}
+            - -runc-no-ipc-ns={{ .Values.afslet.runcNoIPCNS }}
+            - -runc-no-uts-ns={{ .Values.afslet.runcNoUTSNS }}
             - -sudo-binaries={{ .Values.afslet.sudoBinaries }}
             - -tar-chunk={{ .Values.afslet.tarChunk }}
             - -graceful-timeout={{ .Values.afslet.gracefulTimeout }}
@@ -54,6 +61,15 @@ spec:
             - -temp-dir={{ .Values.afslet.tempDir }}
             - -limit-cpu={{ .Values.afslet.limitCPUCores }}
             - -limit-memory-mb={{ .Values.afslet.limitMemoryMB }}
+            {{- if .Values.afslet.sharedSpillCache.enabled }}
+            - -shared-spill-cache=true
+            - -shared-spill-cache-dir={{ .Values.afslet.sharedSpillCache.dir }}
+            {{- if .Values.afslet.sharedSpillCache.sock }}
+            - -shared-spill-cache-sock={{ .Values.afslet.sharedSpillCache.sock }}
+            {{- end }}
+            - -shared-spill-cache-max-bytes={{ .Values.afslet.sharedSpillCache.maxBytes }}
+            - -shared-spill-cache-binary={{ .Values.afslet.sharedSpillCache.binary }}
+            {{- end }}
           env:
             - name: GOMAXPROCS
               valueFrom:
@@ -75,6 +91,10 @@ spec:
               mountPath: {{ .Values.afslet.tempDir }}
             - name: work
               mountPath: {{ .Values.afslet.workDir }}
+            {{- if .Values.afslet.sharedSpillCache.enabled }}
+            - name: spillcache
+              mountPath: {{ .Values.afslet.sharedSpillCache.dir }}
+            {{- end }}
             - name: cgroupfs
               mountPath: /sys/fs/cgroup
             - name: fuse-dev
@@ -86,6 +106,20 @@ spec:
           emptyDir: {}
         - name: work
           emptyDir: {}
+        {{- if and .Values.afslet.sharedSpillCache.enabled (eq .Values.afslet.spillCacheVolume.type "emptyDir") }}
+        - name: spillcache
+          emptyDir:
+            {{- toYaml .Values.afslet.spillCacheVolume.emptyDir | nindent 12 }}
+        {{- end }}
+        {{- if and .Values.afslet.sharedSpillCache.enabled (eq .Values.afslet.spillCacheVolume.type "hostPath") }}
+        - name: spillcache
+          hostPath:
+            path: {{ .Values.afslet.spillCacheVolume.hostPath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if and .Values.afslet.sharedSpillCache.enabled (not (or (eq .Values.afslet.spillCacheVolume.type "emptyDir") (eq .Values.afslet.spillCacheVolume.type "hostPath"))) }}
+        {{- fail "afslet.spillCacheVolume.type must be one of: emptyDir, hostPath" }}
+        {{- end }}
         - name: cgroupfs
           hostPath:
             path: /sys/fs/cgroup

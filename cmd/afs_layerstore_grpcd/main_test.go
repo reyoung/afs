@@ -67,15 +67,15 @@ func TestParseRegistryBasicPairInvalid(t *testing.T) {
 func TestParseRegistryMirrorPair(t *testing.T) {
 	t.Parallel()
 
-	host, mirrors, err := parseRegistryMirrorPair("registry-1.docker.io=mirror.ccs.tencentyun.com, dockerhub.woa.com")
+	host, mirrors, err := parseRegistryMirrorPair("registry-1.docker.io=mirror.ccs.tencentyun.com, mirror.example.com")
 	if err != nil {
 		t.Fatalf("parseRegistryMirrorPair returned error: %v", err)
 	}
 	if host != "registry-1.docker.io" {
 		t.Fatalf("host=%q, want %q", host, "registry-1.docker.io")
 	}
-	if len(mirrors) != 2 || mirrors[0] != "mirror.ccs.tencentyun.com" || mirrors[1] != "dockerhub.woa.com" {
-		t.Fatalf("mirrors=%v, want [mirror.ccs.tencentyun.com dockerhub.woa.com]", mirrors)
+	if len(mirrors) != 2 || mirrors[0] != "mirror.ccs.tencentyun.com" || mirrors[1] != "mirror.example.com" {
+		t.Fatalf("mirrors=%v, want [mirror.ccs.tencentyun.com mirror.example.com]", mirrors)
 	}
 }
 
