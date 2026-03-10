@@ -1,6 +1,7 @@
 package spillcache
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,13 +13,17 @@ import (
 )
 
 type LauncherConfig struct {
-	CacheDir      string
-	SockPath      string
-	LockPath      string
-	MaxBytes      int64
-	BinaryPath    string
-	StartupWait   time.Duration
-	ClientTimeout time.Duration
+	CacheDir          string
+	SockPath          string
+	LockPath          string
+	OwnerLockPath     string
+	PIDFilePath       string
+	MaxBytes          int64
+	BinaryPath        string
+	StartupWait       time.Duration
+	ClientTimeout     time.Duration
+	PingAttempts      int
+	PingRetryInterval time.Duration
 }
 
 type Launcher struct {
@@ -35,6 +40,12 @@ func NewLauncher(cfg LauncherConfig) (*Launcher, error) {
 	if strings.TrimSpace(cfg.LockPath) == "" {
 		cfg.LockPath = filepath.Join(cfg.CacheDir, "daemon.lock")
 	}
+	if strings.TrimSpace(cfg.OwnerLockPath) == "" {
+		cfg.OwnerLockPath = defaultOwnerLockPath(cfg.CacheDir)
+	}
+	if strings.TrimSpace(cfg.PIDFilePath) == "" {
+		cfg.PIDFilePath = defaultPIDFilePath(cfg.CacheDir)
+	}
 	if cfg.MaxBytes <= 0 {
 		return nil, fmt.Errorf("max bytes must be > 0")
 	}
@@ -46,6 +57,12 @@ func NewLauncher(cfg LauncherConfig) (*Launcher, error) {
 	}
 	if cfg.ClientTimeout <= 0 {
 		cfg.ClientTimeout = 2 * time.Second
+	}
+	if cfg.PingAttempts <= 0 {
+		cfg.PingAttempts = 4
+	}
+	if cfg.PingRetryInterval <= 0 {
+		cfg.PingRetryInterval = 100 * time.Millisecond
 	}
 	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
@@ -65,10 +82,27 @@ func (l *Launcher) EnsureStarted() (*Client, error) {
 	defer syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
 
 	client := NewClient(l.cfg.SockPath, l.cfg.ClientTimeout)
-	if err := client.Ping(); err == nil {
+	if err := l.pingWithRetry(client); err == nil {
 		return client, nil
 	}
-	_ = os.Remove(l.cfg.SockPath)
+
+	alive, err := l.isDaemonLikelyAlive()
+	if err != nil {
+		return nil, err
+	}
+	if alive {
+		deadline := time.Now().Add(l.cfg.StartupWait)
+		for time.Now().Before(deadline) {
+			if err := client.Ping(); err == nil {
+				return client, nil
+			}
+			time.Sleep(l.cfg.PingRetryInterval)
+		}
+		return nil, fmt.Errorf("daemon appears alive but ping failed on %s", l.cfg.SockPath)
+	}
+	if err := os.Remove(l.cfg.SockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove stale daemon socket: %w", err)
+	}
 	if err := l.spawnDaemon(); err != nil {
 		return nil, err
 	}
@@ -82,6 +116,45 @@ func (l *Launcher) EnsureStarted() (*Client, error) {
 	return nil, fmt.Errorf("wait daemon startup timeout: %s", l.cfg.SockPath)
 }
 
+func (l *Launcher) pingWithRetry(client *Client) error {
+	var lastErr error
+	for i := 0; i < l.cfg.PingAttempts; i++ {
+		if err := client.Ping(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if i+1 < l.cfg.PingAttempts {
+			time.Sleep(l.cfg.PingRetryInterval)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("ping failed")
+	}
+	return lastErr
+}
+
+func (l *Launcher) isDaemonLikelyAlive() (bool, error) {
+	lockFd, heldByOther, err := tryAcquireExclusiveFileLock(l.cfg.OwnerLockPath)
+	if err != nil {
+		return false, fmt.Errorf("check owner lock %s: %w", l.cfg.OwnerLockPath, err)
+	}
+	if heldByOther {
+		return true, nil
+	}
+	releaseExclusiveFileLock(lockFd)
+
+	st, err := readDaemonPIDState(l.cfg.PIDFilePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		// Corrupted/stale pid file should not block recovery.
+		return false, nil
+	}
+	return isProcessAlive(st.PID, st.StartTime), nil
+}
+
 func (l *Launcher) spawnDaemon() error {
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -92,6 +165,8 @@ func (l *Launcher) spawnDaemon() error {
 	cmd := exec.Command(l.cfg.BinaryPath,
 		"-cache-dir", l.cfg.CacheDir,
 		"-sock", l.cfg.SockPath,
+		"-owner-lock", l.cfg.OwnerLockPath,
+		"-pid-file", l.cfg.PIDFilePath,
 		"-cache-max-bytes", strconv.FormatInt(l.cfg.MaxBytes, 10),
 	)
 	// Detach daemon stdio from the caller process, so it does not keep

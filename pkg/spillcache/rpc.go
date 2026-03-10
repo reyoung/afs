@@ -86,18 +86,41 @@ func (s *rpcService) Abort(req *AbortRequest, _ *AbortResponse) error {
 }
 
 type ServerConfig struct {
-	CacheDir string
-	SockPath string
-	MaxBytes int64
+	CacheDir      string
+	SockPath      string
+	MaxBytes      int64
+	OwnerLockPath string
+	PIDFilePath   string
 }
 
 func RunServer(cfg ServerConfig) error {
 	if strings.TrimSpace(cfg.SockPath) == "" {
 		return fmt.Errorf("sock path is required")
 	}
+	if strings.TrimSpace(cfg.OwnerLockPath) == "" {
+		cfg.OwnerLockPath = defaultOwnerLockPath(cfg.CacheDir)
+	}
+	if strings.TrimSpace(cfg.PIDFilePath) == "" {
+		cfg.PIDFilePath = defaultPIDFilePath(cfg.CacheDir)
+	}
 	if err := os.MkdirAll(filepath.Dir(cfg.SockPath), 0o755); err != nil {
 		return fmt.Errorf("create socket dir: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(cfg.OwnerLockPath), 0o755); err != nil {
+		return fmt.Errorf("create owner lock dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.PIDFilePath), 0o755); err != nil {
+		return fmt.Errorf("create pid file dir: %w", err)
+	}
+	lockFD, heldByOther, err := tryAcquireExclusiveFileLock(cfg.OwnerLockPath)
+	if err != nil {
+		return fmt.Errorf("acquire owner lock: %w", err)
+	}
+	if heldByOther {
+		return fmt.Errorf("owner lock already held by another daemon: %s", cfg.OwnerLockPath)
+	}
+	defer releaseExclusiveFileLock(lockFD)
+
 	store, err := newCacheStore(cfg.CacheDir, cfg.MaxBytes)
 	if err != nil {
 		return err
@@ -111,6 +134,17 @@ func RunServer(cfg ServerConfig) error {
 	if err := os.Chmod(cfg.SockPath, 0o666); err != nil {
 		return fmt.Errorf("chmod socket: %w", err)
 	}
+	startTime, err := readProcessStartTime(os.Getpid())
+	if err != nil {
+		startTime = ""
+	}
+	if err := writeDaemonPIDState(cfg.PIDFilePath, daemonPIDState{
+		PID:       os.Getpid(),
+		StartTime: startTime,
+	}); err != nil {
+		return fmt.Errorf("write daemon pid file: %w", err)
+	}
+	defer os.Remove(cfg.PIDFilePath)
 
 	srv := rpc.NewServer()
 	if err := srv.RegisterName("SpillCache", &rpcService{store: store}); err != nil {
