@@ -72,7 +72,7 @@ func TestParseBoolDefaultTrue(t *testing.T) {
 	}
 }
 
-func TestEnsureImage(t *testing.T) {
+func TestReconcileImageReplica(t *testing.T) {
 	t.Parallel()
 
 	discAddr, stop := startDiscoveryServer(t)
@@ -87,7 +87,7 @@ func TestEnsureImage(t *testing.T) {
 		StatusTimeout:   time.Second,
 	})
 
-	resp, err := svc.EnsureImage(context.Background(), &afsproxypb.EnsureImageRequest{
+	resp, err := svc.ReconcileImageReplica(context.Background(), &afsproxypb.ReconcileImageReplicaRequest{
 		Image:        "nginx",
 		Tag:          "latest",
 		PlatformOs:   "linux",
@@ -95,7 +95,7 @@ func TestEnsureImage(t *testing.T) {
 		Replica:      2,
 	})
 	if err != nil {
-		t.Fatalf("EnsureImage: %v", err)
+		t.Fatalf("ReconcileImageReplica: %v", err)
 	}
 	if resp.GetImageKey() != "nginx|latest|linux|amd64|" {
 		t.Fatalf("image_key=%q, want nginx|latest|linux|amd64|", resp.GetImageKey())
@@ -107,7 +107,7 @@ func TestEnsureImage(t *testing.T) {
 		t.Fatalf("ensured=%v, want true", resp.GetEnsured())
 	}
 
-	resp, err = svc.EnsureImage(context.Background(), &afsproxypb.EnsureImageRequest{
+	resp, err = svc.ReconcileImageReplica(context.Background(), &afsproxypb.ReconcileImageReplicaRequest{
 		Image:        "nginx",
 		Tag:          "latest",
 		PlatformOs:   "linux",
@@ -115,7 +115,7 @@ func TestEnsureImage(t *testing.T) {
 		Replica:      3,
 	})
 	if err != nil {
-		t.Fatalf("EnsureImage with higher replica: %v", err)
+		t.Fatalf("ReconcileImageReplica with higher replica: %v", err)
 	}
 	if resp.GetCurrentReplica() != 2 {
 		t.Fatalf("current_replica=%d, want 2", resp.GetCurrentReplica())
@@ -125,11 +125,11 @@ func TestEnsureImage(t *testing.T) {
 	}
 }
 
-func TestEnsureImageValidation(t *testing.T) {
+func TestReconcileImageReplicaValidation(t *testing.T) {
 	t.Parallel()
 
 	svc := NewService(Config{})
-	_, err := svc.EnsureImage(context.Background(), &afsproxypb.EnsureImageRequest{
+	_, err := svc.ReconcileImageReplica(context.Background(), &afsproxypb.ReconcileImageReplicaRequest{
 		Image:   "",
 		Replica: 1,
 	})
@@ -137,7 +137,7 @@ func TestEnsureImageValidation(t *testing.T) {
 		t.Fatalf("code=%v, want %v", status.Code(err), codes.InvalidArgument)
 	}
 
-	_, err = svc.EnsureImage(context.Background(), &afsproxypb.EnsureImageRequest{
+	_, err = svc.ReconcileImageReplica(context.Background(), &afsproxypb.ReconcileImageReplicaRequest{
 		Image:   "nginx",
 		Replica: -1,
 	})

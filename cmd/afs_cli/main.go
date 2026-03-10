@@ -45,9 +45,9 @@ type config struct {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "ensure-image" {
-		if err := runEnsureImageSubcommand(os.Args[2:], os.Stdout); err != nil {
-			log.Fatalf("afs_cli ensure-image failed: %v", err)
+	if len(os.Args) > 1 && (os.Args[1] == "reconcile-image-replica" || os.Args[1] == "ensure-image") {
+		if err := runReconcileImageReplicaSubcommand(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("afs_cli reconcile-image-replica failed: %v", err)
 		}
 		return
 	}
@@ -438,8 +438,8 @@ func ensureDir(path string) error {
 	return nil
 }
 
-func runEnsureImageSubcommand(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("ensure-image", flag.ContinueOnError)
+func runReconcileImageReplicaSubcommand(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("reconcile-image-replica", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	var (
@@ -487,7 +487,7 @@ func runEnsureImageSubcommand(args []string, out io.Writer) error {
 	defer conn.Close()
 
 	client := afsproxypb.NewAfsProxyClient(conn)
-	resp, err := client.EnsureImage(ctx, &afsproxypb.EnsureImageRequest{
+	resp, err := client.ReconcileImageReplica(ctx, &afsproxypb.ReconcileImageReplicaRequest{
 		Image:           image,
 		Tag:             tag,
 		PlatformOs:      platformOS,

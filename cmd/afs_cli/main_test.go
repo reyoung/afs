@@ -15,9 +15,9 @@ type fakeProxyServer struct {
 	afsproxypb.UnimplementedAfsProxyServer
 }
 
-func (s *fakeProxyServer) EnsureImage(ctx context.Context, req *afsproxypb.EnsureImageRequest) (*afsproxypb.EnsureImageResponse, error) {
+func (s *fakeProxyServer) ReconcileImageReplica(ctx context.Context, req *afsproxypb.ReconcileImageReplicaRequest) (*afsproxypb.ReconcileImageReplicaResponse, error) {
 	_ = ctx
-	return &afsproxypb.EnsureImageResponse{
+	return &afsproxypb.ReconcileImageReplicaResponse{
 		ImageKey:         req.GetImage() + "|" + req.GetTag() + "|" + req.GetPlatformOs() + "|" + req.GetPlatformArch() + "|" + req.GetPlatformVariant(),
 		CurrentReplica:   2,
 		RequestedReplica: req.GetReplica(),
@@ -25,7 +25,7 @@ func (s *fakeProxyServer) EnsureImage(ctx context.Context, req *afsproxypb.Ensur
 	}, nil
 }
 
-func TestRunEnsureImageSubcommand(t *testing.T) {
+func TestRunReconcileImageReplicaSubcommand(t *testing.T) {
 	t.Parallel()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -43,7 +43,7 @@ func TestRunEnsureImageSubcommand(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	err = runEnsureImageSubcommand([]string{
+	err = runReconcileImageReplicaSubcommand([]string{
 		"-addr", lis.Addr().String(),
 		"-image", "nginx",
 		"-tag", "latest",
@@ -52,7 +52,7 @@ func TestRunEnsureImageSubcommand(t *testing.T) {
 		"-replica", "2",
 	}, &out)
 	if err != nil {
-		t.Fatalf("runEnsureImageSubcommand: %v", err)
+		t.Fatalf("runReconcileImageReplicaSubcommand: %v", err)
 	}
 	got := out.String()
 	if !strings.Contains(got, "image_key=nginx|latest|linux|amd64|") {

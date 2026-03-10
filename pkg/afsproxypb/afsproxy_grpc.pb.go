@@ -19,8 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AfsProxy_Status_FullMethodName      = "/afsproxy.v1.AfsProxy/Status"
-	AfsProxy_EnsureImage_FullMethodName = "/afsproxy.v1.AfsProxy/EnsureImage"
+	AfsProxy_Status_FullMethodName                = "/afsproxy.v1.AfsProxy/Status"
+	AfsProxy_ReconcileImageReplica_FullMethodName = "/afsproxy.v1.AfsProxy/ReconcileImageReplica"
 )
 
 // AfsProxyClient is the client API for AfsProxy service.
@@ -28,7 +28,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AfsProxyClient interface {
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StatusResponse], error)
-	EnsureImage(ctx context.Context, in *EnsureImageRequest, opts ...grpc.CallOption) (*EnsureImageResponse, error)
+	ReconcileImageReplica(ctx context.Context, in *ReconcileImageReplicaRequest, opts ...grpc.CallOption) (*ReconcileImageReplicaResponse, error)
 }
 
 type afsProxyClient struct {
@@ -58,10 +58,10 @@ func (c *afsProxyClient) Status(ctx context.Context, in *StatusRequest, opts ...
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AfsProxy_StatusClient = grpc.ServerStreamingClient[StatusResponse]
 
-func (c *afsProxyClient) EnsureImage(ctx context.Context, in *EnsureImageRequest, opts ...grpc.CallOption) (*EnsureImageResponse, error) {
+func (c *afsProxyClient) ReconcileImageReplica(ctx context.Context, in *ReconcileImageReplicaRequest, opts ...grpc.CallOption) (*ReconcileImageReplicaResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(EnsureImageResponse)
-	err := c.cc.Invoke(ctx, AfsProxy_EnsureImage_FullMethodName, in, out, cOpts...)
+	out := new(ReconcileImageReplicaResponse)
+	err := c.cc.Invoke(ctx, AfsProxy_ReconcileImageReplica_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,7 @@ func (c *afsProxyClient) EnsureImage(ctx context.Context, in *EnsureImageRequest
 // for forward compatibility.
 type AfsProxyServer interface {
 	Status(*StatusRequest, grpc.ServerStreamingServer[StatusResponse]) error
-	EnsureImage(context.Context, *EnsureImageRequest) (*EnsureImageResponse, error)
+	ReconcileImageReplica(context.Context, *ReconcileImageReplicaRequest) (*ReconcileImageReplicaResponse, error)
 	mustEmbedUnimplementedAfsProxyServer()
 }
 
@@ -87,8 +87,8 @@ type UnimplementedAfsProxyServer struct{}
 func (UnimplementedAfsProxyServer) Status(*StatusRequest, grpc.ServerStreamingServer[StatusResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method Status not implemented")
 }
-func (UnimplementedAfsProxyServer) EnsureImage(context.Context, *EnsureImageRequest) (*EnsureImageResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method EnsureImage not implemented")
+func (UnimplementedAfsProxyServer) ReconcileImageReplica(context.Context, *ReconcileImageReplicaRequest) (*ReconcileImageReplicaResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReconcileImageReplica not implemented")
 }
 func (UnimplementedAfsProxyServer) mustEmbedUnimplementedAfsProxyServer() {}
 func (UnimplementedAfsProxyServer) testEmbeddedByValue()                  {}
@@ -122,20 +122,20 @@ func _AfsProxy_Status_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AfsProxy_StatusServer = grpc.ServerStreamingServer[StatusResponse]
 
-func _AfsProxy_EnsureImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(EnsureImageRequest)
+func _AfsProxy_ReconcileImageReplica_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReconcileImageReplicaRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(AfsProxyServer).EnsureImage(ctx, in)
+		return srv.(AfsProxyServer).ReconcileImageReplica(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: AfsProxy_EnsureImage_FullMethodName,
+		FullMethod: AfsProxy_ReconcileImageReplica_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AfsProxyServer).EnsureImage(ctx, req.(*EnsureImageRequest))
+		return srv.(AfsProxyServer).ReconcileImageReplica(ctx, req.(*ReconcileImageReplicaRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -148,8 +148,8 @@ var AfsProxy_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*AfsProxyServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "EnsureImage",
-			Handler:    _AfsProxy_EnsureImage_Handler,
+			MethodName: "ReconcileImageReplica",
+			Handler:    _AfsProxy_ReconcileImageReplica_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
