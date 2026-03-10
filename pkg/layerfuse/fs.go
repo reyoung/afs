@@ -320,9 +320,11 @@ func (f *FileNode) prepareTempFile() (*os.File, int64, error) {
 		if err == nil {
 			fd, openErr := os.Open(p)
 			if openErr != nil {
-				return nil, 0, openErr
+				// Shared cache entry can be evicted between Prepare and Open.
+				// Fall back to local spill path instead of surfacing transient open errors.
+			} else {
+				return fd, size, nil
 			}
-			return fd, size, nil
 		}
 	}
 

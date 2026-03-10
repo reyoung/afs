@@ -1,6 +1,7 @@
 package afsmount
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -37,6 +38,8 @@ const (
 	imageResolveCacheMaxEntries = 256
 	layerSvcCacheTTL            = 5 * time.Second
 	layerSvcCacheMaxEntries     = 2048
+	unionMountReadyTimeout      = 120 * time.Second
+	unionMountReadyPollInterval = 1 * time.Millisecond
 )
 
 type Config struct {
@@ -147,6 +150,13 @@ func safeInvokeReadyCallback(onReady func()) {
 		}
 	}()
 	onReady()
+}
+
+func withTimeoutFromParent(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func Run(ctx context.Context, userCfg Config) error {
@@ -279,7 +289,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		logTiming("image_resolve_cache_lookup", cacheLookupStarted, "hit=false")
 
 		findImageByKeyStarted := time.Now()
-		imageProviders, findErr := findImageServices(discoveryClient, imageKeyStr, cfg.grpcTimeout)
+		imageProviders, findErr := findImageServices(ctx, discoveryClient, imageKeyStr, cfg.grpcTimeout)
 		if findErr != nil {
 			logTiming("discovery_find_image_by_key", findImageByKeyStarted, "providers=0", "ok=false")
 			return findErr
@@ -290,7 +300,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		allServices := imageProviders
 		if len(allServices) == 0 {
 			findAllServicesStarted := time.Now()
-			allServices, err = findImageServices(discoveryClient, "", cfg.grpcTimeout)
+			allServices, err = findImageServices(ctx, discoveryClient, "", cfg.grpcTimeout)
 			if err != nil {
 				logTiming("discovery_find_all_services", findAllServicesStarted, "providers=0", "ok=false")
 				return err
@@ -303,7 +313,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		}
 
 		pullWithDiscoveryStarted := time.Now()
-		chosen, pullResp, err = pullImageWithDiscovery(imageProviders, allServices, cfg)
+		chosen, pullResp, err = pullImageWithDiscovery(ctx, imageProviders, allServices, cfg)
 		if err != nil {
 			logTiming("pull_image_with_discovery", pullWithDiscoveryStarted, "layers=0", "ok=false")
 			return err
@@ -443,7 +453,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 						return sharedGRPCConnCache.Acquire(addr, timeout, insecureTransport)
 					},
 					FindLayerServices: func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]layerreader.ServiceInfo, error) {
-						services, err := findLayerServicesCached(discoveryAddr, digest, timeout, insecureTransport)
+						services, err := findLayerServicesCached(ctx, discoveryAddr, digest, timeout, insecureTransport)
 						if err != nil {
 							return nil, err
 						}
@@ -576,14 +586,12 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- unionCmd.Wait() }()
 	if cfg.onReady != nil {
-		select {
-		case err := <-waitCh:
-			if err != nil {
-				return fmt.Errorf("union mount exited before ready callback: %w", err)
-			}
-			return fmt.Errorf("union mount exited before ready callback")
-		default:
+		readyWaitStarted := time.Now()
+		if err := waitForUnionMountReady(ctx, cfg.mountpoint, waitCh, unionMountReadyTimeout, nil); err != nil {
+			logTiming("wait_union_mount_ready", readyWaitStarted, "ok=false")
+			return err
 		}
+		logTiming("wait_union_mount_ready", readyWaitStarted, "ok=true")
 		safeInvokeReadyCallback(cfg.onReady)
 	}
 	stopUnion := func(reason string) {
@@ -629,11 +637,11 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	return nil
 }
 
-func pullImageWithDiscovery(imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, *layerstorepb.PullImageResponse, error) {
+func pullImageWithDiscovery(ctx context.Context, imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, *layerstorepb.PullImageResponse, error) {
 	if !cfg.forceLocalFetch && len(imageProviders) > 0 {
 		for _, s := range rankServicesForAffinity(imageProviders, cfg.nodeID) {
 			attemptStarted := time.Now()
-			resp, err := pullImageFromService(s.endpoint, cfg, false)
+			resp, err := pullImageFromService(ctx, s.endpoint, cfg, false)
 			if err == nil {
 				logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=cached", "force_local_fetch=false", "ok=true")
 				log.Printf("using cached image provider endpoint=%s", s.endpoint)
@@ -646,7 +654,7 @@ func pullImageWithDiscovery(imageProviders []serviceInfo, allServices []serviceI
 
 	for _, s := range rankServicesForAffinity(allServices, cfg.nodeID) {
 		attemptStarted := time.Now()
-		resp, pullErr := pullImageFromService(s.endpoint, cfg, cfg.forceLocalFetch)
+		resp, pullErr := pullImageFromService(ctx, s.endpoint, cfg, cfg.forceLocalFetch)
 		if pullErr == nil {
 			logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=all", "force_local_fetch="+strconv.FormatBool(cfg.forceLocalFetch), "ok=true")
 			log.Printf("pulled image on endpoint=%s force_local_fetch=%v", s.endpoint, cfg.forceLocalFetch)
@@ -658,7 +666,7 @@ func pullImageWithDiscovery(imageProviders []serviceInfo, allServices []serviceI
 	return serviceInfo{}, nil, fmt.Errorf("failed to pull image %s across all discovered services", cfg.image)
 }
 
-func pullImageFromService(endpoint string, cfg config, force bool) (*layerstorepb.PullImageResponse, error) {
+func pullImageFromService(parentCtx context.Context, endpoint string, cfg config, force bool) (*layerstorepb.PullImageResponse, error) {
 	conn, releaseConn, err := sharedGRPCConnCache.Acquire(endpoint, cfg.grpcTimeout, cfg.grpcInsecure)
 	if err != nil {
 		return nil, err
@@ -666,7 +674,7 @@ func pullImageFromService(endpoint string, cfg config, force bool) (*layerstorep
 	defer releaseConn()
 
 	client := layerstorepb.NewLayerStoreClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.pullTimeout)
+	ctx, cancel := withTimeoutFromParent(parentCtx, cfg.pullTimeout)
 	defer cancel()
 	return client.PullImage(ctx, &layerstorepb.PullImageRequest{
 		Image:           cfg.image,
@@ -697,8 +705,8 @@ func discoverImageProviders(services []serviceInfo, chosen serviceInfo, cfg conf
 	return out, nil
 }
 
-func findImageServices(client discoverypb.ServiceDiscoveryClient, imageKey string, timeout time.Duration) ([]serviceInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func findImageServices(parentCtx context.Context, client discoverypb.ServiceDiscoveryClient, imageKey string, timeout time.Duration) ([]serviceInfo, error) {
+	ctx, cancel := withTimeoutFromParent(parentCtx, timeout)
 	defer cancel()
 	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{ImageKey: imageKey})
 	if err != nil {
@@ -715,7 +723,7 @@ func findImageServices(client discoverypb.ServiceDiscoveryClient, imageKey strin
 	return services, nil
 }
 
-func findLayerServicesCached(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]serviceInfo, error) {
+func findLayerServicesCached(parentCtx context.Context, discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]serviceInfo, error) {
 	cacheKey := layerServiceCacheKey(discoveryAddr, digest)
 	if cached, ok := sharedLayerSvcCache.get(cacheKey); ok {
 		log.Printf("__AFS_MOUNT_TIMING__ phase=find_layer_services_cached ms=0 digest=%s hit=true services=%d", digest, len(cached))
@@ -730,7 +738,7 @@ func findLayerServicesCached(discoveryAddr, digest string, timeout time.Duration
 	defer releaseConn()
 
 	client := discoverypb.NewServiceDiscoveryClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := withTimeoutFromParent(parentCtx, timeout)
 	defer cancel()
 	findLayerSvcStarted := time.Now()
 	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{LayerDigest: digest})
@@ -926,6 +934,97 @@ func toLayerReaderServices(in []serviceInfo) []layerreader.ServiceInfo {
 		})
 	}
 	return out
+}
+
+func waitForUnionMountReady(ctx context.Context, mountpoint string, waitCh <-chan error, timeout time.Duration, readyFn func(string) (bool, error)) error {
+	if readyFn == nil {
+		readyFn = isUnionMountReady
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(unionMountReadyPollInterval)
+	defer ticker.Stop()
+	var lastReadyErr error
+	for {
+		if err, exited := tryReadUnionWait(waitCh); exited {
+			if err != nil {
+				return fmt.Errorf("union mount exited before ready callback: %w", err)
+			}
+			return fmt.Errorf("union mount exited before ready callback")
+		}
+
+		ready, err := readyFn(mountpoint)
+		if err == nil && ready {
+			return nil
+		}
+		if err != nil {
+			lastReadyErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		case <-deadline.C:
+			if lastReadyErr != nil {
+				return fmt.Errorf("timeout waiting for union mount ready: %w", lastReadyErr)
+			}
+			return fmt.Errorf("timeout waiting for union mount ready")
+		}
+	}
+}
+
+func tryReadUnionWait(waitCh <-chan error) (error, bool) {
+	select {
+	case err := <-waitCh:
+		return err, true
+	default:
+		return nil, false
+	}
+}
+
+func isUnionMountReady(mountpoint string) (bool, error) {
+	if runtime.GOOS == "linux" {
+		mounted, err := isMountedLinux(mountpoint)
+		if err != nil {
+			return false, err
+		}
+		if !mounted {
+			return false, nil
+		}
+	}
+	if _, err := os.Stat(mountpoint); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func isMountedLinux(mountpoint string) (bool, error) {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		fields := strings.Fields(s.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		if unescapeMountInfoField(fields[4]) == mountpoint {
+			return true, nil
+		}
+	}
+	if err := s.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func unescapeMountInfoField(v string) string {
+	replacer := strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\\")
+	return replacer.Replace(v)
 }
 
 func tryUnmountUnion(goos string, mountpoint string) error {
