@@ -29,6 +29,22 @@ require_cmd docker
 require_cmd go
 require_cmd python3
 
+wait_for_tcp() {
+  local host="$1"
+  local port="$2"
+  local label="$3"
+  local attempts="${4:-120}"
+  local i
+  for ((i = 1; i <= attempts; i++)); do
+    if bash -lc "exec 3<>/dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "timed out waiting for ${label} at ${host}:${port}" >&2
+  exit 1
+}
+
 # Ensure compose stack is up for afs measurements.
 ( cd "${ROOT_DIR}" && docker compose up -d >/dev/null )
 
@@ -41,8 +57,13 @@ if [[ -z "${layerstore_ip}" ]]; then
   exit 1
 fi
 
+wait_for_tcp "${layerstore_ip}" 50051 "layerstore"
+wait_for_tcp 127.0.0.1 61051 "afslet"
+wait_for_tcp 127.0.0.1 62051 "afs_proxy"
+
 # Manually pre-pull image into layerstore via PullImage RPC (excluded from benchmark).
-TMP_GO="${OUT_DIR}/prepull_layerstore.go"
+TMP_GO="$(mktemp "${OUT_DIR}/prepull_layerstore.XXXXXX.go")"
+trap 'rm -f "${TMP_GO}"' EXIT
 cat > "${TMP_GO}" <<'GOCODE'
 package main
 
@@ -92,7 +113,6 @@ func main() {
 GOCODE
 
 go run "${TMP_GO}" -addr "${layerstore_ip}:50051" -image "${IMAGE}" -tag "${TAG}" >/dev/null
-rm -f "${TMP_GO}"
 
 printf 'scenario,phase,iteration,elapsed_ms\n' > "${RAW_CSV}"
 
