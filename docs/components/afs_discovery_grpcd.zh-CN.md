@@ -9,6 +9,9 @@
 - gRPC 服务：`discovery.v1.ServiceDiscovery`
   - `Heartbeat`
   - `FindImage`
+  - `ResolveImage`
+  - `FindProvider`
+  - `FindImageProvider`
 
 ## 从哪里接收数据
 
@@ -16,8 +19,8 @@
 
 ## 给谁使用
 
-- `afs_mount`：查找可用镜像 provider。
-- `afs_proxy`：聚合 layerstore 集群状态。
+- `afs_mount`：做 image 解析与 provider 发现（`ResolveImage`、`FindImageProvider`、`FindProvider`）。
+- `afs_proxy`：做副本协调与 layerstore 状态聚合。
 
 ## 关键状态字段
 

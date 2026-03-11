@@ -294,7 +294,7 @@ func findLayerServices(discoveryAddr, digest string, timeout time.Duration, inse
 	client := discoverypb.NewServiceDiscoveryClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{LayerDigest: digest})
+	resp, err := client.FindProvider(ctx, &discoverypb.FindProviderRequest{LayerDigest: digest})
 	if err != nil {
 		return nil, err
 	}

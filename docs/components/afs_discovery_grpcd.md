@@ -9,6 +9,9 @@ Maintains a live in-memory view of available layerstore nodes and their cache st
 - gRPC service: `discovery.v1.ServiceDiscovery`
   - `Heartbeat`
   - `FindImage`
+  - `ResolveImage`
+  - `FindProvider`
+  - `FindImageProvider`
 
 ## Receives From
 
@@ -16,8 +19,8 @@ Maintains a live in-memory view of available layerstore nodes and their cache st
 
 ## Served To
 
-- `afs_mount` for provider discovery (`FindImage`).
-- `afs_proxy` status aggregation for layerstore inventory.
+- `afs_mount` for image resolution and provider discovery (`ResolveImage`, `FindImageProvider`, `FindProvider`).
+- `afs_proxy` for replica coordination and status aggregation.
 
 ## Key Data Tracked
 

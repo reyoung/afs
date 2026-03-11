@@ -6,12 +6,21 @@ option go_package = "github.com/reyoung/afs/pkg/discoverypb;discoverypb";
 
 service ServiceDiscovery {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ResolveImage(ResolveImageRequest) returns (ResolveImageResponse);
+  rpc FindProvider(FindProviderRequest) returns (FindProviderResponse);
+  rpc FindImageProvider(FindImageProviderRequest) returns (FindImageProviderResponse);
   rpc FindImage(FindImageRequest) returns (FindImageResponse);
 }
 
 message LayerStat {
   string digest = 1;
   int64 afs_size = 2;
+}
+
+message ImageLayer {
+  string digest = 1;
+  string media_type = 2;
+  int64 compressed_size = 3;
 }
 
 message ServiceInstance {
@@ -35,6 +44,44 @@ message HeartbeatRequest {
 
 message HeartbeatResponse {
   int64 expires_in_seconds = 1;
+}
+
+message ResolveImageRequest {
+  string image = 1;
+  string tag = 2;
+  string platform_os = 3;
+  string platform_arch = 4;
+  string platform_variant = 5;
+  bool force_refresh = 6;
+}
+
+message ResolveImageResponse {
+  string image_key = 1;
+  string resolved_registry = 2;
+  string resolved_repository = 3;
+  string resolved_reference = 4;
+  repeated ImageLayer layers = 5;
+}
+
+message FindProviderRequest {
+  // Optional layer digest filter, e.g. sha256:...
+  // If empty, service returns all active services.
+  string layer_digest = 1;
+}
+
+message FindProviderResponse {
+  string layer_digest = 1;
+  repeated ServiceInstance services = 2;
+}
+
+message FindImageProviderRequest {
+  // image_key format: image|tag|platform_os|platform_arch|platform_variant.
+  string image_key = 1;
+}
+
+message FindImageProviderResponse {
+  string image_key = 1;
+  repeated ServiceInstance services = 2;
 }
 
 message FindImageRequest {

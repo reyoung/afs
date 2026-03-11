@@ -1,18 +1,53 @@
+x-afs-runtime: &afs-runtime
+  image: afs-local:compose
+  pull_policy: never
+
 services:
   discovery:
-    image: ubuntu:24.04
+    <<: *afs-runtime
     container_name: afs-discovery
     restart: unless-stopped
-    volumes:
-      - ./dist/linux_amd64:/usr/local/bin:ro
-    command: ["/usr/local/bin/afs_discovery_grpcd", "-listen=:60051"]
+    env_file:
+      - .env.layerstore
+    environment:
+      - LAYERSTORE_AUTH_BASIC_1=${LAYERSTORE_AUTH_BASIC_1:-}
+      - LAYERSTORE_AUTH_BASIC_2=${LAYERSTORE_AUTH_BASIC_2:-}
+      - LAYERSTORE_AUTH_BASIC_3=${LAYERSTORE_AUTH_BASIC_3:-}
+    # Optional: mount custom root CAs when using private/self-signed registry certs.
+    # volumes:
+    #   - ./certs:/usr/local/share/ca-certificates/custom:ro
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        update-ca-certificates >/dev/null 2>&1 || true
+        AUTH_ARGS=()
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_1:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_1}=$${LAYERSTORE_AUTH_TOKEN_1}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_2:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_2:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_2}=$${LAYERSTORE_AUTH_TOKEN_2}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_3:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_3:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_3}=$${LAYERSTORE_AUTH_TOKEN_3}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_1}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_2:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_2}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_3:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_3}")
+        fi
+        exec /usr/local/bin/afs_discovery_grpcd -listen=:60051 "$${AUTH_ARGS[@]}"
     ports:
       - "60051:60051"
     networks:
       - afsnet
 
   layerstore:
-    image: ubuntu:24.04
+    <<: *afs-runtime
     container_name: afs-layerstore
     restart: unless-stopped
     depends_on:
@@ -20,7 +55,6 @@ services:
     env_file:
       - .env.layerstore
     volumes:
-      - ./dist/linux_amd64:/usr/local/bin:ro
       - layerstore_cache:/var/lib/afs/cache
       # Optional: mount custom root CAs when using private/self-signed registry certs.
       # - ./certs:/usr/local/share/ca-certificates/custom:ro
@@ -28,10 +62,7 @@ services:
     command:
       - |
         set -euo pipefail
-        apt-get update
-        apt-get install -y --no-install-recommends ca-certificates
-        update-ca-certificates
-        rm -rf /var/lib/apt/lists/*
+        update-ca-certificates >/dev/null 2>&1 || true
         IP="$(hostname -i | awk '{print $1}')"
         echo "layerstore listen ip=$$IP"
         AUTH_ARGS=()
@@ -54,7 +85,7 @@ services:
       - afsnet
 
   afslet:
-    image: ubuntu:24.04
+    <<: *afs-runtime
     container_name: afs-afslet
     restart: unless-stopped
     cgroup: host
@@ -69,7 +100,6 @@ services:
     devices:
       - /dev/fuse:/dev/fuse
     volumes:
-      - ./dist/linux_amd64:/usr/local/bin:ro
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
       - afslet_spillcache:/var/lib/afslet/spillcache
@@ -83,9 +113,6 @@ services:
     command:
       - |
         set -euo pipefail
-        apt-get update
-        apt-get install -y --no-install-recommends runc fuse3 fuse-overlayfs ca-certificates
-        rm -rf /var/lib/apt/lists/*
         exec /usr/local/bin/afslet \
           -listen=:61051 \
           -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
@@ -105,12 +132,10 @@ services:
       - afsnet
 
   afs_proxy:
-    image: ubuntu:24.04
+    <<: *afs-runtime
     restart: unless-stopped
     depends_on:
       - afslet
-    volumes:
-      - ./dist/linux_amd64:/usr/local/bin:ro
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |

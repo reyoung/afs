@@ -33,6 +33,7 @@ import (
 )
 
 const (
+	DefaultGRPCTimeout          = 30 * time.Second
 	maxCachedGRPCConns          = 128
 	imageResolveCacheTTL        = 45 * time.Second
 	imageResolveCacheMaxEntries = 256
@@ -300,7 +301,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		allServices := imageProviders
 		if len(allServices) == 0 {
 			findAllServicesStarted := time.Now()
-			allServices, err = findImageServices(ctx, discoveryClient, "", cfg.grpcTimeout)
+			allServices, err = listDiscoveryProviders(ctx, discoveryClient, cfg.grpcTimeout)
 			if err != nil {
 				logTiming("discovery_find_all_services", findAllServicesStarted, "providers=0", "ok=false")
 				return err
@@ -726,7 +727,25 @@ func discoverImageProviders(services []serviceInfo, chosen serviceInfo, cfg conf
 func findImageServices(parentCtx context.Context, client discoverypb.ServiceDiscoveryClient, imageKey string, timeout time.Duration) ([]serviceInfo, error) {
 	ctx, cancel := withTimeoutFromParent(parentCtx, timeout)
 	defer cancel()
-	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{ImageKey: imageKey})
+	resp, err := client.FindImageProvider(ctx, &discoverypb.FindImageProviderRequest{ImageKey: imageKey})
+	if err != nil {
+		return nil, err
+	}
+	services := make([]serviceInfo, 0, len(resp.GetServices()))
+	for _, s := range resp.GetServices() {
+		endpoint := strings.TrimSpace(s.GetEndpoint())
+		if endpoint == "" {
+			continue
+		}
+		services = append(services, serviceInfo{nodeID: s.GetNodeId(), endpoint: endpoint})
+	}
+	return services, nil
+}
+
+func listDiscoveryProviders(parentCtx context.Context, client discoverypb.ServiceDiscoveryClient, timeout time.Duration) ([]serviceInfo, error) {
+	ctx, cancel := withTimeoutFromParent(parentCtx, timeout)
+	defer cancel()
+	resp, err := client.FindProvider(ctx, &discoverypb.FindProviderRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -759,7 +778,7 @@ func findLayerServicesCached(parentCtx context.Context, discoveryAddr, digest st
 	ctx, cancel := withTimeoutFromParent(parentCtx, timeout)
 	defer cancel()
 	findLayerSvcStarted := time.Now()
-	resp, err := client.FindImage(ctx, &discoverypb.FindImageRequest{LayerDigest: digest})
+	resp, err := client.FindProvider(ctx, &discoverypb.FindProviderRequest{LayerDigest: digest})
 	if err != nil {
 		logTiming("discovery_find_layer_services", findLayerSvcStarted, "digest="+digest, "services=0", "ok=false")
 		return nil, err

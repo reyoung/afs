@@ -380,12 +380,12 @@ func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.Rec
 		req.GetPlatformVariant(),
 	)
 
-	services, err := s.fetchDiscoveryServices(ctx, imageKey)
+	services, err := s.fetchDiscoveryImageProviders(ctx, imageKey)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "query discovery: %v", err)
 	}
 
-	currentReplica := countImageReplica(services, imageKey)
+	currentReplica := countImageReplica(services)
 	requestedReplica := req.GetReplica()
 	if int32(currentReplica) >= requestedReplica {
 		return &afsproxypb.ReconcileImageReplicaResponse{
@@ -396,12 +396,12 @@ func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.Rec
 		}, nil
 	}
 
-	allServices, err := s.fetchDiscoveryServices(ctx, "")
+	allServices, err := s.fetchDiscoveryProviders(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "query discovery candidates: %v", err)
 	}
 
-	already := endpointsWithImage(services, imageKey)
+	already := endpointsWithImage(services)
 	candidates := make([]string, 0, len(allServices))
 	for _, svc := range allServices {
 		if svc == nil {
@@ -627,7 +627,7 @@ func (s *Service) fetchRuntimeStatus(ctx context.Context, addr string) (*afsletp
 }
 
 func (s *Service) fetchLayerstoreServices(ctx context.Context) ([]*afsproxypb.LayerstoreInstance, error) {
-	services, err := s.fetchDiscoveryServices(ctx, "")
+	services, err := s.fetchDiscoveryProviders(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -658,7 +658,7 @@ func (s *Service) fetchLayerstoreServices(ctx context.Context) ([]*afsproxypb.La
 	return out, nil
 }
 
-func (s *Service) fetchDiscoveryServices(ctx context.Context, imageKey string) ([]*discoverypb.ServiceInstance, error) {
+func (s *Service) resolveImage(ctx context.Context, req *afsproxypb.ReconcileImageReplicaRequest) (*discoverypb.ResolveImageResponse, error) {
 	if strings.TrimSpace(s.discoveryTarget) == "" {
 		return nil, fmt.Errorf("discovery target is empty")
 	}
@@ -677,7 +677,84 @@ func (s *Service) fetchDiscoveryServices(ctx context.Context, imageKey string) (
 		}
 		client := discoverypb.NewServiceDiscoveryClient(conn)
 		callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
-		resp, err := client.FindImage(callCtx, &discoverypb.FindImageRequest{
+		resp, err := client.ResolveImage(callCtx, &discoverypb.ResolveImageRequest{
+			Image:           req.GetImage(),
+			Tag:             req.GetTag(),
+			PlatformOs:      valueOrDefault(req.GetPlatformOs(), defaultPlatformOS),
+			PlatformArch:    valueOrDefault(req.GetPlatformArch(), defaultPlatformArch),
+			PlatformVariant: strings.TrimSpace(req.GetPlatformVariant()),
+		})
+		callCancel()
+		_ = conn.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return resp, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no discovery targets available")
+}
+
+func (s *Service) fetchDiscoveryProviders(ctx context.Context) ([]*discoverypb.ServiceInstance, error) {
+	if strings.TrimSpace(s.discoveryTarget) == "" {
+		return nil, fmt.Errorf("discovery target is empty")
+	}
+	targets, err := resolveHostPorts(ctx, s.discoveryTarget)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, target := range targets {
+		dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
+		conn, err := grpc.DialContext(dialCtx, target, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		client := discoverypb.NewServiceDiscoveryClient(conn)
+		callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
+		resp, err := client.FindProvider(callCtx, &discoverypb.FindProviderRequest{})
+		callCancel()
+		_ = conn.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return resp.GetServices(), nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no discovery targets available")
+}
+
+func (s *Service) fetchDiscoveryImageProviders(ctx context.Context, imageKey string) ([]*discoverypb.ServiceInstance, error) {
+	if strings.TrimSpace(imageKey) == "" {
+		return nil, fmt.Errorf("image key is empty")
+	}
+	if strings.TrimSpace(s.discoveryTarget) == "" {
+		return nil, fmt.Errorf("discovery target is empty")
+	}
+	targets, err := resolveHostPorts(ctx, s.discoveryTarget)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, target := range targets {
+		dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
+		conn, err := grpc.DialContext(dialCtx, target, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		client := discoverypb.NewServiceDiscoveryClient(conn)
+		callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
+		resp, err := client.FindImageProvider(callCtx, &discoverypb.FindImageProviderRequest{
 			ImageKey: strings.TrimSpace(imageKey),
 		})
 		callCancel()
@@ -694,18 +771,11 @@ func (s *Service) fetchDiscoveryServices(ctx context.Context, imageKey string) (
 	return nil, fmt.Errorf("no discovery targets available")
 }
 
-func countImageReplica(services []*discoverypb.ServiceInstance, imageKey string) int {
-	imageKey = strings.TrimSpace(imageKey)
-	if imageKey == "" {
-		return 0
-	}
+func countImageReplica(services []*discoverypb.ServiceInstance) int {
 	seen := make(map[string]struct{}, len(services))
 	count := 0
 	for _, svc := range services {
 		if svc == nil {
-			continue
-		}
-		if !containsImageKey(svc.GetCachedImages(), imageKey) {
 			continue
 		}
 		endpoint := strings.TrimSpace(svc.GetEndpoint())
@@ -721,17 +791,10 @@ func countImageReplica(services []*discoverypb.ServiceInstance, imageKey string)
 	return count
 }
 
-func endpointsWithImage(services []*discoverypb.ServiceInstance, imageKey string) map[string]struct{} {
-	imageKey = strings.TrimSpace(imageKey)
+func endpointsWithImage(services []*discoverypb.ServiceInstance) map[string]struct{} {
 	out := make(map[string]struct{}, len(services))
-	if imageKey == "" {
-		return out
-	}
 	for _, svc := range services {
 		if svc == nil {
-			continue
-		}
-		if !containsImageKey(svc.GetCachedImages(), imageKey) {
 			continue
 		}
 		ep := strings.TrimSpace(svc.GetEndpoint())
@@ -741,15 +804,6 @@ func endpointsWithImage(services []*discoverypb.ServiceInstance, imageKey string
 		out[ep] = struct{}{}
 	}
 	return out
-}
-
-func containsImageKey(keys []string, imageKey string) bool {
-	for _, k := range keys {
-		if strings.TrimSpace(k) == imageKey {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) pullImageOnLayerstore(ctx context.Context, endpoint string, req *afsproxypb.ReconcileImageReplicaRequest) error {
@@ -783,9 +837,9 @@ func (s *Service) waitDiscoveryReplica(ctx context.Context, imageKey string, min
 
 	last := 0
 	for {
-		services, err := s.fetchDiscoveryServices(waitCtx, imageKey)
+		services, err := s.fetchDiscoveryImageProviders(waitCtx, imageKey)
 		if err == nil {
-			last = countImageReplica(services, imageKey)
+			last = countImageReplica(services)
 			if last >= minReplica {
 				return last, nil
 			}

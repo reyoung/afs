@@ -10,8 +10,8 @@ Builds a runnable rootfs mountpoint for an image by combining:
 
 ## Talks To
 
-- Discovery (`FindImage`) for provider selection.
-- Layerstore (`PullImage`, `ReadLayer`, etc.) for image metadata and layer bytes.
+- Discovery (`ResolveImage`, `FindImageProvider`, `FindProvider`) for image resolution and provider selection.
+- Layerstore (`EnsureLayers`, `ReadLayer`, etc.) for layer materialization and bytes.
 
 ## Local Mount Pipeline
 

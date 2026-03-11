@@ -47,8 +47,9 @@ Result snapshot (`ubuntu:latest`, workers=8, iterations=8):
 
 ### Update: Overhead Root Cause + Optimization
 - Discovery API now supports layer-targeted lookup:
-  - `FindImageRequest.layer_digest` added, and discovery service uses index-based selection (`byLayer`/`byImageKey`) to avoid full scans.
-  - Mount reader now queries discovery with `LayerDigest` directly.
+  - `FindProvider.layer_digest` is used for layer-targeted lookup, while `FindImageProvider.image_key` is used for complete-image provider lookup.
+  - Discovery uses index-based selection (`byLayer`) plus image-layer intersection to avoid full scans.
+  - Mount reader now queries discovery with `LayerDigest` directly via `FindProvider`.
 - Added detailed `ReadAt` timing/counter instrumentation in integration perf test to identify overhead location.
 - Confirmed bottleneck is remote `ReadAt` call granularity (many tiny reads), not `CopyFile` itself.
 

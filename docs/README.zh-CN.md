@@ -8,6 +8,10 @@
   - Kubernetes 快速开始（`helm/start.sh` 与 `helm/stop.sh`）。
 - `docs/getting_started.zh-CN.md`
   - Kubernetes 快速开始（中文）。
+- `docs/e2e.md`
+  - 端到端 smoke 测试入口（裸进程 / compose / helm）。
+- `docs/e2e.zh-CN.md`
+  - 端到端 smoke 测试入口（中文）。
 - `docs/architecture.md`
   - 端到端运行链路与组件交互。
 - `docs/architecture.zh-CN.md`

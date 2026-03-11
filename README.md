@@ -45,8 +45,9 @@ This means:
     - If over limit, evicts old layers (LRU by access time) and triggers heartbeat
 
 - `afs_mount`
-  - Connects only to discovery
-  - Finds nodes that contain the image, then mounts
+  - Uses discovery as control plane (`ResolveImage`, `FindImageProvider`, `FindProvider`)
+  - Uses selected layerstores as data plane (`EnsureLayers`, `ReadLayer`)
+  - Resolves image, finds complete providers or ensures missing layers, then mounts
   - Automatically retries by switching providers on read failures
   - Re-resolves layer providers from discovery during reads, so topology updates can take effect quickly
 
