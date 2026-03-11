@@ -18,6 +18,10 @@ class AfsProxyBase(abc.ABC):
     async def Status(self, stream: 'grpclib.server.Stream[afsproxy_pb2.StatusRequest, afsproxy_pb2.StatusResponse]') -> None:
         pass
 
+    @abc.abstractmethod
+    async def ReconcileImageReplica(self, stream: 'grpclib.server.Stream[afsproxy_pb2.ReconcileImageReplicaRequest, afsproxy_pb2.ReconcileImageReplicaResponse]') -> None:
+        pass
+
     def __mapping__(self) -> typing.Dict[str, grpclib.const.Handler]:
         return {
             '/afsproxy.v1.AfsProxy/Status': grpclib.const.Handler(
@@ -25,6 +29,12 @@ class AfsProxyBase(abc.ABC):
                 grpclib.const.Cardinality.UNARY_STREAM,
                 afsproxy_pb2.StatusRequest,
                 afsproxy_pb2.StatusResponse,
+            ),
+            '/afsproxy.v1.AfsProxy/ReconcileImageReplica': grpclib.const.Handler(
+                self.ReconcileImageReplica,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                afsproxy_pb2.ReconcileImageReplicaRequest,
+                afsproxy_pb2.ReconcileImageReplicaResponse,
             ),
         }
 
@@ -37,4 +47,10 @@ class AfsProxyStub:
             '/afsproxy.v1.AfsProxy/Status',
             afsproxy_pb2.StatusRequest,
             afsproxy_pb2.StatusResponse,
+        )
+        self.ReconcileImageReplica = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/afsproxy.v1.AfsProxy/ReconcileImageReplica',
+            afsproxy_pb2.ReconcileImageReplicaRequest,
+            afsproxy_pb2.ReconcileImageReplicaResponse,
         )
