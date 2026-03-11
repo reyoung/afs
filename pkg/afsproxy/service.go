@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -360,6 +361,37 @@ func (s *Service) Status(req *afsproxypb.StatusRequest, stream afsproxypb.AfsPro
 	})
 }
 
+// availableCacheBytes returns the available cache bytes for a node.
+// available = cache_max_bytes − Σ layer_stats[i].afs_size
+func availableCacheBytes(svc *discoverypb.ServiceInstance) int64 {
+	if svc == nil {
+		return 0
+	}
+	max := svc.GetCacheMaxBytes()
+	if max <= 0 {
+		return 0
+	}
+	var used int64
+	for _, ls := range svc.GetLayerStats() {
+		used += ls.GetAfsSize()
+	}
+	avail := max - used
+	if avail < 0 {
+		return 0
+	}
+	return avail
+}
+
+// sortCandidatesByAvailableCache sorts candidates in descending order of available cache bytes.
+// svcByEndpoint maps endpoint → ServiceInstance for lookup.
+func sortCandidatesByAvailableCache(candidates []string, svcByEndpoint map[string]*discoverypb.ServiceInstance) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ai := availableCacheBytes(svcByEndpoint[candidates[i]])
+		aj := availableCacheBytes(svcByEndpoint[candidates[j]])
+		return ai > aj
+	})
+}
+
 func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.ReconcileImageReplicaRequest) (*afsproxypb.ReconcileImageReplicaResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
@@ -418,15 +450,69 @@ func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.Rec
 		candidates = append(candidates, ep)
 	}
 
-	for _, ep := range candidates {
+	// Build endpoint → ServiceInstance map and sort candidates by available cache (descending).
+	svcByEndpoint := make(map[string]*discoverypb.ServiceInstance, len(allServices))
+	for _, svc := range allServices {
+		if svc == nil {
+			continue
+		}
+		ep := strings.TrimSpace(svc.GetEndpoint())
+		if ep != "" {
+			svcByEndpoint[ep] = svc
+		}
+	}
+	sortCandidatesByAvailableCache(candidates, svcByEndpoint)
+
+	// Phase 1: serially try candidates (largest available cache first) until the first
+	// successful pull. This node fetches from the registry.
+	firstSuccessPos := -1
+	for i, ep := range candidates {
 		if int32(currentReplica) >= requestedReplica {
 			break
 		}
 		if err := s.pullImageOnLayerstore(ctx, ep, req); err != nil {
-			log.Printf("[reconcile-image] pull failed endpoint=%s image=%s tag=%s err=%v", ep, req.GetImage(), req.GetTag(), err)
+			log.Printf("[reconcile-image] pull failed endpoint=%s image=%s tag=%s err=%v",
+				ep, req.GetImage(), req.GetTag(), err)
 			continue
 		}
 		currentReplica++
+		firstSuccessPos = i
+		break
+	}
+
+	// Phase 2: after the first node heartbeats to Discovery (peerHasImage=true),
+	// concurrently P2P-diffuse the image to remaining candidate nodes.
+	if firstSuccessPos >= 0 && int32(currentReplica) < requestedReplica {
+		if _, err := s.waitDiscoveryReplica(ctx, imageKey, currentReplica); err != nil {
+			log.Printf("[reconcile-image] warn: first-node heartbeat wait timed out image=%s: %v",
+				imageKey, err)
+			// Timeout does not abort; worst case equals original serial logic.
+		}
+
+		remaining := candidates[firstSuccessPos+1:]
+		need := int(requestedReplica) - currentReplica
+		if need > len(remaining) {
+			need = len(remaining)
+		}
+		remaining = remaining[:need]
+
+		type pullResult struct{ err error }
+		ch := make(chan pullResult, len(remaining))
+		for _, ep := range remaining {
+			ep := ep
+			go func() {
+				ch <- pullResult{err: s.pullImageOnLayerstore(ctx, ep, req)}
+			}()
+		}
+		for range remaining {
+			r := <-ch
+			if r.err == nil {
+				currentReplica++
+			} else {
+				log.Printf("[reconcile-image] p2p pull failed image=%s tag=%s err=%v",
+					req.GetImage(), req.GetTag(), r.err)
+			}
+		}
 	}
 
 	confirmedReplica, err := s.waitDiscoveryReplica(ctx, imageKey, currentReplica)

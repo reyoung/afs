@@ -131,7 +131,7 @@ func TestScanCachedLayerStats(t *testing.T) {
 	}
 }
 
-func TestScanCachedImageKeys(t *testing.T) {
+func TestScanCachedImageKeys_NoLayersField(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -139,6 +139,7 @@ func TestScanCachedImageKeys(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
+	// Old format without layers field — should not be reported (layers empty → skip)
 	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":""}`
 	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -148,7 +149,62 @@ func TestScanCachedImageKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scanCachedImageKeys: %v", err)
 	}
+	if len(got) != 0 {
+		t.Fatalf("got=%v, want [] (no layers field should not be reported)", got)
+	}
+}
+
+func TestScanCachedImageKeys_LayersComplete(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	// Create metadata
+	metaPath := filepath.Join(tmp, "metadata", "b.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll metadata: %v", err)
+	}
+	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":"","layers":[{"Digest":"sha256:abc123"}]}`
+	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile metadata: %v", err)
+	}
+
+	// Create the corresponding .afslyr file
+	layerPath := filepath.Join(tmp, "layers", "sha256", "abc123.afslyr")
+	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll layers: %v", err)
+	}
+	if err := os.WriteFile(layerPath, []byte("fake-layer-data"), 0o644); err != nil {
+		t.Fatalf("WriteFile layer: %v", err)
+	}
+
+	got, err := scanCachedImageKeys(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedImageKeys: %v", err)
+	}
 	if len(got) != 1 || got[0] != "nginx|latest|linux|amd64|" {
 		t.Fatalf("got=%v, want [nginx|latest|linux|amd64|]", got)
+	}
+}
+
+func TestScanCachedImageKeys_LayersMissing(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	// Create metadata with layers but do NOT create the .afslyr file
+	metaPath := filepath.Join(tmp, "metadata", "c.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll metadata: %v", err)
+	}
+	content := `{"image":"alpine","tag":"3.18","platform_os":"linux","platform_arch":"amd64","platform_variant":"","layers":[{"Digest":"sha256:deadbeef"}]}`
+	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile metadata: %v", err)
+	}
+
+	got, err := scanCachedImageKeys(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedImageKeys: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got=%v, want [] (missing layer file should not be reported)", got)
 	}
 }
