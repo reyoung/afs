@@ -1,4 +1,4 @@
-FROM ubuntu:latest AS builder
+FROM ubuntu:24.04 AS builder
 
 ARG GO_VERSION=1.25.3
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,6 +30,8 @@ RUN mkdir -p /out && \
     go build -trimpath -o /out/afs_discovery_grpcd ./cmd/afs_discovery_grpcd && \
     echo "==> building afs_layerstore_grpcd (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afs_layerstore_grpcd ./cmd/afs_layerstore_grpcd && \
+    echo "==> building afs_cli (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
+    go build -trimpath -o /out/afs_cli ./cmd/afs_cli && \
     echo "==> building afslet (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afslet ./cmd/afslet && \
     echo "==> building afs_proxy (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
@@ -41,7 +43,7 @@ RUN mkdir -p /out && \
     echo "==> building afs_mount_cached (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afs_mount_cached ./cmd/afs_mount_cached
 
-FROM ubuntu:latest
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
