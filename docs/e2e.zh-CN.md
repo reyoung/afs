@@ -11,6 +11,20 @@
 - `afs_cli -proxy-status`
 - `afs_cli reconcile-image-replica`
 
+如果你要做一个端到端的耗时对比，直接比较 `reconcile-image-replica` 和本地 `docker pull`，使用：
+
+```bash
+./scripts/e2e/reconcile_pull_benchmark.sh --mode raw
+./scripts/e2e/reconcile_pull_benchmark.sh --mode compose
+```
+
+这个基准脚本会：
+
+- 统计一次冷态的本地 `docker pull`
+- 统计一次冷态的 `afs_cli reconcile-image-replica`
+- 同时支持 `raw`（即现有的 `bare`）和 `compose` 两种运行形态
+- 把原始样本、汇总结果和对比结果写到 `.tmp/e2e/reconcile-pull-benchmark/<timestamp>/`
+
 如果你要专门回归 `reconcile-image-replica` 的稳定性、分布结果和重复执行行为，使用：
 
 ```bash
@@ -44,7 +58,7 @@
 
 ```bash
 make build-local
-./scripts/e2e/smoke.sh --mode bare
+./scripts/e2e/smoke.sh --mode raw
 ```
 
 脚本会在本机启动：
@@ -109,7 +123,7 @@ make build-local
 - `HTTPS_PROXY`
 - `ALL_PROXY`
 
-另外，`scripts/e2e/smoke.sh` 在 `bare` 模式下启动的本地组件，以及 `helm` 模式里的 `kubectl` 调用，也会使用同样的无代理方式执行。这样可以避免 discovery / layerstore 走宿主机 `HTTP_PROXY` 后拿到错误的 registry 响应。
+另外，`scripts/e2e/smoke.sh` 在 `raw` 模式下启动的本地组件、`scripts/e2e/reconcile_pull_benchmark.sh` 里的 `docker` / `docker compose` 调用，以及 `helm` 模式里的 `kubectl` 调用，也会使用同样的无代理方式执行。这样可以避免 discovery / layerstore 走宿主机 `HTTP_PROXY` 后拿到错误的 registry 响应。
 
 ## 常用参数
 
@@ -124,6 +138,20 @@ make build-local
 - `--image <name> --tag <tag>`：覆盖测试镜像
 - `--replica <n>`：指定 `reconcile-image-replica` 目标副本数
 - `--skip-reconcile`：只做 `proxy-status` 校验
+
+对比基准脚本的帮助：
+
+```bash
+./scripts/e2e/reconcile_pull_benchmark.sh --help
+```
+
+常见覆盖项：
+
+- `--mode <raw|bare|compose>`：选择基准测试运行形态
+- `--image <name> --tag <tag>`：同时覆盖 `docker pull` 和 `reconcile-image-replica` 使用的镜像
+- `--iterations <n>`：重复做多轮冷态对比
+- `--grpc-timeout <dur>`：覆盖 reconcile RPC 超时
+- `compose` 模式每轮开始前都会执行一次 `docker compose down -v`，确保 AFS cache 保持冷态
 
 ## 输出
 

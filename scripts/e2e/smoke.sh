@@ -33,12 +33,12 @@ COMPOSE_STARTED=0
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/e2e/smoke.sh --mode bare
+  ./scripts/e2e/smoke.sh --mode raw
   ./scripts/e2e/smoke.sh --mode compose
   ./scripts/e2e/smoke.sh --mode helm --namespace afs
 
 Modes:
-  bare      Start discovery/layerstore/afslet/afs_proxy as local processes.
+  raw|bare  Start discovery/layerstore/afslet/afs_proxy as local processes.
   compose   Start or reuse docker compose stack, then run smoke checks.
   helm      Validate an existing Kubernetes deployment through kubectl port-forward.
 
@@ -47,7 +47,7 @@ Checks:
   2. afs_cli reconcile-image-replica
 
 Options:
-  --mode <bare|compose|helm>
+  --mode <raw|bare|compose|helm>
   --addr <host:port>        Override proxy gRPC address. For helm, skips port-forward.
   --namespace <name>        Kubernetes namespace for helm mode. Default: afs
   --image <name>            Default: registry.k8s.io/pause
@@ -115,7 +115,7 @@ cleanup() {
   if [[ "${COMPOSE_STARTED}" -eq 1 ]]; then
     (
       cd "${ROOT_DIR}"
-      docker compose down >/dev/null 2>&1 || true
+      run_without_proxy docker compose down >/dev/null 2>&1 || true
     )
   fi
 }
@@ -177,7 +177,7 @@ done
 
 [[ -n "${MODE}" ]] || die "--mode is required"
 case "${MODE}" in
-  bare|compose|helm) ;;
+  raw|bare|compose|helm) ;;
   *) die "unsupported mode: ${MODE}" ;;
 esac
 
@@ -294,7 +294,7 @@ start_bare_mode() {
 
 start_compose_mode() {
   require_cmd docker
-  if ! docker compose version >/dev/null 2>&1; then
+  if ! run_without_proxy docker compose version >/dev/null 2>&1; then
     die "docker compose is required"
   fi
 
@@ -304,7 +304,7 @@ start_compose_mode() {
 
   if (
     cd "${ROOT_DIR}" &&
-    docker compose ps --status running -q afs_proxy 2>/dev/null | grep -q .
+    run_without_proxy docker compose ps --status running -q afs_proxy 2>/dev/null | grep -q .
   ); then
     COMPOSE_STARTED=0
   else
@@ -313,7 +313,7 @@ start_compose_mode() {
 
   (
     cd "${ROOT_DIR}" &&
-    docker compose up -d >/dev/null
+    run_without_proxy docker compose up -d >/dev/null
   )
 
   wait_for_tcp 127.0.0.1 62051 afs_proxy 240
@@ -362,7 +362,7 @@ start_helm_mode() {
 printf '[e2e] mode=%s image=%s:%s replica=%s log_dir=%s\n' "${MODE}" "${IMAGE}" "${TAG}" "${REPLICA}" "${LOG_DIR}"
 
 case "${MODE}" in
-  bare)
+  raw|bare)
     start_bare_mode
     ;;
   compose)

@@ -11,6 +11,20 @@ The unified entrypoint is `scripts/e2e/smoke.sh`. By default it validates:
 - `afs_cli -proxy-status`
 - `afs_cli reconcile-image-replica`
 
+For an end-to-end timing comparison between `reconcile-image-replica` and local `docker pull`, use:
+
+```bash
+./scripts/e2e/reconcile_pull_benchmark.sh --mode raw
+./scripts/e2e/reconcile_pull_benchmark.sh --mode compose
+```
+
+That benchmark:
+
+- measures a cold local `docker pull`
+- measures a cold `afs_cli reconcile-image-replica`
+- supports both `raw` (same as `bare`) and `compose` runtime shapes
+- writes raw samples plus summary/comparison CSV files under `.tmp/e2e/reconcile-pull-benchmark/<timestamp>/`
+
 For a dedicated `reconcile-image-replica` regression pass with higher repeat counts and placement checks, use:
 
 ```bash
@@ -44,7 +58,7 @@ The default test image is `registry.k8s.io/pause:3.9`. In this repository enviro
 
 ```bash
 make build-local
-./scripts/e2e/smoke.sh --mode bare
+./scripts/e2e/smoke.sh --mode raw
 ```
 
 The script starts these binaries locally:
@@ -109,7 +123,7 @@ Notes:
 - `HTTPS_PROXY`
 - `ALL_PROXY`
 
-The same no-proxy rule is also used for the local processes started by `scripts/e2e/smoke.sh --mode bare`, and for the `kubectl` calls in `helm` mode. That avoids bad registry responses caused by host-level `HTTP_PROXY` settings.
+The same no-proxy rule is also used for the local processes started by `scripts/e2e/smoke.sh --mode raw`, for the `docker` / `docker compose` calls in `scripts/e2e/reconcile_pull_benchmark.sh`, and for the `kubectl` calls in `helm` mode. That avoids bad registry responses caused by host-level `HTTP_PROXY` settings.
 
 ## Common Flags
 
@@ -124,6 +138,20 @@ Common overrides:
 - `--image <name> --tag <tag>`: override the test image
 - `--replica <n>`: requested replica count for `reconcile-image-replica`
 - `--skip-reconcile`: run `proxy-status` only
+
+For the benchmark script:
+
+```bash
+./scripts/e2e/reconcile_pull_benchmark.sh --help
+```
+
+Common overrides:
+
+- `--mode <raw|bare|compose>`: runtime shape for the benchmark
+- `--image <name> --tag <tag>`: override the image used by both `docker pull` and `reconcile-image-replica`
+- `--iterations <n>`: repeat the cold comparison multiple times
+- `--grpc-timeout <dur>`: timeout for the reconcile RPC
+- compose mode always runs `docker compose down -v` before each iteration so that the AFS cache stays cold
 
 ## Output
 
