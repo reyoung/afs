@@ -33,6 +33,7 @@ import (
 )
 
 const (
+	DefaultGRPCTimeout         = 30 * time.Second
 	maxCachedGRPCConns          = 128
 	imageResolveCacheTTL        = 45 * time.Second
 	imageResolveCacheMaxEntries = 256
@@ -108,10 +109,10 @@ type serviceInfo struct {
 }
 
 type imageResolveCacheEntry struct {
-	expireAt  time.Time
-	chosen    serviceInfo
-	pullResp  *layerstorepb.PullImageResponse
-	providers []serviceInfo
+	expireAt    time.Time
+	chosen      serviceInfo
+	resolveResp *discoverypb.ResolveImageResponse
+	providers   []serviceInfo
 }
 
 type imageResolveCache struct {
@@ -216,7 +217,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		cfg.discoveryAddr = "127.0.0.1:60051"
 	}
 	if cfg.grpcTimeout <= 0 {
-		cfg.grpcTimeout = 10 * time.Second
+		cfg.grpcTimeout = DefaultGRPCTimeout
 	}
 	if cfg.grpcMaxChunk <= 0 {
 		cfg.grpcMaxChunk = 4 << 20
@@ -271,25 +272,33 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	)
 
 	var (
-		chosen    serviceInfo
-		pullResp  *layerstorepb.PullImageResponse
-		providers []serviceInfo
-		err       error
+		chosen      serviceInfo
+		resolveResp *discoverypb.ResolveImageResponse
+		providers   []serviceInfo
+		err         error
 	)
 	imageKeyStr := imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant)
 	cacheKey := imageResolveCacheKey(cfg, imageKeyStr)
 	cacheLookupStarted := time.Now()
 	if cached, ok := sharedImageCache.get(cacheKey); ok {
 		chosen = cached.chosen
-		pullResp = cached.pullResp
+		resolveResp = cached.resolveResp
 		providers = append([]serviceInfo(nil), cached.providers...)
-		log.Printf("image resolve cache hit: image=%s tag=%s layers=%d provider=%s", cfg.image, cfg.tag, len(pullResp.GetLayers()), chosen.endpoint)
+		log.Printf("image resolve cache hit: image=%s tag=%s layers=%d provider=%s", cfg.image, cfg.tag, len(resolveResp.GetLayers()), chosen.endpoint)
 		logTiming("image_resolve_cache_lookup", cacheLookupStarted, "hit=true")
 	} else {
 		logTiming("image_resolve_cache_lookup", cacheLookupStarted, "hit=false")
 
+		resolveImageStarted := time.Now()
+		resolveResp, err = resolveImage(ctx, discoveryClient, cfg)
+		if err != nil {
+			logTiming("discovery_resolve_image", resolveImageStarted, "layers=0", "ok=false")
+			return err
+		}
+		logTiming("discovery_resolve_image", resolveImageStarted, "layers="+strconv.Itoa(len(resolveResp.GetLayers())), "ok=true")
+
 		findImageByKeyStarted := time.Now()
-		imageProviders, findErr := findImageServices(ctx, discoveryClient, imageKeyStr, cfg.grpcTimeout)
+		imageProviders, findErr := findImageServices(ctx, discoveryClient, resolveResp.GetImageKey(), cfg.grpcTimeout)
 		if findErr != nil {
 			logTiming("discovery_find_image_by_key", findImageByKeyStarted, "providers=0", "ok=false")
 			return findErr
@@ -298,7 +307,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		log.Printf("discovery returned %d providers with image", len(imageProviders))
 
 		allServices := imageProviders
-		if len(allServices) == 0 {
+		if len(allServices) == 0 || cfg.forceLocalFetch {
 			findAllServicesStarted := time.Now()
 			allServices, err = findImageServices(ctx, discoveryClient, "", cfg.grpcTimeout)
 			if err != nil {
@@ -309,29 +318,31 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			if len(allServices) == 0 {
 				return fmt.Errorf("no layerstore services registered in discovery")
 			}
-			log.Printf("no cached image providers found; fallback to %d total services", len(allServices))
+			if len(imageProviders) == 0 {
+				log.Printf("no cached image providers found; fallback to %d total services", len(allServices))
+			}
 		}
 
 		pullWithDiscoveryStarted := time.Now()
-		chosen, pullResp, err = pullImageWithDiscovery(ctx, imageProviders, allServices, cfg)
+		chosen, err = ensureImageWithDiscovery(ctx, resolveResp, imageProviders, allServices, cfg)
 		if err != nil {
 			logTiming("pull_image_with_discovery", pullWithDiscoveryStarted, "layers=0", "ok=false")
 			return err
 		}
-		logTiming("pull_image_with_discovery", pullWithDiscoveryStarted, "layers="+strconv.Itoa(len(pullResp.GetLayers())), "ok=true")
-		log.Printf("image resolved from endpoint=%s resolved=%s/%s:%s layers=%d", chosen.endpoint, pullResp.GetResolvedRegistry(), pullResp.GetResolvedRepository(), pullResp.GetResolvedReference(), len(pullResp.GetLayers()))
+		logTiming("pull_image_with_discovery", pullWithDiscoveryStarted, "layers="+strconv.Itoa(len(resolveResp.GetLayers())), "ok=true")
+		log.Printf("image resolved from endpoint=%s resolved=%s/%s:%s layers=%d", chosen.endpoint, resolveResp.GetResolvedRegistry(), resolveResp.GetResolvedRepository(), resolveResp.GetResolvedReference(), len(resolveResp.GetLayers()))
 
 		discoverProvidersStarted := time.Now()
-		providers, err = discoverImageProviders(allServices, chosen, cfg)
+		providers, err = discoverImageProviders(ctx, discoveryClient, resolveResp.GetImageKey(), allServices, chosen, cfg)
 		logTiming("discover_image_providers", discoverProvidersStarted, "providers="+strconv.Itoa(len(providers)))
 		if err != nil {
 			return err
 		}
 		sharedImageCache.put(cacheKey, imageResolveCacheEntry{
-			expireAt:  time.Now().Add(imageResolveCacheTTL),
-			chosen:    chosen,
-			pullResp:  pullResp,
-			providers: append([]serviceInfo(nil), providers...),
+			expireAt:    time.Now().Add(imageResolveCacheTTL),
+			chosen:      chosen,
+			resolveResp: resolveResp,
+			providers:   append([]serviceInfo(nil), providers...),
 		})
 	}
 	if len(providers) == 0 && chosen.endpoint != "" {
@@ -369,7 +380,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		server *fuse.Server
 		reader *layerreader.DiscoveryBackedReaderAt
 	}
-	mounted := make([]mountedLayer, 0, len(pullResp.GetLayers()))
+	mounted := make([]mountedLayer, 0, len(resolveResp.GetLayers()))
 	defer func() {
 		for i := len(mounted) - 1; i >= 0; i-- {
 			_ = mounted[i].server.Unmount()
@@ -380,8 +391,9 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		}
 	}()
 
-	layerDirs := make([]string, 0, len(pullResp.GetLayers()))
+	layerDirs := make([]string, 0, len(resolveResp.GetLayers()))
 	var sharedCacheClient *spillcache.Client
+	var sharedCache layerfuse.SharedSpillCache
 	if cfg.sharedSpillCacheEnabled {
 		sharedSpillCacheStarted := time.Now()
 		launcher, err := spillcache.NewLauncher(spillcache.LauncherConfig{
@@ -397,10 +409,11 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		if err != nil {
 			return fmt.Errorf("start shared spill cache daemon: %w", err)
 		}
+		sharedCache = sharedCacheClient
 		log.Printf("shared spill cache enabled: dir=%s sock=%s max-bytes=%d", cfg.sharedSpillCacheDir, cfg.sharedSpillCacheSock, cfg.sharedSpillCacheMaxBytes)
 		logTiming("shared_spill_cache_ensure_started", sharedSpillCacheStarted)
 	}
-	layers := pullResp.GetLayers()
+	layers := resolveResp.GetLayers()
 	results := make([]mountedLayer, len(layers))
 	type mountResult struct {
 		idx   int
@@ -448,7 +461,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 					GRPCMaxChunk:      cfg.grpcMaxChunk,
 					GRPCInsecure:      cfg.grpcInsecure,
 					NodeID:            cfg.nodeID,
-					KnownLayerAfsSize: layer.GetAfsSize(),
+					KnownLayerAfsSize: 0,
 					DialGRPCAcquire: func(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error) {
 						return sharedGRPCConnCache.Acquire(addr, timeout, insecureTransport)
 					},
@@ -484,7 +497,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
 
 			layerFuseMountStarted := time.Now()
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCache)
 			if err != nil {
 				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
@@ -655,56 +668,69 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	return nil
 }
 
-func pullImageWithDiscovery(ctx context.Context, imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, *layerstorepb.PullImageResponse, error) {
+func ensureImageWithDiscovery(ctx context.Context, resolveResp *discoverypb.ResolveImageResponse, imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, error) {
+	if resolveResp == nil {
+		return serviceInfo{}, fmt.Errorf("resolve image response is required")
+	}
 	if !cfg.forceLocalFetch && len(imageProviders) > 0 {
 		for _, s := range rankServicesForAffinity(imageProviders, cfg.nodeID) {
 			attemptStarted := time.Now()
-			resp, err := pullImageFromService(ctx, s.endpoint, cfg, false)
-			if err == nil {
-				logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=cached", "force_local_fetch=false", "ok=true")
-				log.Printf("using cached image provider endpoint=%s", s.endpoint)
-				return s, resp, nil
-			}
-			logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=cached", "force_local_fetch=false", "ok=false")
-			log.Printf("cached provider pull failed endpoint=%s: %v", s.endpoint, err)
+			logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=cached", "force_local_fetch=false", "ok=true")
+			log.Printf("using cached image provider endpoint=%s", s.endpoint)
+			return s, nil
 		}
 	}
 
 	for _, s := range rankServicesForAffinity(allServices, cfg.nodeID) {
 		attemptStarted := time.Now()
-		resp, pullErr := pullImageFromService(ctx, s.endpoint, cfg, cfg.forceLocalFetch)
-		if pullErr == nil {
+		ensureErr := ensureLayersOnService(ctx, s.endpoint, resolveResp, cfg)
+		if ensureErr == nil {
 			logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=all", "force_local_fetch="+strconv.FormatBool(cfg.forceLocalFetch), "ok=true")
-			log.Printf("pulled image on endpoint=%s force_local_fetch=%v", s.endpoint, cfg.forceLocalFetch)
-			return s, resp, nil
+			log.Printf("ensured image layers on endpoint=%s force_local_fetch=%v", s.endpoint, cfg.forceLocalFetch)
+			return s, nil
 		}
 		logTiming("pull_image_attempt", attemptStarted, "endpoint="+s.endpoint, "source=all", "force_local_fetch="+strconv.FormatBool(cfg.forceLocalFetch), "ok=false")
-		log.Printf("pull image failed on endpoint=%s: %v", s.endpoint, pullErr)
+		log.Printf("ensure image layers failed on endpoint=%s: %v", s.endpoint, ensureErr)
 	}
-	return serviceInfo{}, nil, fmt.Errorf("failed to pull image %s across all discovered services", cfg.image)
+	return serviceInfo{}, fmt.Errorf("failed to ensure image %s across all discovered services", cfg.image)
 }
 
-func pullImageFromService(parentCtx context.Context, endpoint string, cfg config, force bool) (*layerstorepb.PullImageResponse, error) {
+func ensureLayersOnService(parentCtx context.Context, endpoint string, resolveResp *discoverypb.ResolveImageResponse, cfg config) error {
 	conn, releaseConn, err := sharedGRPCConnCache.Acquire(endpoint, cfg.grpcTimeout, cfg.grpcInsecure)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer releaseConn()
 
 	client := layerstorepb.NewLayerStoreClient(conn)
 	ctx, cancel := withTimeoutFromParent(parentCtx, cfg.pullTimeout)
 	defer cancel()
-	return client.PullImage(ctx, &layerstorepb.PullImageRequest{
-		Image:           cfg.image,
-		Tag:             cfg.tag,
-		PlatformOs:      cfg.platformOS,
-		PlatformArch:    cfg.platformArch,
-		PlatformVariant: cfg.platformVariant,
-		ForceLocalFetch: force,
-	})
+	req := &layerstorepb.EnsureLayersRequest{
+		Source: &layerstorepb.LayerSource{
+			Registry:   resolveResp.GetResolvedRegistry(),
+			Repository: resolveResp.GetResolvedRepository(),
+		},
+		Layers: make([]*layerstorepb.LayerSpec, 0, len(resolveResp.GetLayers())),
+	}
+	for _, layer := range resolveResp.GetLayers() {
+		if layer == nil {
+			continue
+		}
+		req.Layers = append(req.Layers, &layerstorepb.LayerSpec{
+			Digest:         layer.GetDigest(),
+			MediaType:      layer.GetMediaType(),
+			CompressedSize: layer.GetCompressedSize(),
+		})
+	}
+	_, err = client.EnsureLayers(ctx, req)
+	return err
 }
 
-func discoverImageProviders(services []serviceInfo, chosen serviceInfo, cfg config) ([]serviceInfo, error) {
+func discoverImageProviders(parentCtx context.Context, client discoverypb.ServiceDiscoveryClient, imageKey string, services []serviceInfo, chosen serviceInfo, cfg config) ([]serviceInfo, error) {
+	fresh, err := findImageServices(parentCtx, client, imageKey, cfg.grpcTimeout)
+	if err == nil && len(fresh) > 0 {
+		services = fresh
+	}
 	out := make([]serviceInfo, 0, len(services))
 	seen := make(map[string]struct{}, len(services))
 	for _, s := range rankServicesForAffinity(services, cfg.nodeID) {
@@ -721,6 +747,18 @@ func discoverImageProviders(services []serviceInfo, chosen serviceInfo, cfg conf
 		return nil, fmt.Errorf("no providers with image available")
 	}
 	return out, nil
+}
+
+func resolveImage(parentCtx context.Context, client discoverypb.ServiceDiscoveryClient, cfg config) (*discoverypb.ResolveImageResponse, error) {
+	ctx, cancel := withTimeoutFromParent(parentCtx, cfg.grpcTimeout)
+	defer cancel()
+	return client.ResolveImage(ctx, &discoverypb.ResolveImageRequest{
+		Image:           cfg.image,
+		Tag:             cfg.tag,
+		PlatformOs:      cfg.platformOS,
+		PlatformArch:    cfg.platformArch,
+		PlatformVariant: cfg.platformVariant,
+	})
 }
 
 func findImageServices(parentCtx context.Context, client discoverypb.ServiceDiscoveryClient, imageKey string, timeout time.Duration) ([]serviceInfo, error) {

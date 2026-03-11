@@ -7,8 +7,7 @@
 ## 对外提供
 
 - gRPC 服务：`layerstore.v1.LayerStore`
-  - `PullImage`
-  - `HasImage`
+  - `EnsureLayers`
   - `HasLayer`
   - `StatLayer`
   - `ReadLayer`
@@ -16,13 +15,14 @@
 
 ## 交互对象
 
-- OCI registry：拉取 manifest 与 blob。
+- OCI registry：拉取 blob。
 - discovery：周期上报心跳。
 
 ## 核心职责
 
-- 拉取镜像并缓存为 `.afslyr`。
+- 在 discovery 完成 image 解析后，按需补齐 layer 并缓存为 `.afslyr`。
 - 支持 offset 读取，供挂载侧按需读 layer。
+- 只维护 layer 状态；image 元数据由 discovery 持有。
 - 执行缓存容量控制和 LRU 淘汰。
 - 拉取前做磁盘预算预留（并发安全）。
 
@@ -35,7 +35,6 @@
 ## 心跳上报内容
 
 - endpoint / node id
-- cached images
 - layer digests
 - `layer_stats(digest, afs_size)`
 - `cache_max_bytes`

@@ -29,9 +29,9 @@
 
 建议 proxy 直接实现 `layerstore.v1.LayerStore` 的子集：
 
-- 必须：`PullImage`、`StatLayer`、`ReadLayer`
-- 可选透传：`HasLayer`、`HasImage`
-- 不提供：`PruneCache`（或返回 `Unimplemented`）
+- 必须：`EnsureLayers`、`StatLayer`、`ReadLayer`
+- 可选透传：`HasLayer`
+- 不提供：`PruneCache`、image 级存在性接口（或返回 `Unimplemented`）
 
 这样 `afs_mount` 侧改动最小（仅 endpoint 指向 proxy）。
 
@@ -146,7 +146,7 @@
 
 ### Phase 1（最小可用）
 
-- 实现 proxy 的 `PullImage/StatLayer/ReadLayer`。
+- 实现 proxy 的 `EnsureLayers/StatLayer/ReadLayer`。
 - 实现请求级落盘缓存（`digest+offset+length`）+ LFU 淘汰 + inflight 保护。
 - `afs_mount` 增加 `-layerstore-proxy-addr`（可选），优先走 proxy。
 

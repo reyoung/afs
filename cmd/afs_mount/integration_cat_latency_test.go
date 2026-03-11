@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,14 +38,16 @@ func TestIntegrationMountCatFileLatency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
-	discAddr, stopDiscovery := startDiscoveryServer(t)
-	defer stopDiscovery()
-
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	lsAddr, stopLS := startLayerstoreServer(t, cacheDir, integrationAuthConfigsForImage(t, image))
+	authConfigs := integrationAuthConfigsForImage(t, image)
+	mirrors := integrationRegistryMirrorsForImage(t, image)
+	lsAddr, stopLS := startLayerstoreServer(t, cacheDir, authConfigs, mirrors)
 	defer stopLS()
 
-	pullResp := pullImage(t, ctx, lsAddr, image, tag)
+	discAddr, stopDiscovery := startDiscoveryServer(t, toDiscoveryAuthConfigs(authConfigs), mirrors)
+	defer stopDiscovery()
+
+	pullResp := pullImage(t, ctx, discAddr, lsAddr, image, tag)
 	if len(pullResp.GetLayers()) == 0 {
 		t.Fatalf("no layers pulled for image=%s tag=%s", image, tag)
 	}
@@ -52,8 +55,7 @@ func TestIntegrationMountCatFileLatency(t *testing.T) {
 	targetLayerPath := layerCachePath(cacheDir, target.GetDigest())
 	targetEntryPath, expected := pickReadableFileFromLayer(t, targetLayerPath)
 
-	imageKeyVal := imageKey(image, tag, "linux", "amd64", "")
-	heartbeat(t, ctx, discAddr, "node-1", lsAddr, imageKeyVal, digestsFromPull(pullResp))
+	heartbeat(t, ctx, discAddr, "node-1", lsAddr, digestsFromPull(pullResp))
 
 	mountpoint := filepath.Join(t.TempDir(), "mnt")
 	workDir := filepath.Join(t.TempDir(), "work")
@@ -160,20 +162,21 @@ func TestIntegrationMountCatFileLatencyPercentiles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
-	discAddr, stopDiscovery := startDiscoveryServer(t)
-	defer stopDiscovery()
-
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	lsAddr, stopLS := startLayerstoreServer(t, cacheDir, integrationAuthConfigsForImage(t, image))
+	authConfigs := integrationAuthConfigsForImage(t, image)
+	mirrors := integrationRegistryMirrorsForImage(t, image)
+	lsAddr, stopLS := startLayerstoreServer(t, cacheDir, authConfigs, mirrors)
 	defer stopLS()
 
-	pullResp := pullImage(t, ctx, lsAddr, image, tag)
+	discAddr, stopDiscovery := startDiscoveryServer(t, toDiscoveryAuthConfigs(authConfigs), mirrors)
+	defer stopDiscovery()
+
+	pullResp := pullImage(t, ctx, discAddr, lsAddr, image, tag)
 	if len(pullResp.GetLayers()) == 0 {
 		t.Fatalf("no layers pulled for image=%s tag=%s", image, tag)
 	}
 
-	imageKeyVal := imageKey(image, tag, "linux", "amd64", "")
-	heartbeat(t, ctx, discAddr, "node-1", lsAddr, imageKeyVal, digestsFromPull(pullResp))
+	heartbeat(t, ctx, discAddr, "node-1", lsAddr, digestsFromPull(pullResp))
 
 	mountpoint := filepath.Join(t.TempDir(), "mnt")
 	workDir := filepath.Join(t.TempDir(), "work")
@@ -303,11 +306,11 @@ func integrationAuthConfigsForImage(t *testing.T, image string) []layerstore.Reg
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return integrationAuthConfigs(t)
 	}
-	entry, ok := cfg.Auths[host]
-	if !ok || strings.TrimSpace(entry.Auth) == "" {
+	auth := dockerConfigAuthForRegistry(host, cfg.Auths)
+	if strings.TrimSpace(auth) == "" {
 		return integrationAuthConfigs(t)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(entry.Auth))
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(auth))
 	if err != nil {
 		return integrationAuthConfigs(t)
 	}
@@ -320,6 +323,63 @@ func integrationAuthConfigsForImage(t *testing.T, image string) []layerstore.Reg
 		Username:     userPass[0],
 		Password:     userPass[1],
 	}}
+}
+
+func dockerConfigAuthForRegistry(host string, auths map[string]struct {
+	Auth string `json:"auth"`
+}) string {
+	target := strings.TrimSpace(strings.ToLower(host))
+	bestScore := 0
+	bestAuth := ""
+	for key, entry := range auths {
+		auth := strings.TrimSpace(entry.Auth)
+		if auth == "" {
+			continue
+		}
+		score := dockerAuthMatchScore(key, target)
+		if score > bestScore {
+			bestScore = score
+			bestAuth = auth
+		}
+	}
+	return bestAuth
+}
+
+func dockerAuthKeyMatchesRegistry(key, registryHost string) bool {
+	key = strings.TrimSpace(strings.ToLower(key))
+	if key == "" || registryHost == "" {
+		return false
+	}
+	if strings.Contains(key, "://") {
+		if u, err := url.Parse(key); err == nil {
+			key = strings.ToLower(strings.TrimSpace(u.Host))
+		}
+	}
+	key = strings.TrimPrefix(key, "https://")
+	key = strings.TrimPrefix(key, "http://")
+	key = strings.TrimSuffix(key, "/")
+	switch key {
+	case "index.docker.io", "index.docker.io/v1", "index.docker.io/v1/access-token", "index.docker.io/v1/refresh-token":
+		key = "registry-1.docker.io"
+	}
+	return key == registryHost
+}
+
+func dockerAuthMatchScore(key, registryHost string) int {
+	if !dockerAuthKeyMatchesRegistry(key, registryHost) {
+		return 0
+	}
+	key = strings.TrimSpace(strings.ToLower(key))
+	switch {
+	case strings.Contains(key, "/access-token"):
+		return 10
+	case strings.Contains(key, "/refresh-token"):
+		return 5
+	case strings.Contains(key, "index.docker.io/v1") || strings.Contains(key, "registry-1.docker.io"):
+		return 30
+	default:
+		return 20
+	}
 }
 
 func registryHostFromImage(image string) string {
@@ -336,6 +396,49 @@ func registryHostFromImage(image string) string {
 		return "registry-1.docker.io"
 	}
 	return first
+}
+
+func integrationRegistryMirrorsForImage(t *testing.T, image string) map[string][]string {
+	t.Helper()
+	host := registryHostFromImage(image)
+	if host == "" {
+		return nil
+	}
+	mirrors := localDockerMirrorsForRegistry(host)
+	if len(mirrors) == 0 {
+		return nil
+	}
+	return map[string][]string{host: mirrors}
+}
+
+func localDockerMirrorsForRegistry(registryHost string) []string {
+	out, err := exec.Command("docker", "info", "--format", "{{json .RegistryConfig.Mirrors}}").CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var mirrors []string
+	if err := json.Unmarshal(out, &mirrors); err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	cleaned := make([]string, 0, len(mirrors))
+	target := strings.TrimSpace(strings.ToLower(registryHost))
+	for _, m := range mirrors {
+		u, err := url.Parse(strings.TrimSpace(m))
+		if err != nil || strings.TrimSpace(u.Host) == "" {
+			continue
+		}
+		host := strings.TrimSpace(strings.ToLower(u.Host))
+		if host == "" || host == target {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		cleaned = append(cleaned, host)
+	}
+	return cleaned
 }
 
 func durationPercentile(values []time.Duration, p int) time.Duration {

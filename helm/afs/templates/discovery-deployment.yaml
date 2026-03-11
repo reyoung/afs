@@ -31,6 +31,24 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - -listen=:{{ .Values.discovery.containerPort }}
+            {{- if .Values.discovery.registryAuth.enabled }}
+            {{- if eq (trim .Values.discovery.registryAuth.registry) "" }}
+            {{- fail "discovery.registryAuth.registry must be non-empty when discovery.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.discovery.registryAuth.existingSecret) "" }}
+            {{- fail "discovery.registryAuth.existingSecret must be non-empty when discovery.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.discovery.registryAuth.usernameKey) "" }}
+            {{- fail "discovery.registryAuth.usernameKey must be non-empty when discovery.registryAuth.enabled=true" }}
+            {{- end }}
+            {{- if eq (trim .Values.discovery.registryAuth.passwordKey) "" }}
+            {{- fail "discovery.registryAuth.passwordKey must be non-empty when discovery.registryAuth.enabled=true" }}
+            {{- end }}
+            - -auth-registry-basic={{ .Values.discovery.registryAuth.registry }}=$(REGISTRY_USERNAME):$(REGISTRY_PASSWORD)
+            {{- end }}
+            {{- range .Values.discovery.registryMirrors }}
+            - -registry-mirror={{ . }}
+            {{- end }}
           command:
             - /usr/local/bin/afs_discovery_grpcd
           env:
@@ -42,6 +60,18 @@ spec:
                   divisor: "1"
             - name: GOMEMLIMIT
               value: "{{ .Values.discovery.goMemLimit }}"
+            {{- if .Values.discovery.registryAuth.enabled }}
+            - name: REGISTRY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.discovery.registryAuth.existingSecret | quote }}
+                  key: {{ .Values.discovery.registryAuth.usernameKey | quote }}
+            - name: REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.discovery.registryAuth.existingSecret | quote }}
+                  key: {{ .Values.discovery.registryAuth.passwordKey | quote }}
+            {{- end }}
           ports:
             - name: grpc
               containerPort: {{ .Values.discovery.containerPort }}

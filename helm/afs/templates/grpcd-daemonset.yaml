@@ -50,6 +50,9 @@ spec:
             {{- end }}
             - -auth-registry-basic={{ .Values.grpcd.registryAuth.registry }}=$(REGISTRY_USERNAME):$(REGISTRY_PASSWORD)
             {{- end }}
+            {{- range .Values.grpcd.registryMirrors }}
+            - -registry-mirror={{ . }}
+            {{- end }}
           env:
             - name: POD_IP
               valueFrom:

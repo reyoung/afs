@@ -156,6 +156,44 @@ func TestFileNodePrepareTempFileFallsBackWhenSharedCacheOpenFails(t *testing.T) 
 	}
 }
 
+func TestFileNodePrepareTempFileIgnoresTypedNilSharedCache(t *testing.T) {
+	t.Parallel()
+
+	const (
+		filePath = "a.txt"
+		content  = "hello-without-shared-cache"
+	)
+	reader := newReaderWithSingleFile(t, filePath, []byte(content))
+	entry, err := reader.Stat(filePath)
+	if err != nil {
+		t.Fatalf("reader.Stat(%q): %v", filePath, err)
+	}
+	var typedNilCache *fakeSharedCache
+	f := &FileNode{
+		entry:       entry,
+		reader:      reader,
+		tempDir:     t.TempDir(),
+		layerDigest: "sha256:nil",
+		sharedCache: typedNilCache,
+	}
+
+	fd, n, err := f.prepareTempFile()
+	if err != nil {
+		t.Fatalf("prepareTempFile with typed nil shared cache: %v", err)
+	}
+	defer fd.Close()
+	if n != int64(len(content)) {
+		t.Fatalf("size=%d, want %d", n, len(content))
+	}
+	got, err := io.ReadAll(fd)
+	if err != nil {
+		t.Fatalf("read fallback file: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("content=%q, want %q", string(got), content)
+	}
+}
+
 func newReaderWithSingleFile(t *testing.T, name string, data []byte) *layerformat.Reader {
 	t.Helper()
 

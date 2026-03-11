@@ -599,11 +599,18 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 }
 
 func (s *Service) sendLog(stream afsletpb.Afslet_ExecuteServer, source string, message string) error {
-	return stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Log{Log: &afsletpb.LogMessage{Source: source, Message: message}}})
+	return stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Log{Log: &afsletpb.LogMessage{
+		Source:  sanitizeProtoString(source),
+		Message: sanitizeProtoString(message),
+	}}})
 }
 
 func (s *Service) sendResult(stream afsletpb.Afslet_ExecuteServer, res commandResult) error {
-	return stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Result{Result: &afsletpb.Result{Success: res.Success, ExitCode: res.ExitCode, Error: res.Err}}})
+	return stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Result{Result: &afsletpb.Result{
+		Success:  res.Success,
+		ExitCode: res.ExitCode,
+		Error:    sanitizeProtoString(res.Err),
+	}}})
 }
 
 func (s *Service) sendTar(stream afsletpb.Afslet_ExecuteServer, dir string) error {
@@ -973,7 +980,7 @@ func (w *processLogWriter) Write(p []byte) (int, error) {
 	for _, b := range p {
 		if b == '\n' {
 			if w.logf != nil {
-				w.logf(w.source, w.line.String())
+				w.logf(w.source, sanitizeProtoString(w.line.String()))
 			}
 			w.line.Reset()
 			continue
@@ -993,7 +1000,7 @@ func (w *processLogWriter) String() string {
 		}
 		out += w.line.String()
 	}
-	return strings.TrimSpace(out)
+	return sanitizeProtoString(strings.TrimSpace(out))
 }
 
 func (w *processLogWriter) Flush() {
@@ -1003,12 +1010,16 @@ func (w *processLogWriter) Flush() {
 		return
 	}
 	if w.logf != nil {
-		w.logf(w.source, w.line.String())
+		w.logf(w.source, sanitizeProtoString(w.line.String()))
 	}
 	if w.buf.Len() > 0 && !strings.HasSuffix(w.buf.String(), "\n") {
 		_, _ = w.buf.WriteString("\n")
 	}
 	w.line.Reset()
+}
+
+func sanitizeProtoString(s string) string {
+	return strings.ToValidUTF8(s, "?")
 }
 
 func isMounted(mountpoint string) (bool, error) {

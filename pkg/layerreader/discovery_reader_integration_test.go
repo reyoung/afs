@@ -63,25 +63,26 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 		t.Fatalf("parse image reference: %v", err)
 	}
 	t.Logf("integration image resolved: image=%s tag=%s registry=%s repository=%s reference=%s", image, tag, ref.Registry, ref.Repository, ref.Reference)
+	authConfigs := integrationAuthConfigs(t, ref.Registry)
+	mirrors := map[string][]string{
+		ref.Registry: localDockerMirrorsForRegistry(t, ref.Registry),
+	}
 
-	discAddr, stopDiscovery := startDiscoveryServer(t)
+	discAddr, stopDiscovery := startDiscoveryServer(t, toDiscoveryAuthConfigs(authConfigs), mirrors)
 	defer stopDiscovery()
 
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	lsAddr, stopLayerstore := startLayerstoreServer(t, cacheDir, integrationAuthConfigs(t, ref.Registry), map[string][]string{
-		ref.Registry: localDockerMirrorsForRegistry(t, ref.Registry),
-	})
+	lsAddr, stopLayerstore := startLayerstoreServer(t, cacheDir, authConfigs, mirrors)
 	defer stopLayerstore()
 
-	pullResp := pullImage(t, ctx, lsAddr, image, tag)
-	if len(pullResp.GetLayers()) == 0 {
+	resolved, ensured := ensureImage(t, ctx, discAddr, lsAddr, image, tag)
+	if len(resolved.GetLayers()) == 0 {
 		t.Fatalf("no layers pulled for image=%s tag=%s", image, tag)
 	}
-	target := pickLargestLayer(pullResp)
+	target := pickLargestLayer(ensured)
 	t.Logf("selected layer for read perf: digest=%s afs_size=%d", target.GetDigest(), target.GetAfsSize())
 
-	imageKeyVal := imageKey(image, tag, "linux", "amd64", "")
-	heartbeat(t, ctx, discAddr, "node-1", lsAddr, imageKeyVal, digestsFromPull(pullResp))
+	heartbeat(t, ctx, discAddr, "node-1", lsAddr, digestsFromResolve(resolved))
 
 	reader, err := NewDiscoveryBackedLayerReader(Config{
 		DiscoveryAddr: discAddr,
@@ -234,14 +235,21 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 	t.Logf("readat ns_per_mib remote=%.2f local=%.2f ratio=%.2fx", remoteNsPerMiB, localNsPerMiB, ratio)
 }
 
-func startDiscoveryServer(t *testing.T) (addr string, stop func()) {
+func startDiscoveryServer(t *testing.T, authConfigs []discovery.RegistryAuthConfig, mirrors map[string][]string) (addr string, stop func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen discovery: %v", err)
 	}
+	svc := discovery.NewService()
+	if err := svc.SetRegistryAuthConfigs(authConfigs); err != nil {
+		t.Fatalf("set discovery auth configs: %v", err)
+	}
+	if len(mirrors) > 0 {
+		svc.SetRegistryMirrors(mirrors)
+	}
 	s := grpc.NewServer()
-	discoverypb.RegisterServiceDiscoveryServer(s, discovery.NewService())
+	discoverypb.RegisterServiceDiscoveryServer(s, svc)
 	go func() { _ = s.Serve(lis) }()
 	return lis.Addr().String(), func() {
 		s.Stop()
@@ -295,6 +303,19 @@ func integrationAuthConfigs(t *testing.T, registryHost string) []layerstore.Regi
 	}}
 }
 
+func toDiscoveryAuthConfigs(in []layerstore.RegistryAuthConfig) []discovery.RegistryAuthConfig {
+	out := make([]discovery.RegistryAuthConfig, 0, len(in))
+	for _, cfg := range in {
+		out = append(out, discovery.RegistryAuthConfig{
+			RegistryHost: cfg.RegistryHost,
+			Username:     cfg.Username,
+			Password:     cfg.Password,
+			BearerToken:  cfg.BearerToken,
+		})
+	}
+	return out
+}
+
 func dockerConfigAuthForRegistry(t *testing.T, registryHost string) string {
 	t.Helper()
 	home, err := os.UserHomeDir()
@@ -318,15 +339,24 @@ func dockerConfigAuthForRegistry(t *testing.T, registryHost string) string {
 		return ""
 	}
 	target := strings.TrimSpace(strings.ToLower(registryHost))
+	bestKey := ""
+	bestAuth := ""
+	bestScore := 0
 	for key, v := range cfg.Auths {
 		auth := strings.TrimSpace(v.Auth)
 		if auth == "" {
 			continue
 		}
-		if dockerAuthKeyMatchesRegistry(key, target) {
-			t.Logf("using docker config auth key=%s for registry=%s", key, target)
-			return auth
+		score := dockerAuthMatchScore(key, target)
+		if score > bestScore {
+			bestKey = key
+			bestAuth = auth
+			bestScore = score
 		}
+	}
+	if bestAuth != "" {
+		t.Logf("using docker config auth key=%s for registry=%s", bestKey, target)
+		return bestAuth
 	}
 	t.Logf("no matching docker config auth for registry=%s", target)
 	return ""
@@ -350,6 +380,23 @@ func dockerAuthKeyMatchesRegistry(key, registryHost string) bool {
 		key = "registry-1.docker.io"
 	}
 	return key == registryHost
+}
+
+func dockerAuthMatchScore(key, registryHost string) int {
+	if !dockerAuthKeyMatchesRegistry(key, registryHost) {
+		return 0
+	}
+	key = strings.TrimSpace(strings.ToLower(key))
+	switch {
+	case strings.Contains(key, "/access-token"):
+		return 10
+	case strings.Contains(key, "/refresh-token"):
+		return 5
+	case strings.Contains(key, "index.docker.io/v1") || strings.Contains(key, "registry-1.docker.io"):
+		return 30
+	default:
+		return 20
+	}
 }
 
 func urlParseHost(raw string) (string, error) {
@@ -398,8 +445,26 @@ func localDockerMirrorsForRegistry(t *testing.T, registryHost string) []string {
 	return cleaned
 }
 
-func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *layerstorepb.PullImageResponse {
+func ensureImage(t *testing.T, ctx context.Context, discoveryAddr, endpoint, image, tag string) (*discoverypb.ResolveImageResponse, *layerstorepb.EnsureLayersResponse) {
 	t.Helper()
+	discoveryConn, err := grpc.DialContext(ctx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("dial discovery %s: %v", discoveryAddr, err)
+	}
+	defer discoveryConn.Close()
+	discoveryClient := discoverypb.NewServiceDiscoveryClient(discoveryConn)
+	resolveCtx, resolveCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer resolveCancel()
+	resolved, err := discoveryClient.ResolveImage(resolveCtx, &discoverypb.ResolveImageRequest{
+		Image:        image,
+		Tag:          tag,
+		PlatformOs:   "linux",
+		PlatformArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("resolve image %s:%s: %v", image, tag, err)
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(dialCtx, endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
@@ -410,13 +475,24 @@ func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *
 	client := layerstorepb.NewLayerStoreClient(conn)
 	callCtx, callCancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer callCancel()
-	resp, err := client.PullImage(callCtx, &layerstorepb.PullImageRequest{
-		Image:           image,
-		Tag:             tag,
-		PlatformOs:      "linux",
-		PlatformArch:    "amd64",
-		ForceLocalFetch: true,
-	})
+	req := &layerstorepb.EnsureLayersRequest{
+		Source: &layerstorepb.LayerSource{
+			Registry:   resolved.GetResolvedRegistry(),
+			Repository: resolved.GetResolvedRepository(),
+		},
+		Layers: make([]*layerstorepb.LayerSpec, 0, len(resolved.GetLayers())),
+	}
+	for _, layer := range resolved.GetLayers() {
+		if layer == nil {
+			continue
+		}
+		req.Layers = append(req.Layers, &layerstorepb.LayerSpec{
+			Digest:         layer.GetDigest(),
+			MediaType:      layer.GetMediaType(),
+			CompressedSize: layer.GetCompressedSize(),
+		})
+	}
+	resp, err := client.EnsureLayers(callCtx, req)
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "Too Many Requests") ||
@@ -424,14 +500,14 @@ func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *
 			strings.Contains(msg, "Forbidden") ||
 			strings.Contains(msg, "denied") ||
 			strings.Contains(msg, "unauthorized") {
-			t.Skipf("pull image skipped due to registry access limit/auth issue (%s:%s): %v", image, tag, err)
+			t.Skipf("ensure image skipped due to registry access limit/auth issue (%s:%s): %v", image, tag, err)
 		}
-		t.Fatalf("pull image from %s (%s:%s): %v", endpoint, image, tag, err)
+		t.Fatalf("ensure image on %s (%s:%s): %v", endpoint, image, tag, err)
 	}
-	return resp
+	return resolved, resp
 }
 
-func heartbeat(t *testing.T, ctx context.Context, discoveryAddr, nodeID, endpoint, imageKeyVal string, layerDigests []string) {
+func heartbeat(t *testing.T, ctx context.Context, discoveryAddr, nodeID, endpoint string, layerDigests []string) {
 	t.Helper()
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -447,13 +523,12 @@ func heartbeat(t *testing.T, ctx context.Context, discoveryAddr, nodeID, endpoin
 		NodeId:       nodeID,
 		Endpoint:     endpoint,
 		LayerDigests: layerDigests,
-		CachedImages: []string{imageKeyVal},
 	}); err != nil {
 		t.Fatalf("heartbeat %s -> %s: %v", nodeID, endpoint, err)
 	}
 }
 
-func pickLargestLayer(resp *layerstorepb.PullImageResponse) *layerstorepb.Layer {
+func pickLargestLayer(resp *layerstorepb.EnsureLayersResponse) *layerstorepb.Layer {
 	var best *layerstorepb.Layer
 	for _, l := range resp.GetLayers() {
 		if best == nil || l.GetAfsSize() > best.GetAfsSize() {
@@ -503,17 +578,7 @@ func layerCachePath(cacheDir, digest string) string {
 	return filepath.Join(cacheDir, "layers", parts[0], strings.ToLower(parts[1])+".afslyr")
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
-	return strings.Join([]string{
-		strings.TrimSpace(image),
-		strings.TrimSpace(tag),
-		strings.TrimSpace(platformOS),
-		strings.TrimSpace(platformArch),
-		strings.TrimSpace(platformVariant),
-	}, "|")
-}
-
-func digestsFromPull(resp *layerstorepb.PullImageResponse) []string {
+func digestsFromResolve(resp *discoverypb.ResolveImageResponse) []string {
 	out := make([]string, 0, len(resp.GetLayers()))
 	for _, l := range resp.GetLayers() {
 		out = append(out, l.GetDigest())

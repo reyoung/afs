@@ -2,9 +2,6 @@ package layerstore
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,20 +15,15 @@ import (
 	"syscall"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 	"github.com/reyoung/afs/pkg/registry"
 )
 
 const (
-	defaultPlatformOS   = "linux"
-	defaultPlatformArch = "amd64"
 	maxReadBytes        = 4 << 20
 	defaultCacheMaxByte = int64(1) << 40 // 1TB
 	defaultCacheRatio   = int64(60)      // 60% of free space
@@ -40,8 +32,7 @@ const (
 var digestPattern = regexp.MustCompile(`^[A-Za-z0-9_+.-]+:[A-Fa-f0-9]+$`)
 
 type fetcher interface {
-	GetLayersForPlatform(ctx context.Context, image, tag, os, arch, variant string) ([]registry.Layer, error)
-	DownloadLayer(ctx context.Context, image, tag, digest string) (io.ReadCloser, error)
+	DownloadLayerFromRepository(ctx context.Context, registryHost, repository, digest string) (io.ReadCloser, error)
 	Login(registry, username, password string) error
 	LoginWithToken(registry, token string) error
 }
@@ -58,23 +49,15 @@ type Service struct {
 
 	cacheDir      string
 	layersDir     string
-	metadataDir   string
 	locker        *digestLocker
 	newFetcher    func() fetcher
 	maxReadSize   int
 	authByHost    map[string]RegistryAuthConfig
 	mirrorsByHost map[string][]string
-	metadataMu    sync.Mutex
-	pullReport    func(imageKey string, pulling bool)
 	pruneMu       sync.Mutex
 	cacheMax      int64
 	reservedBytes int64
-	evictReport   func()
-
-	localEndpoint      string
-	discoveryEndpoints []string
-	peerFetchTimeout   time.Duration
-	imagePeerChecker   func(ctx context.Context, imageKey string) (bool, error)
+	cacheChangeReport func()
 }
 
 type cachedLayerFile struct {
@@ -84,18 +67,6 @@ type cachedLayerFile struct {
 	modTime time.Time
 }
 
-type imageMetadata struct {
-	Image              string           `json:"image,omitempty"`
-	Tag                string           `json:"tag,omitempty"`
-	PlatformOS         string           `json:"platform_os,omitempty"`
-	PlatformArch       string           `json:"platform_arch,omitempty"`
-	PlatformVariant    string           `json:"platform_variant,omitempty"`
-	ResolvedRegistry   string           `json:"resolved_registry"`
-	ResolvedRepository string           `json:"resolved_repository"`
-	ResolvedReference  string           `json:"resolved_reference"`
-	Layers             []registry.Layer `json:"layers"`
-}
-
 func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, error) {
 	if strings.TrimSpace(cacheDir) == "" {
 		return nil, fmt.Errorf("cache directory is required")
@@ -103,10 +74,6 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 	layersDir := filepath.Join(cacheDir, "layers")
 	if err := os.MkdirAll(layersDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
-	}
-	metadataDir := filepath.Join(cacheDir, "metadata")
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create metadata dir: %w", err)
 	}
 	authByHost := make(map[string]RegistryAuthConfig)
 	for _, cfg := range authConfigs {
@@ -132,14 +99,12 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 	return &Service{
 		cacheDir:         cacheDir,
 		layersDir:        layersDir,
-		metadataDir:      metadataDir,
 		locker:           newDigestLocker(),
 		newFetcher:       func() fetcher { return registry.NewClient(nil) },
 		maxReadSize:      maxReadBytes,
 		authByHost:       authByHost,
 		mirrorsByHost:    make(map[string][]string),
 		cacheMax:         cacheMax,
-		peerFetchTimeout: 5 * time.Second,
 	}, nil
 }
 
@@ -170,119 +135,69 @@ func (s *Service) SetRegistryMirrors(m map[string][]string) {
 	s.mirrorsByHost = out
 }
 
-func (s *Service) SetPeerFetchConfig(localEndpoint string, discoveryEndpoints []string) {
-	s.localEndpoint = strings.TrimSpace(localEndpoint)
-	seen := make(map[string]struct{}, len(discoveryEndpoints))
-	out := make([]string, 0, len(discoveryEndpoints))
-	for _, ep := range discoveryEndpoints {
-		ep = strings.TrimSpace(ep)
-		if ep == "" {
-			continue
-		}
-		if _, ok := seen[ep]; ok {
-			continue
-		}
-		seen[ep] = struct{}{}
-		out = append(out, ep)
+func (s *Service) EnsureLayers(ctx context.Context, req *layerstorepb.EnsureLayersRequest) (*layerstorepb.EnsureLayersResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	s.discoveryEndpoints = out
-}
-
-func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequest) (*layerstorepb.PullImageResponse, error) {
-	if req == nil || strings.TrimSpace(req.GetImage()) == "" {
-		return nil, status.Error(codes.InvalidArgument, "image is required")
+	source := req.GetSource()
+	if source == nil {
+		return nil, status.Error(codes.InvalidArgument, "source is required")
+	}
+	registryHost := strings.TrimSpace(source.GetRegistry())
+	repository := strings.TrimSpace(source.GetRepository())
+	if registryHost == "" {
+		return nil, status.Error(codes.InvalidArgument, "source.registry is required")
+	}
+	if repository == "" {
+		return nil, status.Error(codes.InvalidArgument, "source.repository is required")
 	}
 
-	ref, err := registry.ParseImageReference(req.GetImage(), req.GetTag())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
+	layers := make([]registry.Layer, 0, len(req.GetLayers()))
+	for _, spec := range req.GetLayers() {
+		if spec == nil {
+			continue
+		}
+		digest := strings.TrimSpace(spec.GetDigest())
+		if digest == "" {
+			return nil, status.Error(codes.InvalidArgument, "layer digest is required")
+		}
+		layers = append(layers, registry.Layer{
+			Digest:    digest,
+			MediaType: strings.TrimSpace(spec.GetMediaType()),
+			Size:      spec.GetCompressedSize(),
+		})
+	}
+	if len(layers) == 0 {
+		return &layerstorepb.EnsureLayersResponse{}, nil
 	}
 
 	f := s.newFetcher()
-	if err := s.applyConfiguredAuth(f, ref.Registry); err != nil {
+	if err := s.applyConfiguredAuth(f, registryHost); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "registry auth config: %v", err)
 	}
 	if err := s.applyConfiguredMirrors(f); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "registry mirror config: %v", err)
 	}
 
-	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
-	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
-	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
-	imgKey := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
-	if s.pullReport != nil {
-		s.pullReport(imgKey, true)
-		defer s.pullReport(imgKey, false)
+	releaseReservation, reserveErr := s.reservePullSpace(layers)
+	if reserveErr != nil {
+		return nil, reserveErr
 	}
-	forceLocalFetch := req.GetForceLocalFetch()
-	log.Printf("pull image requested: image=%s tag=%s platform=%s/%s variant=%s force_local_fetch=%v", req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, forceLocalFetch)
+	defer releaseReservation()
 
-	meta, fromCache, err := s.resolveImageMetadata(ctx, f, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, forceLocalFetch)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "resolve image metadata: %v", err)
+	result := &layerstorepb.EnsureLayersResponse{
+		Layers: make([]*layerstorepb.Layer, 0, len(layers)),
 	}
-	if fromCache {
-		log.Printf("resolved image metadata from cache: registry=%s repository=%s reference=%s layers=%d", meta.ResolvedRegistry, meta.ResolvedRepository, meta.ResolvedReference, len(meta.Layers))
-	} else {
-		log.Printf("resolved image metadata from registry: registry=%s repository=%s reference=%s layers=%d", meta.ResolvedRegistry, meta.ResolvedRepository, meta.ResolvedReference, len(meta.Layers))
-	}
-	peerHasImage := false
-	if !forceLocalFetch {
-		hasPeer, peerErr := s.peerHasImage(ctx, imgKey)
-		if peerErr != nil {
-			log.Printf("warning: peer image check failed image=%s key=%s: %v", req.GetImage(), imgKey, peerErr)
-		} else if hasPeer {
-			peerHasImage = true
-			log.Printf("peer already has image; skip local fetch for missing layers: image=%s key=%s", req.GetImage(), imgKey)
-		}
-	}
-
-	if !peerHasImage {
-		releaseReservation, reserveErr := s.reservePullSpace(meta.Layers)
-		if reserveErr != nil {
-			return nil, reserveErr
-		}
-		defer releaseReservation()
-	}
-
-	result := &layerstorepb.PullImageResponse{
-		ResolvedRegistry:   meta.ResolvedRegistry,
-		ResolvedRepository: meta.ResolvedRepository,
-		ResolvedReference:  meta.ResolvedReference,
-		Layers:             make([]*layerstorepb.Layer, 0, len(meta.Layers)),
-	}
-
-	for i, layer := range meta.Layers {
-		log.Printf("[%d/%d] processing layer digest=%s mediaType=%s size=%d", i+1, len(meta.Layers), layer.Digest, layer.MediaType, layer.Size)
-		if peerHasImage {
-			cachePath, afsSize, cached, err := s.layerLocalState(layer.Digest)
-			if err != nil {
-				return nil, err
-			}
-			if cached {
-				log.Printf("[%d/%d] local layer present digest=%s afsSize=%d path=%s", i+1, len(meta.Layers), layer.Digest, afsSize, cachePath)
-			} else {
-				log.Printf("[%d/%d] skipped local layer fetch because peer has image digest=%s", i+1, len(meta.Layers), layer.Digest)
-			}
-			result.Layers = append(result.Layers, &layerstorepb.Layer{
-				Digest:         layer.Digest,
-				MediaType:      layer.MediaType,
-				CompressedSize: layer.Size,
-				AfsSize:        afsSize,
-				CachePath:      cachePath,
-				Cached:         cached,
-			})
-			continue
-		}
-
-		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true)
+	for i, layer := range layers {
+		log.Printf("[%d/%d] ensuring layer digest=%s mediaType=%s size=%d registry=%s repository=%s", i+1, len(layers), layer.Digest, layer.MediaType, layer.Size, registryHost, repository)
+		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, registryHost, repository, layer, true)
 		if err != nil {
 			return nil, err
 		}
 		if cached {
-			log.Printf("[%d/%d] layer cache hit digest=%s afsSize=%d path=%s", i+1, len(meta.Layers), layer.Digest, afsSize, cachePath)
+			log.Printf("[%d/%d] layer cache hit digest=%s afsSize=%d path=%s", i+1, len(layers), layer.Digest, afsSize, cachePath)
 		} else {
-			log.Printf("[%d/%d] layer cached digest=%s afsSize=%d path=%s", i+1, len(meta.Layers), layer.Digest, afsSize, cachePath)
+			log.Printf("[%d/%d] layer cached digest=%s afsSize=%d path=%s", i+1, len(layers), layer.Digest, afsSize, cachePath)
 		}
 		result.Layers = append(result.Layers, &layerstorepb.Layer{
 			Digest:         layer.Digest,
@@ -293,17 +208,11 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 			Cached:         cached,
 		})
 	}
-
-	log.Printf("pull image completed: image=%s resolved=%s/%s:%s layers=%d", req.GetImage(), result.ResolvedRegistry, result.ResolvedRepository, result.ResolvedReference, len(result.Layers))
 	return result, nil
 }
 
-func (s *Service) SetPullImageReporter(fn func(imageKey string, pulling bool)) {
-	s.pullReport = fn
-}
-
-func (s *Service) SetEvictionReporter(fn func()) {
-	s.evictReport = fn
+func (s *Service) SetCacheChangeReporter(fn func()) {
+	s.cacheChangeReport = fn
 }
 
 func (s *Service) SetCacheLimitBytes(v int64) {
@@ -380,96 +289,6 @@ func (s *Service) estimateRequiredBytesLocked(layers []registry.Layer) (int64, m
 		}
 	}
 	return required, protected, nil
-}
-
-func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, tag, platformOS, platformArch, platformVariant string, forceRefreshMetadata bool) (imageMetadata, bool, error) {
-	ref, err := registry.ParseImageReference(image, tag)
-	if err != nil {
-		return imageMetadata{}, false, err
-	}
-
-	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
-	if !forceRefreshMetadata {
-		if cached, err := s.loadImageMetadata(cacheKey); err == nil {
-			return cached, true, nil
-		}
-	}
-
-	layers, err := f.GetLayersForPlatform(ctx, image, tag, platformOS, platformArch, platformVariant)
-	if err != nil {
-		return imageMetadata{}, false, err
-	}
-	meta := imageMetadata{
-		Image:              image,
-		Tag:                tag,
-		PlatformOS:         platformOS,
-		PlatformArch:       platformArch,
-		PlatformVariant:    platformVariant,
-		ResolvedRegistry:   ref.Registry,
-		ResolvedRepository: ref.Repository,
-		ResolvedReference:  ref.Reference,
-		Layers:             append([]registry.Layer(nil), layers...),
-	}
-	if err := s.saveImageMetadata(cacheKey, meta); err != nil {
-		log.Printf("warning: failed to write image metadata cache key=%s: %v", cacheKey, err)
-	}
-	return meta, false, nil
-}
-
-func metadataCacheKey(registryHost, repository, reference, platformOS, platformArch, platformVariant string) string {
-	joined := strings.Join([]string{registryHost, repository, reference, platformOS, platformArch, platformVariant}, "|")
-	sum := sha256.Sum256([]byte(joined))
-	return hex.EncodeToString(sum[:])
-}
-
-func (s *Service) metadataPath(cacheKey string) string {
-	return filepath.Join(s.metadataDir, cacheKey+".json")
-}
-
-func (s *Service) loadImageMetadata(cacheKey string) (imageMetadata, error) {
-	s.metadataMu.Lock()
-	defer s.metadataMu.Unlock()
-
-	path := s.metadataPath(cacheKey)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return imageMetadata{}, err
-	}
-	var meta imageMetadata
-	if err := json.Unmarshal(b, &meta); err != nil {
-		return imageMetadata{}, err
-	}
-	if len(meta.Layers) == 0 || meta.ResolvedRegistry == "" || meta.ResolvedRepository == "" || meta.ResolvedReference == "" {
-		return imageMetadata{}, fmt.Errorf("invalid metadata cache content: %s", path)
-	}
-	return meta, nil
-}
-
-func (s *Service) saveImageMetadata(cacheKey string, meta imageMetadata) error {
-	s.metadataMu.Lock()
-	defer s.metadataMu.Unlock()
-
-	b, err := json.Marshal(meta)
-	if err != nil {
-		return err
-	}
-	path := s.metadataPath(cacheKey)
-	tmp, err := os.CreateTemp(s.metadataDir, ".meta-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}()
-	if _, err := tmp.Write(b); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }
 
 func (s *Service) StatLayer(ctx context.Context, req *layerstorepb.StatLayerRequest) (*layerstorepb.StatLayerResponse, error) {
@@ -622,49 +441,6 @@ func (s *Service) HasLayer(ctx context.Context, req *layerstorepb.HasLayerReques
 	}, nil
 }
 
-func (s *Service) HasImage(ctx context.Context, req *layerstorepb.HasImageRequest) (*layerstorepb.HasImageResponse, error) {
-	_ = ctx
-	if req == nil || strings.TrimSpace(req.GetImage()) == "" {
-		return nil, status.Error(codes.InvalidArgument, "image is required")
-	}
-	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
-	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
-	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
-
-	ref, err := registry.ParseImageReference(req.GetImage(), req.GetTag())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
-	}
-	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
-	meta, err := s.loadImageMetadata(cacheKey)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &layerstorepb.HasImageResponse{Found: false}, nil
-		}
-		return nil, status.Errorf(codes.Internal, "load image metadata: %v", err)
-	}
-
-	missing := 0
-	for _, l := range meta.Layers {
-		p, err := s.layerPath(l.Digest)
-		if err != nil {
-			missing++
-			continue
-		}
-		if _, err := os.Stat(p); err != nil {
-			missing++
-		}
-	}
-	return &layerstorepb.HasImageResponse{
-		Found:              missing == 0,
-		ResolvedRegistry:   meta.ResolvedRegistry,
-		ResolvedRepository: meta.ResolvedRepository,
-		ResolvedReference:  meta.ResolvedReference,
-		TotalLayers:        int32(len(meta.Layers)),
-		MissingLayers:      int32(missing),
-	}, nil
-}
-
 func (s *Service) PruneCache(ctx context.Context, req *layerstorepb.PruneCacheRequest) (*layerstorepb.PruneCacheResponse, error) {
 	_ = ctx
 	if req == nil {
@@ -703,7 +479,7 @@ func (s *Service) PruneCache(ctx context.Context, req *layerstorepb.PruneCacheRe
 	}, nil
 }
 
-func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string, layer registry.Layer, allowDownload bool) (cachePath string, size int64, cached bool, err error) {
+func (s *Service) ensureLayer(ctx context.Context, f fetcher, registryHost, repository string, layer registry.Layer, allowDownload bool) (cachePath string, size int64, cached bool, err error) {
 	if !layerformat.IsSupportedLayerMediaType(layer.MediaType) {
 		return "", 0, false, status.Errorf(codes.FailedPrecondition, "unsupported layer media type %q for %s", layer.MediaType, layer.Digest)
 	}
@@ -734,12 +510,12 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		return "", 0, false, status.Errorf(codes.Internal, "create layer cache dir: %v", err)
 	}
 
-	rc, err := f.DownloadLayer(ctx, image, tag, layer.Digest)
+	rc, err := f.DownloadLayerFromRepository(ctx, registryHost, repository, layer.Digest)
 	if err != nil {
 		return "", 0, false, status.Errorf(codes.Internal, "download layer %s: %v", layer.Digest, err)
 	}
 	defer rc.Close()
-	log.Printf("downloading layer digest=%s from image=%s tag=%s", layer.Digest, image, tag)
+	log.Printf("downloading layer digest=%s from registry=%s repository=%s", layer.Digest, registryHost, repository)
 
 	tmpFile, err := os.CreateTemp(dir, ".tmp-*.afslyr")
 	if err != nil {
@@ -769,64 +545,13 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		return "", 0, false, status.Errorf(codes.Internal, "stat cache file: %v", err)
 	}
 	_ = touchFile(fullPath)
+	if s.cacheChangeReport != nil {
+		s.cacheChangeReport()
+	}
 	if _, _, pruneErr := s.enforceCacheLimit(map[string]struct{}{layer.Digest: {}}); pruneErr != nil {
 		log.Printf("warning: enforce cache limit failed: %v", pruneErr)
 	}
 	return fullPath, st.Size(), false, nil
-}
-
-func (s *Service) peerHasImage(ctx context.Context, imageKey string) (bool, error) {
-	if strings.TrimSpace(imageKey) == "" {
-		return false, nil
-	}
-	if s.imagePeerChecker != nil {
-		return s.imagePeerChecker(ctx, imageKey)
-	}
-	if len(s.discoveryEndpoints) == 0 {
-		return false, nil
-	}
-	for _, discoveryAddr := range s.discoveryEndpoints {
-		dctx, cancel := context.WithTimeout(ctx, s.peerFetchTimeout)
-		conn, err := grpc.DialContext(dctx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-		cancel()
-		if err != nil {
-			log.Printf("warning: dial discovery for image check failed addr=%s imageKey=%s: %v", discoveryAddr, imageKey, err)
-			continue
-		}
-		client := discoverypb.NewServiceDiscoveryClient(conn)
-		qctx, qcancel := context.WithTimeout(ctx, s.peerFetchTimeout)
-		resp, qerr := client.FindImage(qctx, &discoverypb.FindImageRequest{ImageKey: imageKey})
-		qcancel()
-		_ = conn.Close()
-		if qerr != nil {
-			log.Printf("warning: discovery FindImage for image check failed addr=%s imageKey=%s: %v", discoveryAddr, imageKey, qerr)
-			continue
-		}
-		for _, svc := range resp.GetServices() {
-			ep := strings.TrimSpace(svc.GetEndpoint())
-			if ep == "" || ep == s.localEndpoint {
-				continue
-			}
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (s *Service) layerLocalState(digest string) (cachePath string, size int64, cached bool, err error) {
-	fullPath, err := s.layerPath(digest)
-	if err != nil {
-		return "", 0, false, status.Error(codes.InvalidArgument, err.Error())
-	}
-	st, statErr := os.Stat(fullPath)
-	if statErr != nil {
-		if errors.Is(statErr, os.ErrNotExist) {
-			return "", 0, false, nil
-		}
-		return "", 0, false, status.Errorf(codes.Internal, "stat layer: %v", statErr)
-	}
-	_ = touchFile(fullPath)
-	return fullPath, st.Size(), true, nil
 }
 
 func (s *Service) enforceCacheLimit(exclude map[string]struct{}) (int64, int, error) {
@@ -887,8 +612,8 @@ func (s *Service) pruneByReclaimTargetLocked(target int64, exclude map[string]st
 		evicted++
 		removed = true
 	}
-	if removed && s.evictReport != nil {
-		s.evictReport()
+	if removed && s.cacheChangeReport != nil {
+		s.cacheChangeReport()
 	}
 	return reclaimed, evicted, nil
 }
@@ -1023,23 +748,6 @@ func (s *Service) applyConfiguredMirrors(f fetcher) error {
 		}
 	}
 	return nil
-}
-
-func valueOrDefault(v, d string) string {
-	if s := strings.TrimSpace(v); s != "" {
-		return s
-	}
-	return d
-}
-
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
-	return strings.Join([]string{
-		strings.TrimSpace(image),
-		strings.TrimSpace(tag),
-		strings.TrimSpace(platformOS),
-		strings.TrimSpace(platformArch),
-		strings.TrimSpace(platformVariant),
-	}, "|")
 }
 
 type digestLocker struct {

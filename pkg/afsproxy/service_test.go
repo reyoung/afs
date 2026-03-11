@@ -10,6 +10,7 @@ import (
 	"github.com/reyoung/afs/pkg/afsproxypb"
 	"github.com/reyoung/afs/pkg/discovery"
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/registry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -77,9 +78,9 @@ func TestReconcileImageReplica(t *testing.T) {
 
 	discAddr, stop := startDiscoveryServer(t)
 	defer stop()
-	heartbeat(t, discAddr, "node-a", "10.0.0.1:50051", []string{"nginx|latest|linux|amd64|"})
-	heartbeat(t, discAddr, "node-b", "10.0.0.2:50051", []string{"nginx|latest|linux|amd64|", "busybox|latest|linux|amd64|"})
-	heartbeat(t, discAddr, "node-c", "10.0.0.3:50051", []string{"alpine|latest|linux|amd64|"})
+	heartbeat(t, discAddr, "node-a", "10.0.0.1:50051", []string{"sha256:aaa", "sha256:bbb"})
+	heartbeat(t, discAddr, "node-b", "10.0.0.2:50051", []string{"sha256:aaa", "sha256:bbb", "sha256:ccc"})
+	heartbeat(t, discAddr, "node-c", "10.0.0.3:50051", []string{"sha256:ddd"})
 
 	svc := NewService(Config{
 		DiscoveryTarget: discAddr,
@@ -152,8 +153,12 @@ func startDiscoveryServer(t *testing.T) (string, func()) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	disc := discovery.NewService()
+	disc.SetResolverFactory(func() discovery.Resolver {
+		return proxyTestResolver{}
+	})
 	s := grpc.NewServer()
-	discoverypb.RegisterServiceDiscoveryServer(s, discovery.NewService())
+	discoverypb.RegisterServiceDiscoveryServer(s, disc)
 	go func() {
 		_ = s.Serve(lis)
 	}()
@@ -163,7 +168,7 @@ func startDiscoveryServer(t *testing.T) (string, func()) {
 	}
 }
 
-func heartbeat(t *testing.T, discoveryAddr, nodeID, endpoint string, cachedImages []string) {
+func heartbeat(t *testing.T, discoveryAddr, nodeID, endpoint string, layerDigests []string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -179,8 +184,44 @@ func heartbeat(t *testing.T, discoveryAddr, nodeID, endpoint string, cachedImage
 	if _, err := client.Heartbeat(callCtx, &discoverypb.HeartbeatRequest{
 		NodeId:       nodeID,
 		Endpoint:     endpoint,
-		CachedImages: cachedImages,
+		LayerDigests: layerDigests,
 	}); err != nil {
 		t.Fatalf("heartbeat endpoint=%s: %v", endpoint, err)
 	}
+}
+
+type proxyTestResolver struct{}
+
+func (proxyTestResolver) GetLayersForPlatform(ctx context.Context, image, tag, os, arch, variant string) ([]registry.Layer, error) {
+	_ = ctx
+	_ = tag
+	_ = os
+	_ = arch
+	_ = variant
+	switch image {
+	case "nginx":
+		return []registry.Layer{
+			{Digest: "sha256:aaa", MediaType: "layer/a", Size: 111},
+			{Digest: "sha256:bbb", MediaType: "layer/b", Size: 222},
+		}, nil
+	case "busybox":
+		return []registry.Layer{{Digest: "sha256:ccc", MediaType: "layer/c", Size: 333}}, nil
+	case "alpine":
+		return []registry.Layer{{Digest: "sha256:ddd", MediaType: "layer/d", Size: 444}}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (proxyTestResolver) Login(registry, username, password string) error {
+	_ = registry
+	_ = username
+	_ = password
+	return nil
+}
+
+func (proxyTestResolver) LoginWithToken(registry, token string) error {
+	_ = registry
+	_ = token
+	return nil
 }

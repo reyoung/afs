@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ServiceDiscovery_Heartbeat_FullMethodName = "/discovery.v1.ServiceDiscovery/Heartbeat"
-	ServiceDiscovery_FindImage_FullMethodName = "/discovery.v1.ServiceDiscovery/FindImage"
+	ServiceDiscovery_Heartbeat_FullMethodName    = "/discovery.v1.ServiceDiscovery/Heartbeat"
+	ServiceDiscovery_ResolveImage_FullMethodName = "/discovery.v1.ServiceDiscovery/ResolveImage"
+	ServiceDiscovery_FindImage_FullMethodName    = "/discovery.v1.ServiceDiscovery/FindImage"
 )
 
 // ServiceDiscoveryClient is the client API for ServiceDiscovery service.
@@ -28,6 +29,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ServiceDiscoveryClient interface {
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	ResolveImage(ctx context.Context, in *ResolveImageRequest, opts ...grpc.CallOption) (*ResolveImageResponse, error)
 	FindImage(ctx context.Context, in *FindImageRequest, opts ...grpc.CallOption) (*FindImageResponse, error)
 }
 
@@ -49,6 +51,16 @@ func (c *serviceDiscoveryClient) Heartbeat(ctx context.Context, in *HeartbeatReq
 	return out, nil
 }
 
+func (c *serviceDiscoveryClient) ResolveImage(ctx context.Context, in *ResolveImageRequest, opts ...grpc.CallOption) (*ResolveImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveImageResponse)
+	err := c.cc.Invoke(ctx, ServiceDiscovery_ResolveImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *serviceDiscoveryClient) FindImage(ctx context.Context, in *FindImageRequest, opts ...grpc.CallOption) (*FindImageResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(FindImageResponse)
@@ -64,6 +76,7 @@ func (c *serviceDiscoveryClient) FindImage(ctx context.Context, in *FindImageReq
 // for forward compatibility.
 type ServiceDiscoveryServer interface {
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	ResolveImage(context.Context, *ResolveImageRequest) (*ResolveImageResponse, error)
 	FindImage(context.Context, *FindImageRequest) (*FindImageResponse, error)
 	mustEmbedUnimplementedServiceDiscoveryServer()
 }
@@ -77,6 +90,9 @@ type UnimplementedServiceDiscoveryServer struct{}
 
 func (UnimplementedServiceDiscoveryServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedServiceDiscoveryServer) ResolveImage(context.Context, *ResolveImageRequest) (*ResolveImageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveImage not implemented")
 }
 func (UnimplementedServiceDiscoveryServer) FindImage(context.Context, *FindImageRequest) (*FindImageResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FindImage not implemented")
@@ -120,6 +136,24 @@ func _ServiceDiscovery_Heartbeat_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ServiceDiscovery_ResolveImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ServiceDiscoveryServer).ResolveImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ServiceDiscovery_ResolveImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ServiceDiscoveryServer).ResolveImage(ctx, req.(*ResolveImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ServiceDiscovery_FindImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(FindImageRequest)
 	if err := dec(in); err != nil {
@@ -148,6 +182,10 @@ var ServiceDiscovery_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _ServiceDiscovery_Heartbeat_Handler,
+		},
+		{
+			MethodName: "ResolveImage",
+			Handler:    _ServiceDiscovery_ResolveImage_Handler,
 		},
 		{
 			MethodName: "FindImage",

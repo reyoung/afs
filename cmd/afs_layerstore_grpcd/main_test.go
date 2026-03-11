@@ -130,25 +130,3 @@ func TestScanCachedLayerStats(t *testing.T) {
 		t.Fatalf("afs_size=%d, want 1", got[0].GetAfsSize())
 	}
 }
-
-func TestScanCachedImageKeys(t *testing.T) {
-	t.Parallel()
-
-	tmp := t.TempDir()
-	metaPath := filepath.Join(tmp, "metadata", "a.json")
-	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":""}`
-	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	got, err := scanCachedImageKeys(tmp)
-	if err != nil {
-		t.Fatalf("scanCachedImageKeys: %v", err)
-	}
-	if len(got) != 1 || got[0] != "nginx|latest|linux|amd64|" {
-		t.Fatalf("got=%v, want [nginx|latest|linux|amd64|]", got)
-	}
-}

@@ -19,12 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LayerStore_PullImage_FullMethodName       = "/layerstore.v1.LayerStore/PullImage"
+	LayerStore_EnsureLayers_FullMethodName    = "/layerstore.v1.LayerStore/EnsureLayers"
 	LayerStore_StatLayer_FullMethodName       = "/layerstore.v1.LayerStore/StatLayer"
 	LayerStore_ReadLayer_FullMethodName       = "/layerstore.v1.LayerStore/ReadLayer"
 	LayerStore_ReadLayerStream_FullMethodName = "/layerstore.v1.LayerStore/ReadLayerStream"
 	LayerStore_HasLayer_FullMethodName        = "/layerstore.v1.LayerStore/HasLayer"
-	LayerStore_HasImage_FullMethodName        = "/layerstore.v1.LayerStore/HasImage"
 	LayerStore_PruneCache_FullMethodName      = "/layerstore.v1.LayerStore/PruneCache"
 )
 
@@ -32,12 +31,11 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type LayerStoreClient interface {
-	PullImage(ctx context.Context, in *PullImageRequest, opts ...grpc.CallOption) (*PullImageResponse, error)
+	EnsureLayers(ctx context.Context, in *EnsureLayersRequest, opts ...grpc.CallOption) (*EnsureLayersResponse, error)
 	StatLayer(ctx context.Context, in *StatLayerRequest, opts ...grpc.CallOption) (*StatLayerResponse, error)
 	ReadLayer(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (*ReadLayerResponse, error)
 	ReadLayerStream(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadLayerResponse], error)
 	HasLayer(ctx context.Context, in *HasLayerRequest, opts ...grpc.CallOption) (*HasLayerResponse, error)
-	HasImage(ctx context.Context, in *HasImageRequest, opts ...grpc.CallOption) (*HasImageResponse, error)
 	PruneCache(ctx context.Context, in *PruneCacheRequest, opts ...grpc.CallOption) (*PruneCacheResponse, error)
 }
 
@@ -49,10 +47,10 @@ func NewLayerStoreClient(cc grpc.ClientConnInterface) LayerStoreClient {
 	return &layerStoreClient{cc}
 }
 
-func (c *layerStoreClient) PullImage(ctx context.Context, in *PullImageRequest, opts ...grpc.CallOption) (*PullImageResponse, error) {
+func (c *layerStoreClient) EnsureLayers(ctx context.Context, in *EnsureLayersRequest, opts ...grpc.CallOption) (*EnsureLayersResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(PullImageResponse)
-	err := c.cc.Invoke(ctx, LayerStore_PullImage_FullMethodName, in, out, cOpts...)
+	out := new(EnsureLayersResponse)
+	err := c.cc.Invoke(ctx, LayerStore_EnsureLayers_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -108,16 +106,6 @@ func (c *layerStoreClient) HasLayer(ctx context.Context, in *HasLayerRequest, op
 	return out, nil
 }
 
-func (c *layerStoreClient) HasImage(ctx context.Context, in *HasImageRequest, opts ...grpc.CallOption) (*HasImageResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(HasImageResponse)
-	err := c.cc.Invoke(ctx, LayerStore_HasImage_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *layerStoreClient) PruneCache(ctx context.Context, in *PruneCacheRequest, opts ...grpc.CallOption) (*PruneCacheResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PruneCacheResponse)
@@ -132,12 +120,11 @@ func (c *layerStoreClient) PruneCache(ctx context.Context, in *PruneCacheRequest
 // All implementations must embed UnimplementedLayerStoreServer
 // for forward compatibility.
 type LayerStoreServer interface {
-	PullImage(context.Context, *PullImageRequest) (*PullImageResponse, error)
+	EnsureLayers(context.Context, *EnsureLayersRequest) (*EnsureLayersResponse, error)
 	StatLayer(context.Context, *StatLayerRequest) (*StatLayerResponse, error)
 	ReadLayer(context.Context, *ReadLayerRequest) (*ReadLayerResponse, error)
 	ReadLayerStream(*ReadLayerRequest, grpc.ServerStreamingServer[ReadLayerResponse]) error
 	HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error)
-	HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error)
 	PruneCache(context.Context, *PruneCacheRequest) (*PruneCacheResponse, error)
 	mustEmbedUnimplementedLayerStoreServer()
 }
@@ -149,8 +136,8 @@ type LayerStoreServer interface {
 // pointer dereference when methods are called.
 type UnimplementedLayerStoreServer struct{}
 
-func (UnimplementedLayerStoreServer) PullImage(context.Context, *PullImageRequest) (*PullImageResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method PullImage not implemented")
+func (UnimplementedLayerStoreServer) EnsureLayers(context.Context, *EnsureLayersRequest) (*EnsureLayersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EnsureLayers not implemented")
 }
 func (UnimplementedLayerStoreServer) StatLayer(context.Context, *StatLayerRequest) (*StatLayerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StatLayer not implemented")
@@ -163,9 +150,6 @@ func (UnimplementedLayerStoreServer) ReadLayerStream(*ReadLayerRequest, grpc.Ser
 }
 func (UnimplementedLayerStoreServer) HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HasLayer not implemented")
-}
-func (UnimplementedLayerStoreServer) HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method HasImage not implemented")
 }
 func (UnimplementedLayerStoreServer) PruneCache(context.Context, *PruneCacheRequest) (*PruneCacheResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PruneCache not implemented")
@@ -191,20 +175,20 @@ func RegisterLayerStoreServer(s grpc.ServiceRegistrar, srv LayerStoreServer) {
 	s.RegisterService(&LayerStore_ServiceDesc, srv)
 }
 
-func _LayerStore_PullImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PullImageRequest)
+func _LayerStore_EnsureLayers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnsureLayersRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(LayerStoreServer).PullImage(ctx, in)
+		return srv.(LayerStoreServer).EnsureLayers(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: LayerStore_PullImage_FullMethodName,
+		FullMethod: LayerStore_EnsureLayers_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(LayerStoreServer).PullImage(ctx, req.(*PullImageRequest))
+		return srv.(LayerStoreServer).EnsureLayers(ctx, req.(*EnsureLayersRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -274,24 +258,6 @@ func _LayerStore_HasLayer_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _LayerStore_HasImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HasImageRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(LayerStoreServer).HasImage(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: LayerStore_HasImage_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(LayerStoreServer).HasImage(ctx, req.(*HasImageRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _LayerStore_PruneCache_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PruneCacheRequest)
 	if err := dec(in); err != nil {
@@ -318,8 +284,8 @@ var LayerStore_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*LayerStoreServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "PullImage",
-			Handler:    _LayerStore_PullImage_Handler,
+			MethodName: "EnsureLayers",
+			Handler:    _LayerStore_EnsureLayers_Handler,
 		},
 		{
 			MethodName: "StatLayer",
@@ -332,10 +298,6 @@ var LayerStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HasLayer",
 			Handler:    _LayerStore_HasLayer_Handler,
-		},
-		{
-			MethodName: "HasImage",
-			Handler:    _LayerStore_HasImage_Handler,
 		},
 		{
 			MethodName: "PruneCache",

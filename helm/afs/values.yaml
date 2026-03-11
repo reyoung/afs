@@ -15,6 +15,13 @@ podAnnotations: {}
 discovery:
   replicas: 3
   containerPort: 60051
+  registryAuth:
+    enabled: false
+    registry: ""
+    existingSecret: ""
+    usernameKey: username
+    passwordKey: password
+  registryMirrors: []
   goMemLimit: 896MiB
   service:
     type: ClusterIP
@@ -36,6 +43,7 @@ grpcd:
     existingSecret: ""
     usernameKey: username
     passwordKey: password
+  registryMirrors: []
   volume:
     type: emptyDir
     emptyDir: {}

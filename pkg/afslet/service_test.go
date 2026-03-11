@@ -265,6 +265,38 @@ func TestWaitForInProcessMountReadyReturnsWhenMountProcessExits(t *testing.T) {
 	}
 }
 
+func TestSanitizeProtoStringReplacesInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	in := string([]byte{'o', 'k', 0xff, '\n'})
+	got := sanitizeProtoString(in)
+	if got != "ok?\n" {
+		t.Fatalf("sanitizeProtoString()=%q, want %q", got, "ok?\n")
+	}
+}
+
+func TestProcessLogWriterSanitizesInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	var lines []string
+	w := newProcessLogWriter("test", func(_ string, msg string) {
+		lines = append(lines, msg)
+	})
+
+	if _, err := w.Write([]byte{'o', 'k', 0xff, '\n'}); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("logged lines=%d, want 1", len(lines))
+	}
+	if lines[0] != "ok?" {
+		t.Fatalf("logged line=%q, want %q", lines[0], "ok?")
+	}
+	if got := w.String(); got != "ok?" {
+		t.Fatalf("String()=%q, want %q", got, "ok?")
+	}
+}
+
 func TestTerminateProcessDoesNotBlockAfterWaitConsumed(t *testing.T) {
 	t.Parallel()
 

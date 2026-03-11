@@ -19,7 +19,7 @@ The goal of AFS is to expand image data reuse from “single node” to “entir
 
 Unlike Docker’s strictly local layer dependency, AFS does not require all layers to exist on the current machine.
 
-As long as a layer (or the corresponding image) is available on some node in the cluster, another node can read it over the network and mount the filesystem.
+As long as the required layers are available on some node in the cluster, another node can read them over the network and mount the filesystem.
 
 This means:
 
@@ -30,23 +30,24 @@ This means:
 ## Components
 
 - `afs_discovery_grpcd`
-  - Service discovery and node liveness/status management (heartbeat)
-  - Returns endpoints of nodes that contain a target image
+  - Service discovery, image resolution/cache, and node liveness/status management (heartbeat)
+  - Returns providers for a resolved image or a specific layer digest
 
 - `afs_layerstore_grpcd`
-  - Manages layer cache
-  - Provides `PullImage / HasImage / HasLayer / StatLayer / ReadLayer / PruneCache`
+  - Manages layer cache only
+  - Provides `EnsureLayers / HasLayer / StatLayer / ReadLayer / PruneCache`
   - Periodically reports to one or more discovery services after startup
   - Supports cache limit and LRU eviction
     - Default limit: `min(1TB, 60% of free space of cache filesystem)`
     - Configurable via `-cache-max-bytes`
-    - `PullImage` reserves cache space before download (concurrency-safe)
-    - If image required size exceeds cache limit, fails fast
+    - `EnsureLayers` reserves cache space before download (concurrency-safe)
+    - If requested layer set exceeds cache limit, fails fast
     - If over limit, evicts old layers (LRU by access time) and triggers heartbeat
 
 - `afs_mount`
-  - Connects only to discovery
-  - Finds nodes that contain the image, then mounts
+  - Uses discovery as control plane (`ResolveImage`, `FindImage`)
+  - Uses selected layerstores as data plane (`EnsureLayers`, `ReadLayer`)
+  - Resolves image, finds complete providers or ensures missing layers, then mounts
   - Automatically retries by switching providers on read failures
   - Re-resolves layer providers from discovery during reads, so topology updates can take effect quickly
 

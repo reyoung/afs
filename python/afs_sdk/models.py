@@ -91,7 +91,6 @@ class ProxyLayerstoreInstance:
     last_seen_unix: int
     cache_max_bytes: int
     layers: list[ProxyLayerInfo]
-    cached_images: list[str]
 
 
 @dataclass(slots=True)

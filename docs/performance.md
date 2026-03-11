@@ -2,7 +2,7 @@
 
 本文档对当前分支的 `afs` 执行性能进行一次基线测试，并和 `docker run` 做对比。
 
-- Commit: `e776e0d`
+- Commit: `2dc1b6cf2293`（workspace dirty）
 - OS: `Linux 6.6.47-12.tl4.x86_64`
 - CPU: `AMD EPYC 7K62 48-Core Processor`（32 vCPU）
 - Docker: `28.0.1`
@@ -13,9 +13,9 @@
 
 1. **warmup 性能**：每个场景首轮执行耗时。
 2. **warm 性能**：warmup 之后连续 5 轮执行耗时统计。
-3. **pull image 开销不计入性能**：
+3. **镜像解析 / layer 预热开销不计入性能**：
    - 先 `docker pull alpine:3.20`
-   - 再通过 `LayerStore.PullImage` 手动把镜像预拉到 `layerstore`。
+   - 再通过 `ResolveImage + LayerStore.EnsureLayers` 手动把 layer 预热到 `layerstore`。
 
 ## 场景定义
 
@@ -37,27 +37,33 @@ make build-local
 WARM_ITERS=5 ./scripts/perf/benchmark.sh
 ```
 
+如果需要避免 Docker Hub 匿名限流，可以在执行前注入：
+
+```bash
+LAYERSTORE_AUTH_BASIC_1='registry-1.docker.io=<username>:<password_or_token>' WARM_ITERS=5 ./scripts/perf/benchmark.sh
+```
+
 脚本输出：
 
 - 原始数据：`.tmp/perf/raw.csv`
 - 汇总数据：`.tmp/perf/summary.csv`
+- 过程日志：`.tmp/perf/benchmark.log`
 
 ## 本次测试结果（ms）
 
 | scenario | phase | count | avg_ms | median_ms | min_ms | max_ms |
 |---|---:|---:|---:|---:|---:|---:|
-| afs-direct | warmup | 1 | 520.00 | 520.00 | 520 | 520 |
-| afs-direct | warm | 5 | 292.20 | 291.00 | 290 | 296 |
-| afs-proxy-compose | warmup | 1 | 294.00 | 294.00 | 294 | 294 |
-| afs-proxy-compose | warm | 5 | 297.80 | 297.00 | 296 | 301 |
-| docker-run | warmup | 1 | 370.00 | 370.00 | 370 | 370 |
-| docker-run | warm | 5 | 360.60 | 360.00 | 353 | 375 |
-| host-bare | warmup | 1 | 5.00 | 5.00 | 5 | 5 |
+| afs-direct | warmup | 1 | 285.00 | 285.00 | 285 | 285 |
+| afs-direct | warm | 5 | 280.80 | 282.00 | 273 | 287 |
+| afs-proxy-compose | warmup | 1 | 288.00 | 288.00 | 288 | 288 |
+| afs-proxy-compose | warm | 5 | 287.40 | 288.00 | 282 | 292 |
+| docker-run | warmup | 1 | 405.00 | 405.00 | 405 | 405 |
+| docker-run | warm | 5 | 350.80 | 347.00 | 340 | 361 |
+| host-bare | warmup | 1 | 4.00 | 4.00 | 4 | 4 |
 | host-bare | warm | 5 | 4.60 | 5.00 | 4 | 5 |
 
 ## 结论（本机本次样本）
 
-- `afs-direct` warm（~292ms）较 `docker-run` warm（~361ms）更快。
-- `afs-proxy-compose` warm（~298ms）也快于 `docker-run` warm。
-- `afs-direct` warmup 首轮有一次性抖动（520ms），warm 后收敛到 ~290ms。
-
+- `afs-direct` warm（~281ms）较 `docker-run` warm（~351ms）更快。
+- `afs-proxy-compose` warm（~287ms）也快于 `docker-run` warm。
+- 在当前样本里，`afs-direct` 与 `afs-proxy-compose` 的 warmup 都稳定在 ~285ms 左右，没有出现早先那种明显首轮抖动。

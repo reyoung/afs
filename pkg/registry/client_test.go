@@ -112,6 +112,9 @@ func TestClient_LoginUsesBasicAuthForTokenEndpoint(t *testing.T) {
 			_, _ = w.Write([]byte(`{"token":"` + token + `"}`))
 			return
 		case r.URL.Path == "/v2/"+repo+"/manifests/"+tag:
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Basic ") {
+				t.Fatalf("unexpected basic auth on manifest endpoint: %q", auth)
+			}
 			if r.Header.Get("Authorization") != "Bearer "+token {
 				w.Header().Set("Www-Authenticate", `Bearer realm="`+baseURL+`/token",service="fake-registry"`)
 				w.WriteHeader(http.StatusUnauthorized)
@@ -254,6 +257,7 @@ func TestClient_LoginIsScopedByRegistryHost(t *testing.T) {
 		return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotUser, gotPass, ok := r.BasicAuth()
 			if !ok || gotUser != user || gotPass != pass {
+				w.Header().Set("Www-Authenticate", `Basic realm="registry"`)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

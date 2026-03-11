@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -305,7 +306,7 @@ func (f *FileNode) ensurePrepared() syscall.Errno {
 }
 
 func (f *FileNode) prepareTempFile() (*os.File, int64, error) {
-	if !f.noSpillCache && f.sharedCache != nil && f.layerDigest != "" {
+	if !f.noSpillCache && hasSharedSpillCache(f.sharedCache) && f.layerDigest != "" {
 		p, size, err := f.sharedCache.Prepare(f.layerDigest, f.entry.Path, func(w io.Writer) (int64, error) {
 			bw := bufio.NewWriterSize(w, 1<<20)
 			n, copyErr := f.reader.CopyFile(f.entry.Path, bw)
@@ -382,6 +383,19 @@ func (f *FileNode) prepareTempFile() (*os.File, int64, error) {
 		return nil, 0, fmt.Errorf("seek temp file: %w", err)
 	}
 	return tmp, n, nil
+}
+
+func hasSharedSpillCache(cache SharedSpillCache) bool {
+	if cache == nil {
+		return false
+	}
+	v := reflect.ValueOf(cache)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !v.IsNil()
+	default:
+		return true
+	}
 }
 
 func (f *FileNode) prepareTempFileNoCache(tmpDir string) (*os.File, int64, error) {

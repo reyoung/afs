@@ -3,9 +3,42 @@ services:
     image: ubuntu:24.04
     container_name: afs-discovery
     restart: unless-stopped
+    env_file:
+      - .env.layerstore
+    environment:
+      - LAYERSTORE_AUTH_BASIC_1=${LAYERSTORE_AUTH_BASIC_1:-}
+      - LAYERSTORE_AUTH_BASIC_2=${LAYERSTORE_AUTH_BASIC_2:-}
+      - LAYERSTORE_AUTH_BASIC_3=${LAYERSTORE_AUTH_BASIC_3:-}
     volumes:
       - ./dist/linux_amd64:/usr/local/bin:ro
-    command: ["/usr/local/bin/afs_discovery_grpcd", "-listen=:60051"]
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates
+        update-ca-certificates
+        rm -rf /var/lib/apt/lists/*
+        AUTH_ARGS=()
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_1:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_1}=$${LAYERSTORE_AUTH_TOKEN_1}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_2:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_2:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_2}=$${LAYERSTORE_AUTH_TOKEN_2}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_3:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_3:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_3}=$${LAYERSTORE_AUTH_TOKEN_3}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_1}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_2:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_2}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_3:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_3}")
+        fi
+        exec /usr/local/bin/afs_discovery_grpcd -listen=:60051 "$${AUTH_ARGS[@]}"
     ports:
       - "60051:60051"
     networks:
@@ -19,6 +52,10 @@ services:
       - discovery
     env_file:
       - .env.layerstore
+    environment:
+      - LAYERSTORE_AUTH_BASIC_1=${LAYERSTORE_AUTH_BASIC_1:-}
+      - LAYERSTORE_AUTH_BASIC_2=${LAYERSTORE_AUTH_BASIC_2:-}
+      - LAYERSTORE_AUTH_BASIC_3=${LAYERSTORE_AUTH_BASIC_3:-}
     volumes:
       - ./dist/linux_amd64:/usr/local/bin:ro
       - layerstore_cache:/var/lib/afs/cache
@@ -43,6 +80,15 @@ services:
         fi
         if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_3:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_3:-}" ]]; then
           AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_3}=$${LAYERSTORE_AUTH_TOKEN_3}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_1}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_2:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_2}")
+        fi
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_3:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_3}")
         fi
         exec /usr/local/bin/afs_layerstore_grpcd \
           -listen="$$IP:50051" \

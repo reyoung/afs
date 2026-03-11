@@ -190,13 +190,12 @@ func run(cfg config, cmdArgs []string) error {
 					p.Summary.GetTotalLayers(),
 				)
 			case *afsproxypb.StatusResponse_Layerstore:
-				fmt.Printf("layerstore node=%s endpoint=%s last_seen=%d cache_max_bytes=%d layers=%d images=%d\n",
+				fmt.Printf("layerstore node=%s endpoint=%s last_seen=%d cache_max_bytes=%d layers=%d\n",
 					p.Layerstore.GetNodeId(),
 					p.Layerstore.GetEndpoint(),
 					p.Layerstore.GetLastSeenUnix(),
 					p.Layerstore.GetCacheMaxBytes(),
 					len(p.Layerstore.GetLayers()),
-					len(p.Layerstore.GetCachedImages()),
 				)
 			case *afsproxypb.StatusResponse_Afslet:
 				fmt.Printf("afslet endpoint=%s reachable=%v running=%d cpu=%d/%d mem_mb=%d/%d err=%q\n",

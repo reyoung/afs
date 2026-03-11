@@ -6,6 +6,7 @@ option go_package = "github.com/reyoung/afs/pkg/discoverypb;discoverypb";
 
 service ServiceDiscovery {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ResolveImage(ResolveImageRequest) returns (ResolveImageResponse);
   rpc FindImage(FindImageRequest) returns (FindImageResponse);
 }
 
@@ -14,27 +15,48 @@ message LayerStat {
   int64 afs_size = 2;
 }
 
+message ImageLayer {
+  string digest = 1;
+  string media_type = 2;
+  int64 compressed_size = 3;
+}
+
 message ServiceInstance {
   string node_id = 1;
   string endpoint = 2;
   int64 last_seen_unix = 3;
   repeated string layer_digests = 4;
-  repeated string cached_images = 5;
-  repeated LayerStat layer_stats = 6;
-  int64 cache_max_bytes = 7;
+  repeated LayerStat layer_stats = 5;
+  int64 cache_max_bytes = 6;
 }
 
 message HeartbeatRequest {
   string node_id = 1;
   string endpoint = 2;
   repeated string layer_digests = 3;
-  repeated string cached_images = 4;
   repeated LayerStat layer_stats = 5;
   int64 cache_max_bytes = 6;
 }
 
 message HeartbeatResponse {
   int64 expires_in_seconds = 1;
+}
+
+message ResolveImageRequest {
+  string image = 1;
+  string tag = 2;
+  string platform_os = 3;
+  string platform_arch = 4;
+  string platform_variant = 5;
+  bool force_refresh = 6;
+}
+
+message ResolveImageResponse {
+  string image_key = 1;
+  string resolved_registry = 2;
+  string resolved_repository = 3;
+  string resolved_reference = 4;
+  repeated ImageLayer layers = 5;
 }
 
 message FindImageRequest {

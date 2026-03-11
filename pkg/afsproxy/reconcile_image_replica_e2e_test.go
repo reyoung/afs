@@ -13,6 +13,7 @@ import (
 	"github.com/reyoung/afs/pkg/discovery"
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerstorepb"
+	"github.com/reyoung/afs/pkg/registry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -24,7 +25,7 @@ func TestReconcileImageReplicaE2E(t *testing.T) {
 	defer stopDiscovery()
 
 	imageKey := "nginx|latest|linux|amd64|"
-	_, ls1, stopLS1 := startFakeLayerstoreE2E(t, discAddr, "node-a", []string{imageKey})
+	_, ls1, stopLS1 := startFakeLayerstoreE2E(t, discAddr, "node-a", []string{"sha256:aaa", "sha256:bbb"})
 	defer stopLS1()
 	_, ls2, stopLS2 := startFakeLayerstoreE2E(t, discAddr, "node-b", nil)
 	defer stopLS2()
@@ -102,10 +103,10 @@ type fakeLayerstoreServer struct {
 	endpoint      string
 
 	mu     sync.RWMutex
-	cached map[string]struct{}
+	layers map[string]struct{}
 }
 
-func startFakeLayerstoreE2E(t *testing.T, discoveryAddr, nodeID string, initialImages []string) (string, *fakeLayerstoreServer, func()) {
+func startFakeLayerstoreE2E(t *testing.T, discoveryAddr, nodeID string, initialLayers []string) (string, *fakeLayerstoreServer, func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -115,10 +116,10 @@ func startFakeLayerstoreE2E(t *testing.T, discoveryAddr, nodeID string, initialI
 		discoveryAddr: discoveryAddr,
 		nodeID:        nodeID,
 		endpoint:      lis.Addr().String(),
-		cached:        make(map[string]struct{}),
+		layers:        make(map[string]struct{}),
 	}
-	for _, k := range initialImages {
-		srv.cached[strings.TrimSpace(k)] = struct{}{}
+	for _, k := range initialLayers {
+		srv.layers[strings.TrimSpace(k)] = struct{}{}
 	}
 
 	grpcServer := grpc.NewServer()
@@ -136,30 +137,32 @@ func startFakeLayerstoreE2E(t *testing.T, discoveryAddr, nodeID string, initialI
 	return lis.Addr().String(), srv, stop
 }
 
-func (s *fakeLayerstoreServer) PullImage(ctx context.Context, req *layerstorepb.PullImageRequest) (*layerstorepb.PullImageResponse, error) {
-	imageKey := strings.Join([]string{
-		strings.TrimSpace(req.GetImage()),
-		strings.TrimSpace(req.GetTag()),
-		valueOrDefault(req.GetPlatformOs(), "linux"),
-		valueOrDefault(req.GetPlatformArch(), "amd64"),
-		strings.TrimSpace(req.GetPlatformVariant()),
-	}, "|")
-
+func (s *fakeLayerstoreServer) EnsureLayers(ctx context.Context, req *layerstorepb.EnsureLayersRequest) (*layerstorepb.EnsureLayersResponse, error) {
 	s.mu.Lock()
-	s.cached[imageKey] = struct{}{}
+	for _, layer := range req.GetLayers() {
+		if layer == nil {
+			continue
+		}
+		s.layers[strings.TrimSpace(layer.GetDigest())] = struct{}{}
+	}
 	s.mu.Unlock()
 
 	if err := s.sendHeartbeat(ctx); err != nil {
 		return nil, err
 	}
-	return &layerstorepb.PullImageResponse{}, nil
+	return &layerstorepb.EnsureLayersResponse{}, nil
 }
 
 func (s *fakeLayerstoreServer) hasImage(imageKey string) bool {
+	required := imageLayersForKey(imageKey)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.cached[strings.TrimSpace(imageKey)]
-	return ok
+	for _, digest := range required {
+		if _, ok := s.layers[digest]; !ok {
+			return false
+		}
+	}
+	return len(required) > 0
 }
 
 func (s *fakeLayerstoreServer) sendHeartbeat(ctx context.Context) error {
@@ -173,9 +176,9 @@ func (s *fakeLayerstoreServer) sendHeartbeat(ctx context.Context) error {
 	client := discoverypb.NewServiceDiscoveryClient(conn)
 
 	s.mu.RLock()
-	cached := make([]string, 0, len(s.cached))
-	for k := range s.cached {
-		cached = append(cached, k)
+	layerDigests := make([]string, 0, len(s.layers))
+	for k := range s.layers {
+		layerDigests = append(layerDigests, k)
 	}
 	s.mu.RUnlock()
 
@@ -184,7 +187,7 @@ func (s *fakeLayerstoreServer) sendHeartbeat(ctx context.Context) error {
 	_, err = client.Heartbeat(callCtx, &discoverypb.HeartbeatRequest{
 		NodeId:       s.nodeID,
 		Endpoint:     s.endpoint,
-		CachedImages: cached,
+		LayerDigests: layerDigests,
 	})
 	return err
 }
@@ -196,7 +199,11 @@ func startDiscoveryE2E(t *testing.T) (string, func()) {
 		t.Fatalf("listen discovery: %v", err)
 	}
 	s := grpc.NewServer()
-	discoverypb.RegisterServiceDiscoveryServer(s, discovery.NewService())
+	disc := discovery.NewService()
+	disc.SetResolverFactory(func() discovery.Resolver {
+		return e2eResolver{}
+	})
+	discoverypb.RegisterServiceDiscoveryServer(s, disc)
 	go func() {
 		_ = s.Serve(lis)
 	}()
@@ -206,9 +213,51 @@ func startDiscoveryE2E(t *testing.T) (string, func()) {
 	}
 }
 
-func valueOrDefault(v, d string) string {
-	if s := strings.TrimSpace(v); s != "" {
-		return s
+func imageLayersForKey(imageKey string) []string {
+	switch strings.TrimSpace(imageKey) {
+	case "nginx|latest|linux|amd64|":
+		return []string{"sha256:aaa", "sha256:bbb"}
+	case "busybox|latest|linux|amd64|":
+		return []string{"sha256:ccc"}
+	case "alpine|latest|linux|amd64|":
+		return []string{"sha256:ddd"}
+	default:
+		return nil
 	}
-	return d
+}
+
+type e2eResolver struct{}
+
+func (e2eResolver) GetLayersForPlatform(ctx context.Context, image, tag, os, arch, variant string) ([]registry.Layer, error) {
+	_ = ctx
+	_ = tag
+	_ = os
+	_ = arch
+	_ = variant
+	switch image {
+	case "nginx":
+		return []registry.Layer{
+			{Digest: "sha256:aaa", MediaType: "layer/a", Size: 111},
+			{Digest: "sha256:bbb", MediaType: "layer/b", Size: 222},
+		}, nil
+	case "busybox":
+		return []registry.Layer{{Digest: "sha256:ccc", MediaType: "layer/c", Size: 333}}, nil
+	case "alpine":
+		return []registry.Layer{{Digest: "sha256:ddd", MediaType: "layer/d", Size: 444}}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (e2eResolver) Login(registry, username, password string) error {
+	_ = registry
+	_ = username
+	_ = password
+	return nil
+}
+
+func (e2eResolver) LoginWithToken(registry, token string) error {
+	_ = registry
+	_ = token
+	return nil
 }

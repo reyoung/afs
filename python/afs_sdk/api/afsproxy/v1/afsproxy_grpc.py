@@ -9,17 +9,17 @@ import grpclib.client
 if typing.TYPE_CHECKING:
     import grpclib.server
 
-from . import afsproxy_pb2
+import api.afsproxy.v1.afsproxy_pb2
 
 
 class AfsProxyBase(abc.ABC):
 
     @abc.abstractmethod
-    async def Status(self, stream: 'grpclib.server.Stream[afsproxy_pb2.StatusRequest, afsproxy_pb2.StatusResponse]') -> None:
+    async def Status(self, stream: 'grpclib.server.Stream[api.afsproxy.v1.afsproxy_pb2.StatusRequest, api.afsproxy.v1.afsproxy_pb2.StatusResponse]') -> None:
         pass
 
     @abc.abstractmethod
-    async def ReconcileImageReplica(self, stream: 'grpclib.server.Stream[afsproxy_pb2.ReconcileImageReplicaRequest, afsproxy_pb2.ReconcileImageReplicaResponse]') -> None:
+    async def ReconcileImageReplica(self, stream: 'grpclib.server.Stream[api.afsproxy.v1.afsproxy_pb2.ReconcileImageReplicaRequest, api.afsproxy.v1.afsproxy_pb2.ReconcileImageReplicaResponse]') -> None:
         pass
 
     def __mapping__(self) -> typing.Dict[str, grpclib.const.Handler]:
@@ -27,14 +27,14 @@ class AfsProxyBase(abc.ABC):
             '/afsproxy.v1.AfsProxy/Status': grpclib.const.Handler(
                 self.Status,
                 grpclib.const.Cardinality.UNARY_STREAM,
-                afsproxy_pb2.StatusRequest,
-                afsproxy_pb2.StatusResponse,
+                api.afsproxy.v1.afsproxy_pb2.StatusRequest,
+                api.afsproxy.v1.afsproxy_pb2.StatusResponse,
             ),
             '/afsproxy.v1.AfsProxy/ReconcileImageReplica': grpclib.const.Handler(
                 self.ReconcileImageReplica,
                 grpclib.const.Cardinality.UNARY_UNARY,
-                afsproxy_pb2.ReconcileImageReplicaRequest,
-                afsproxy_pb2.ReconcileImageReplicaResponse,
+                api.afsproxy.v1.afsproxy_pb2.ReconcileImageReplicaRequest,
+                api.afsproxy.v1.afsproxy_pb2.ReconcileImageReplicaResponse,
             ),
         }
 
@@ -45,12 +45,12 @@ class AfsProxyStub:
         self.Status = grpclib.client.UnaryStreamMethod(
             channel,
             '/afsproxy.v1.AfsProxy/Status',
-            afsproxy_pb2.StatusRequest,
-            afsproxy_pb2.StatusResponse,
+            api.afsproxy.v1.afsproxy_pb2.StatusRequest,
+            api.afsproxy.v1.afsproxy_pb2.StatusResponse,
         )
         self.ReconcileImageReplica = grpclib.client.UnaryUnaryMethod(
             channel,
             '/afsproxy.v1.AfsProxy/ReconcileImageReplica',
-            afsproxy_pb2.ReconcileImageReplicaRequest,
-            afsproxy_pb2.ReconcileImageReplicaResponse,
+            api.afsproxy.v1.afsproxy_pb2.ReconcileImageReplicaRequest,
+            api.afsproxy.v1.afsproxy_pb2.ReconcileImageReplicaResponse,
         )

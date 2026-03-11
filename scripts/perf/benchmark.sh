@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${IMAGE:-alpine}"
 TAG="${TAG:-3.20}"
 IMAGE_REF="${IMAGE}:${TAG}"
+DISCOVERY_ADDR="${DISCOVERY_ADDR:-127.0.0.1:60051}"
 WARM_ITERS="${WARM_ITERS:-5}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/.tmp/perf}"
 AFS_CLI="${ROOT_DIR}/dist/linux_amd64/afs_cli"
@@ -12,9 +13,11 @@ AFS_CLI="${ROOT_DIR}/dist/linux_amd64/afs_cli"
 mkdir -p "${OUT_DIR}"
 RAW_CSV="${OUT_DIR}/raw.csv"
 SUMMARY_CSV="${OUT_DIR}/summary.csv"
+LOG_FILE="${OUT_DIR}/benchmark.log"
 EMPTY_DIR="${OUT_DIR}/empty-dir"
 AFS_OUT="${OUT_DIR}/writable-upper.tar.gz"
 mkdir -p "${EMPTY_DIR}"
+: > "${LOG_FILE}"
 
 if [[ ! -x "${AFS_CLI}" ]]; then
   echo "missing ${AFS_CLI}, run: make build-local" >&2
@@ -58,10 +61,11 @@ if [[ -z "${layerstore_ip}" ]]; then
 fi
 
 wait_for_tcp "${layerstore_ip}" 50051 "layerstore"
+wait_for_tcp 127.0.0.1 60051 "discovery"
 wait_for_tcp 127.0.0.1 61051 "afslet"
 wait_for_tcp 127.0.0.1 62051 "afs_proxy"
 
-# Manually pre-pull image into layerstore via PullImage RPC (excluded from benchmark).
+# Manually resolve image and ensure its layers into layerstore (excluded from benchmark).
 TMP_GO="$(mktemp "${OUT_DIR}/prepull_layerstore.XXXXXX.go")"
 trap 'rm -f "${TMP_GO}"' EXIT
 cat > "${TMP_GO}" <<'GOCODE'
@@ -73,33 +77,35 @@ import (
   "fmt"
   "time"
 
+  "github.com/reyoung/afs/pkg/discoverypb"
   "github.com/reyoung/afs/pkg/layerstorepb"
   "google.golang.org/grpc"
   "google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
-  var addr, image, tag string
-  flag.StringVar(&addr, "addr", "", "layerstore addr")
+  var discoveryAddr, layerstoreAddr, image, tag string
+  flag.StringVar(&discoveryAddr, "discovery-addr", "", "discovery addr")
+  flag.StringVar(&layerstoreAddr, "layerstore-addr", "", "layerstore addr")
   flag.StringVar(&image, "image", "", "image")
   flag.StringVar(&tag, "tag", "", "tag")
   flag.Parse()
 
-  if addr == "" || image == "" {
-    panic("-addr and -image are required")
+  if discoveryAddr == "" || layerstoreAddr == "" || image == "" {
+    panic("-discovery-addr, -layerstore-addr and -image are required")
   }
 
   ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
   defer cancel()
 
-  conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+  discoveryConn, err := grpc.DialContext(ctx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
   if err != nil {
     panic(err)
   }
-  defer conn.Close()
+  defer discoveryConn.Close()
 
-  cli := layerstorepb.NewLayerStoreClient(conn)
-  resp, err := cli.PullImage(ctx, &layerstorepb.PullImageRequest{
+  discoveryClient := discoverypb.NewServiceDiscoveryClient(discoveryConn)
+  resolved, err := discoveryClient.ResolveImage(ctx, &discoverypb.ResolveImageRequest{
     Image:        image,
     Tag:          tag,
     PlatformOs:   "linux",
@@ -108,11 +114,45 @@ func main() {
   if err != nil {
     panic(err)
   }
-  fmt.Printf("prepulled layers=%d resolved=%s/%s:%s\n", len(resp.GetLayers()), resp.GetResolvedRegistry(), resp.GetResolvedRepository(), resp.GetResolvedReference())
+
+  layerstoreConn, err := grpc.DialContext(ctx, layerstoreAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+  if err != nil {
+    panic(err)
+  }
+  defer layerstoreConn.Close()
+
+  cli := layerstorepb.NewLayerStoreClient(layerstoreConn)
+  req := &layerstorepb.EnsureLayersRequest{
+    Source: &layerstorepb.LayerSource{
+      Registry:   resolved.GetResolvedRegistry(),
+      Repository: resolved.GetResolvedRepository(),
+    },
+    Layers: make([]*layerstorepb.LayerSpec, 0, len(resolved.GetLayers())),
+  }
+  for _, layer := range resolved.GetLayers() {
+    if layer == nil {
+      continue
+    }
+    req.Layers = append(req.Layers, &layerstorepb.LayerSpec{
+      Digest:         layer.GetDigest(),
+      MediaType:      layer.GetMediaType(),
+      CompressedSize: layer.GetCompressedSize(),
+    })
+  }
+  resp, err := cli.EnsureLayers(ctx, req)
+  if err != nil {
+    panic(err)
+  }
+  fmt.Printf("ensured layers=%d resolved=%s/%s:%s\n",
+    len(resp.GetLayers()),
+    resolved.GetResolvedRegistry(),
+    resolved.GetResolvedRepository(),
+    resolved.GetResolvedReference(),
+  )
 }
 GOCODE
 
-go run "${TMP_GO}" -addr "${layerstore_ip}:50051" -image "${IMAGE}" -tag "${TAG}" >/dev/null
+go run "${TMP_GO}" -discovery-addr "${DISCOVERY_ADDR}" -layerstore-addr "${layerstore_ip}:50051" -image "${IMAGE}" -tag "${TAG}" >/dev/null
 
 printf 'scenario,phase,iteration,elapsed_ms\n' > "${RAW_CSV}"
 
@@ -123,7 +163,7 @@ measure_once() {
   shift 3
   local start end elapsed
   start="$(date +%s%3N)"
-  "$@" >/dev/null
+  "$@" >>"${LOG_FILE}" 2>&1
   end="$(date +%s%3N)"
   elapsed=$((end - start))
   printf '%s,%s,%s,%s\n' "${scenario}" "${phase}" "${iteration}" "${elapsed}" >> "${RAW_CSV}"
@@ -174,4 +214,5 @@ PY
 
 echo "raw=${RAW_CSV}"
 echo "summary=${SUMMARY_CSV}"
+echo "log=${LOG_FILE}"
 cat "${SUMMARY_CSV}"

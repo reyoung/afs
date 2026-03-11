@@ -54,19 +54,20 @@ func TestIntegrationMountReadRecoversAfterLayerFileDeleted(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	authConfigs := integrationAuthConfigs(t)
-
-	discAddr, stopDiscovery := startDiscoveryServer(t)
-	defer stopDiscovery()
+	authConfigs := integrationAuthConfigsForImage(t, image)
+	mirrors := integrationRegistryMirrorsForImage(t, image)
 
 	cache1 := filepath.Join(t.TempDir(), "cache-1")
 	cache2 := filepath.Join(t.TempDir(), "cache-2")
-	lsAddr1, stopLS1 := startLayerstoreServer(t, cache1, authConfigs)
+	lsAddr1, stopLS1 := startLayerstoreServer(t, cache1, authConfigs, mirrors)
 	defer stopLS1()
-	lsAddr2, stopLS2 := startLayerstoreServer(t, cache2, authConfigs)
+	lsAddr2, stopLS2 := startLayerstoreServer(t, cache2, authConfigs, mirrors)
 	defer stopLS2()
 
-	pull1 := pullImage(t, ctx, lsAddr1, image, tag)
+	discAddr, stopDiscovery := startDiscoveryServer(t, toDiscoveryAuthConfigs(authConfigs), mirrors)
+	defer stopDiscovery()
+
+	pull1 := pullImage(t, ctx, discAddr, lsAddr1, image, tag)
 	if len(pull1.GetLayers()) == 0 {
 		t.Fatalf("no layers pulled for image=%s tag=%s", image, tag)
 	}
@@ -78,10 +79,9 @@ func TestIntegrationMountReadRecoversAfterLayerFileDeleted(t *testing.T) {
 	targetEntryPath, expected := pickReadableFileFromLayer(t, targetLayerPath)
 	t.Logf("target digest=%s file=%s", targetDigest, targetEntryPath)
 
-	imageKeyVal := imageKey(image, tag, "linux", "amd64", "")
 	layerDigests := digestsFromPull(pull1)
-	heartbeat(t, ctx, discAddr, "node-1", lsAddr1, imageKeyVal, layerDigests)
-	heartbeat(t, ctx, discAddr, "node-2", lsAddr2, imageKeyVal, layerDigests)
+	heartbeat(t, ctx, discAddr, "node-1", lsAddr1, layerDigests)
+	heartbeat(t, ctx, discAddr, "node-2", lsAddr2, layerDigests)
 
 	mountpoint := filepath.Join(t.TempDir(), "mnt")
 	workDir := filepath.Join(t.TempDir(), "work")
@@ -164,14 +164,21 @@ func TestIntegrationMountReadRecoversAfterLayerFileDeleted(t *testing.T) {
 	}
 }
 
-func startDiscoveryServer(t *testing.T) (addr string, stop func()) {
+func startDiscoveryServer(t *testing.T, authConfigs []discovery.RegistryAuthConfig, mirrors map[string][]string) (addr string, stop func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen discovery: %v", err)
 	}
+	svc := discovery.NewService()
+	if err := svc.SetRegistryAuthConfigs(authConfigs); err != nil {
+		t.Fatalf("set discovery auth configs: %v", err)
+	}
+	if len(mirrors) > 0 {
+		svc.SetRegistryMirrors(mirrors)
+	}
 	s := grpc.NewServer()
-	discoverypb.RegisterServiceDiscoveryServer(s, discovery.NewService())
+	discoverypb.RegisterServiceDiscoveryServer(s, svc)
 	go func() { _ = s.Serve(lis) }()
 	return lis.Addr().String(), func() {
 		s.Stop()
@@ -179,11 +186,14 @@ func startDiscoveryServer(t *testing.T) (addr string, stop func()) {
 	}
 }
 
-func startLayerstoreServer(t *testing.T, cacheDir string, authConfigs []layerstore.RegistryAuthConfig) (addr string, stop func()) {
+func startLayerstoreServer(t *testing.T, cacheDir string, authConfigs []layerstore.RegistryAuthConfig, mirrors map[string][]string) (addr string, stop func()) {
 	t.Helper()
 	svc, err := layerstore.NewService(cacheDir, authConfigs)
 	if err != nil {
 		t.Fatalf("new layerstore service: %v", err)
+	}
+	if len(mirrors) > 0 {
+		svc.SetRegistryMirrors(mirrors)
 	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -219,8 +229,39 @@ func integrationAuthConfigs(t *testing.T) []layerstore.RegistryAuthConfig {
 	}}
 }
 
-func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *layerstorepb.PullImageResponse {
+func toDiscoveryAuthConfigs(in []layerstore.RegistryAuthConfig) []discovery.RegistryAuthConfig {
+	out := make([]discovery.RegistryAuthConfig, 0, len(in))
+	for _, cfg := range in {
+		out = append(out, discovery.RegistryAuthConfig{
+			RegistryHost: cfg.RegistryHost,
+			Username:     cfg.Username,
+			Password:     cfg.Password,
+			BearerToken:  cfg.BearerToken,
+		})
+	}
+	return out
+}
+
+func pullImage(t *testing.T, ctx context.Context, discoveryAddr, endpoint, image, tag string) *discoverypb.ResolveImageResponse {
 	t.Helper()
+	discoveryConn, err := grpc.DialContext(ctx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("dial discovery %s: %v", discoveryAddr, err)
+	}
+	defer discoveryConn.Close()
+	discoveryClient := discoverypb.NewServiceDiscoveryClient(discoveryConn)
+	resolveCtx, resolveCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer resolveCancel()
+	resolved, err := discoveryClient.ResolveImage(resolveCtx, &discoverypb.ResolveImageRequest{
+		Image:        image,
+		Tag:          tag,
+		PlatformOs:   "linux",
+		PlatformArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("resolve image %s:%s: %v", image, tag, err)
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(dialCtx, endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
@@ -231,20 +272,31 @@ func pullImage(t *testing.T, ctx context.Context, endpoint, image, tag string) *
 	client := layerstorepb.NewLayerStoreClient(conn)
 	callCtx, callCancel := context.WithTimeout(ctx, 12*time.Minute)
 	defer callCancel()
-	resp, err := client.PullImage(callCtx, &layerstorepb.PullImageRequest{
-		Image:           image,
-		Tag:             tag,
-		PlatformOs:      "linux",
-		PlatformArch:    "amd64",
-		ForceLocalFetch: false,
-	})
-	if err != nil {
-		t.Fatalf("pull image from %s (%s:%s): %v", endpoint, image, tag, err)
+	req := &layerstorepb.EnsureLayersRequest{
+		Source: &layerstorepb.LayerSource{
+			Registry:   resolved.GetResolvedRegistry(),
+			Repository: resolved.GetResolvedRepository(),
+		},
+		Layers: make([]*layerstorepb.LayerSpec, 0, len(resolved.GetLayers())),
 	}
-	return resp
+	for _, layer := range resolved.GetLayers() {
+		if layer == nil {
+			continue
+		}
+		req.Layers = append(req.Layers, &layerstorepb.LayerSpec{
+			Digest:         layer.GetDigest(),
+			MediaType:      layer.GetMediaType(),
+			CompressedSize: layer.GetCompressedSize(),
+		})
+	}
+	_, err = client.EnsureLayers(callCtx, req)
+	if err != nil {
+		t.Fatalf("ensure image on %s (%s:%s): %v", endpoint, image, tag, err)
+	}
+	return resolved
 }
 
-func heartbeat(t *testing.T, ctx context.Context, discoveryAddr, nodeID, endpoint, imageKeyVal string, layerDigests []string) {
+func heartbeat(t *testing.T, ctx context.Context, discoveryAddr, nodeID, endpoint string, layerDigests []string) {
 	t.Helper()
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -260,13 +312,12 @@ func heartbeat(t *testing.T, ctx context.Context, discoveryAddr, nodeID, endpoin
 		NodeId:       nodeID,
 		Endpoint:     endpoint,
 		LayerDigests: layerDigests,
-		CachedImages: []string{imageKeyVal},
 	}); err != nil {
 		t.Fatalf("heartbeat %s -> %s: %v", nodeID, endpoint, err)
 	}
 }
 
-func digestsFromPull(resp *layerstorepb.PullImageResponse) []string {
+func digestsFromPull(resp *discoverypb.ResolveImageResponse) []string {
 	out := make([]string, 0, len(resp.GetLayers()))
 	for _, l := range resp.GetLayers() {
 		out = append(out, l.GetDigest())

@@ -126,7 +126,6 @@ class AfsClient:
                         last_seen_unix=p.last_seen_unix,
                         cache_max_bytes=p.cache_max_bytes,
                         layers=layers,
-                        cached_images=list(p.cached_images),
                     )
                 elif kind == "afslet":
                     p = resp.afslet
@@ -166,7 +165,6 @@ class AfsClient:
                     last_seen_unix=p.last_seen_unix,
                     cache_max_bytes=p.cache_max_bytes,
                     layers=layers,
-                    cached_images=list(p.cached_images),
                 )
             elif kind == "afslet":
                 p = resp.afslet

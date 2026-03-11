@@ -282,17 +282,31 @@ func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, di
 	if err != nil {
 		return nil, err
 	}
+	return c.DownloadLayerFromRepository(ctx, ref.Registry, ref.Repository, digest)
+}
 
-	hosts := c.requestHosts(ref.Registry)
+// DownloadLayerFromRepository downloads a layer blob using resolved registry/repository identity.
+func (c *Client) DownloadLayerFromRepository(ctx context.Context, registryHost string, repository string, digest string) (io.ReadCloser, error) {
+	if strings.TrimSpace(registryHost) == "" {
+		return nil, fmt.Errorf("registry host must not be empty")
+	}
+	if strings.TrimSpace(repository) == "" {
+		return nil, fmt.Errorf("repository must not be empty")
+	}
+	if strings.TrimSpace(digest) == "" {
+		return nil, fmt.Errorf("digest must not be empty")
+	}
+
+	hosts := c.requestHosts(registryHost)
 	var lastErr error
 	for i, host := range hosts {
-		u := fmt.Sprintf("https://%s/v2/%s/blobs/%s", host, ref.Repository, digest)
+		u := fmt.Sprintf("https://%s/v2/%s/blobs/%s", host, repository, digest)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, err
 		}
 
-		resp, err := c.doWithAuth(ctx, req, host, ref.Repository)
+		resp, err := c.doWithAuth(ctx, req, host, repository)
 		if err != nil {
 			lastErr = err
 			continue
@@ -312,7 +326,7 @@ func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, di
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("download layer failed: no available hosts for %s", ref.Registry)
+	return nil, fmt.Errorf("download layer failed: no available hosts for %s", registryHost)
 }
 
 func (c *Client) doWithAuth(ctx context.Context, req *http.Request, registry, repository string) (*http.Response, error) {
@@ -329,6 +343,16 @@ func (c *Client) doWithAuth(ctx context.Context, req *http.Request, registry, re
 
 	challenge := resp.Header.Get("Www-Authenticate")
 	resp.Body.Close()
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(challenge)), "bearer ") {
+		if cfg.username == "" {
+			return nil, fmt.Errorf("unsupported registry auth challenge: %q", challenge)
+		}
+		retry := req.Clone(ctx)
+		copyHeaders(retry.Header, req.Header)
+		retry.Header.Del("Authorization")
+		retry.SetBasicAuth(cfg.username, cfg.password)
+		return c.httpClient.Do(retry)
+	}
 	realm, service, scope, err := parseBearerChallenge(challenge)
 	if err != nil {
 		return nil, fmt.Errorf("registry auth challenge: %w", err)
@@ -515,9 +539,5 @@ func applyAuthHeader(req *http.Request, cfg authConfig) {
 	}
 	if cfg.bearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.bearerToken)
-		return
-	}
-	if cfg.username != "" {
-		req.SetBasicAuth(cfg.username, cfg.password)
 	}
 }

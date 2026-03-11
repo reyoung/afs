@@ -10,16 +10,17 @@ Builds a runnable rootfs mountpoint for an image by combining:
 
 ## Talks To
 
-- Discovery (`FindImage`) for provider selection.
-- Layerstore (`PullImage`, `ReadLayer`, etc.) for image metadata and layer bytes.
+- Discovery (`ResolveImage`, `FindImage`) for image resolution and provider selection.
+- Layerstore (`EnsureLayers`, `ReadLayer`, etc.) for layer materialization and bytes.
 
 ## Local Mount Pipeline
 
-1. Resolve candidate layerstore services from discovery.
-2. Pull image metadata from a chosen provider.
-3. Mount each image layer with FUSE reader.
-4. Compose union mount (`fuse-overlayfs`) as final rootfs.
-5. Optionally mount `/proc` and `/dev` into rootfs.
+1. Resolve image in discovery and get ordered layer metadata.
+2. Ask discovery for complete image providers.
+3. If no suitable provider exists, select a layerstore and call `EnsureLayers`.
+4. Mount each image layer with FUSE reader.
+5. Compose union mount (`fuse-overlayfs`) as final rootfs.
+6. Optionally mount `/proc` and `/dev` into rootfs.
 
 ## Reliability Behavior
 

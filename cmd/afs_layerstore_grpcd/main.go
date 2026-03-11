@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -116,10 +114,7 @@ func main() {
 	if len(registryMirrors) > 0 {
 		svc.SetRegistryMirrors(registryMirrors)
 	}
-	svc.SetPeerFetchConfig(listenAddr, discoveryEndpoints)
 	log.Printf("layer cache limit bytes=%s", strconv.FormatInt(svc.CacheLimitBytes(), 10))
-	var pendingMu sync.RWMutex
-	pending := make(map[string]struct{})
 	heartbeatNow := make(chan struct{}, 1)
 	triggerHeartbeat := func() {
 		select {
@@ -127,18 +122,7 @@ func main() {
 		default:
 		}
 	}
-	svc.SetPullImageReporter(func(imgKey string, pulling bool) {
-		pendingMu.Lock()
-		defer pendingMu.Unlock()
-		if pulling {
-			pending[imgKey] = struct{}{}
-			triggerHeartbeat()
-			return
-		}
-		delete(pending, imgKey)
-		triggerHeartbeat()
-	})
-	svc.SetEvictionReporter(triggerHeartbeat)
+	svc.SetCacheChangeReporter(triggerHeartbeat)
 
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -157,15 +141,7 @@ func main() {
 		if endpoint == "" {
 			continue
 		}
-		go registerHeartbeatLoop(ctx, endpoint, nodeID, listenAddr, cacheDir, svc.CacheLimitBytes(), func() []string {
-			pendingMu.RLock()
-			defer pendingMu.RUnlock()
-			out := make([]string, 0, len(pending))
-			for k := range pending {
-				out = append(out, k)
-			}
-			return out
-		}, heartbeatNow)
+		go registerHeartbeatLoop(ctx, endpoint, nodeID, listenAddr, cacheDir, svc.CacheLimitBytes(), heartbeatNow)
 	}
 
 	go func() {
@@ -184,7 +160,7 @@ func main() {
 	grpcServer.GracefulStop()
 }
 
-func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, cacheMaxBytes int64, pendingImages func() []string, trigger <-chan struct{}) {
+func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, cacheMaxBytes int64, trigger <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -194,23 +170,17 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 			log.Printf("heartbeat scan cache failed: discovery=%s err=%v", discoveryAddr, err)
 			layerStats = nil
 		}
-		images, err := scanCachedImageKeys(cacheDir)
-		if err != nil {
-			log.Printf("heartbeat scan image metadata failed: discovery=%s err=%v", discoveryAddr, err)
-			images = nil
-		}
-		images = mergeStringSets(images, pendingImages())
 		targets, err := expandHeartbeatTargets(ctx, discoveryAddr)
 		if err != nil {
 			log.Printf("heartbeat resolve failed: discovery=%s err=%v", discoveryAddr, err)
 			return
 		}
 		for _, target := range targets {
-			if err := sendHeartbeatOnce(ctx, target, nodeID, endpoint, layerStats, images, cacheMaxBytes); err != nil {
+			if err := sendHeartbeatOnce(ctx, target, nodeID, endpoint, layerStats, cacheMaxBytes); err != nil {
 				log.Printf("heartbeat failed: discovery=%s target=%s err=%v", discoveryAddr, target, err)
 				continue
 			}
-			log.Printf("heartbeat sent: discovery=%s target=%s endpoint=%s layers=%d images=%d cache_max_bytes=%d", discoveryAddr, target, endpoint, len(layerStats), len(images), cacheMaxBytes)
+			log.Printf("heartbeat sent: discovery=%s target=%s endpoint=%s layers=%d cache_max_bytes=%d", discoveryAddr, target, endpoint, len(layerStats), cacheMaxBytes)
 		}
 	}
 
@@ -227,7 +197,7 @@ func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint,
 	}
 }
 
-func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, layerStats []*discoverypb.LayerStat, images []string, cacheMaxBytes int64) error {
+func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, layerStats []*discoverypb.LayerStat, cacheMaxBytes int64) error {
 	hbCtx, hbCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer hbCancel()
 
@@ -249,7 +219,6 @@ func sendHeartbeatOnce(ctx context.Context, target, nodeID, endpoint string, lay
 		NodeId:        nodeID,
 		Endpoint:      endpoint,
 		LayerDigests:  layerDigests,
-		CachedImages:  images,
 		LayerStats:    layerStats,
 		CacheMaxBytes: cacheMaxBytes,
 	})
@@ -339,87 +308,6 @@ func scanCachedLayerStats(cacheDir string) ([]*discoverypb.LayerStat, error) {
 		}
 	}
 	return out, nil
-}
-
-type cachedMeta struct {
-	Image           string `json:"image"`
-	Tag             string `json:"tag"`
-	PlatformOS      string `json:"platform_os"`
-	PlatformArch    string `json:"platform_arch"`
-	PlatformVariant string `json:"platform_variant"`
-}
-
-func scanCachedImageKeys(cacheDir string) ([]string, error) {
-	metadataDir := filepath.Join(cacheDir, "metadata")
-	entries, err := os.ReadDir(metadataDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	seen := make(map[string]struct{})
-	out := make([]string, 0, len(entries))
-	for _, ent := range entries {
-		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(metadataDir, ent.Name())
-		b, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var m cachedMeta
-		if err := json.Unmarshal(b, &m); err != nil {
-			continue
-		}
-		if strings.TrimSpace(m.Image) == "" {
-			continue
-		}
-		key := imageKey(m.Image, m.Tag, m.PlatformOS, m.PlatformArch, m.PlatformVariant)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, key)
-	}
-	return out, nil
-}
-
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
-	return strings.Join([]string{
-		strings.TrimSpace(image),
-		strings.TrimSpace(tag),
-		strings.TrimSpace(platformOS),
-		strings.TrimSpace(platformArch),
-		strings.TrimSpace(platformVariant),
-	}, "|")
-}
-
-func mergeStringSets(a, b []string) []string {
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, v := range a {
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	for _, v := range b {
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
 }
 
 func validateListenEndpoint(v string) error {

@@ -43,7 +43,6 @@ message LayerstoreInstance {
   int64 last_seen_unix = 3;
   int64 cache_max_bytes = 4;
   repeated LayerInfo layers = 5;
-  repeated string cached_images = 6;
 }
 
 message LayerInfo {
