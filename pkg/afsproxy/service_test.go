@@ -72,6 +72,34 @@ func TestParseBoolDefaultTrue(t *testing.T) {
 	}
 }
 
+func TestSortCandidatesByAvailableCache(t *testing.T) {
+	t.Parallel()
+
+	// node-a: cache_max=100MB, used=0 → avail=100MB
+	// node-b: cache_max=500MB, used=0 → avail=500MB
+	// node-c: cache_max=300MB, used=100MB → avail=200MB
+	// node-d: cache_max=0 → avail=0 (no cache info)
+	svcByEndpoint := map[string]*discoverypb.ServiceInstance{
+		"node-a:50051": {CacheMaxBytes: 100 * 1024 * 1024},
+		"node-b:50051": {CacheMaxBytes: 500 * 1024 * 1024},
+		"node-c:50051": {
+			CacheMaxBytes: 300 * 1024 * 1024,
+			LayerStats:    []*discoverypb.LayerStat{{AfsSize: 100 * 1024 * 1024}},
+		},
+		"node-d:50051": {CacheMaxBytes: 0},
+	}
+
+	candidates := []string{"node-a:50051", "node-b:50051", "node-c:50051", "node-d:50051"}
+	sortCandidatesByAvailableCache(candidates, svcByEndpoint)
+
+	want := []string{"node-b:50051", "node-c:50051", "node-a:50051", "node-d:50051"}
+	for i, ep := range candidates {
+		if ep != want[i] {
+			t.Fatalf("candidates[%d]=%q, want %q (full order: %v)", i, ep, want[i], candidates)
+		}
+	}
+}
+
 func TestReconcileImageReplica(t *testing.T) {
 	t.Parallel()
 
