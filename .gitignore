@@ -1,4 +1,5 @@
 dist
+.tmp/
 .idea
 
 cmd/layer_mount/tmp

@@ -506,5 +506,30 @@ func runReconcileImageReplicaSubcommand(args []string, out io.Writer) error {
 		resp.GetRequestedReplica(),
 		resp.GetEnsured(),
 	)
+	for _, layer := range resp.GetLayers() {
+		if layer == nil {
+			continue
+		}
+		instances := make([]string, 0, len(layer.GetInstances()))
+		for _, inst := range layer.GetInstances() {
+			if inst == nil {
+				continue
+			}
+			nodeID := strings.TrimSpace(inst.GetNodeId())
+			endpoint := strings.TrimSpace(inst.GetEndpoint())
+			if nodeID != "" && endpoint != "" {
+				instances = append(instances, nodeID+"@"+endpoint)
+				continue
+			}
+			if endpoint != "" {
+				instances = append(instances, endpoint)
+				continue
+			}
+			if nodeID != "" {
+				instances = append(instances, nodeID)
+			}
+		}
+		_, _ = fmt.Fprintf(out, "layer digest=%s instances=%s\n", layer.GetDigest(), strings.Join(instances, ","))
+	}
 	return nil
 }

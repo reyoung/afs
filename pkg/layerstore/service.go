@@ -298,6 +298,103 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	return result, nil
 }
 
+func (s *Service) EnsureLayers(ctx context.Context, req *layerstorepb.EnsureLayersRequest) (*layerstorepb.EnsureLayersResponse, error) {
+	if req == nil || strings.TrimSpace(req.GetImage()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "image is required")
+	}
+	if len(req.GetLayers()) == 0 {
+		return &layerstorepb.EnsureLayersResponse{}, nil
+	}
+
+	ref, err := registry.ParseImageReference(req.GetImage(), req.GetTag())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
+	}
+
+	f := s.newFetcher()
+	if err := s.applyConfiguredAuth(f, ref.Registry); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "registry auth config: %v", err)
+	}
+	if err := s.applyConfiguredMirrors(f); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "registry mirror config: %v", err)
+	}
+
+	seen := make(map[string]struct{}, len(req.GetLayers()))
+	layers := make([]registry.Layer, 0, len(req.GetLayers()))
+	for _, layer := range req.GetLayers() {
+		if layer == nil {
+			continue
+		}
+		digest := strings.TrimSpace(layer.GetDigest())
+		if digest == "" {
+			continue
+		}
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+		seen[digest] = struct{}{}
+		layers = append(layers, registry.Layer{
+			Digest:    digest,
+			MediaType: strings.TrimSpace(layer.GetMediaType()),
+			Size:      layer.GetCompressedSize(),
+		})
+	}
+	if len(layers) == 0 {
+		return &layerstorepb.EnsureLayersResponse{}, nil
+	}
+
+	releaseReservation, reserveErr := s.reservePullSpace(layers)
+	if reserveErr != nil {
+		return nil, reserveErr
+	}
+	defer releaseReservation()
+
+	results := make([]*layerstorepb.Layer, len(layers))
+	errCh := make(chan error, len(layers))
+	var wg sync.WaitGroup
+	for i, layer := range layers {
+		i := i
+		layer := layer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			results[i] = &layerstorepb.Layer{
+				Digest:         layer.Digest,
+				MediaType:      layer.MediaType,
+				CompressedSize: layer.Size,
+				AfsSize:        afsSize,
+				CachePath:      cachePath,
+				Cached:         cached,
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	mutated := false
+	for _, layer := range results {
+		if layer != nil && !layer.GetCached() {
+			mutated = true
+			break
+		}
+	}
+	if mutated && s.evictReport != nil {
+		s.evictReport()
+	}
+
+	return &layerstorepb.EnsureLayersResponse{Layers: results}, nil
+}
+
 func (s *Service) SetPullImageReporter(fn func(imageKey string, pulling bool)) {
 	s.pullReport = fn
 }

@@ -22,6 +22,15 @@ func (s *fakeProxyServer) ReconcileImageReplica(ctx context.Context, req *afspro
 		CurrentReplica:   2,
 		RequestedReplica: req.GetReplica(),
 		Ensured:          req.GetReplica() <= 2,
+		Layers: []*afsproxypb.ReconciledLayerPlacement{
+			{
+				Digest: "sha256:layer-a",
+				Instances: []*afsproxypb.LayerstoreTarget{
+					{NodeId: "node-a", Endpoint: "10.0.0.1:50051"},
+					{NodeId: "node-b", Endpoint: "10.0.0.2:50051"},
+				},
+			},
+		},
 	}, nil
 }
 
@@ -65,6 +74,12 @@ func TestRunReconcileImageReplicaSubcommand(t *testing.T) {
 		t.Fatalf("unexpected output: %q", got)
 	}
 	if !strings.Contains(got, "ensured=true") {
+		t.Fatalf("unexpected output: %q", got)
+	}
+	if !strings.Contains(got, "layer digest=sha256:layer-a") {
+		t.Fatalf("unexpected output: %q", got)
+	}
+	if !strings.Contains(got, "instances=node-a@10.0.0.1:50051,node-b@10.0.0.2:50051") {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }

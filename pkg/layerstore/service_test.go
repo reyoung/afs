@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -281,6 +282,81 @@ func TestPullImageForceBypassesMetadataCache(t *testing.T) {
 	}
 }
 
+func TestEnsureLayersDownloadsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerA := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+	layerB := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2"
+	layerBytesA := buildTarGzip(t, map[string]string{"a.txt": "layer-a"})
+	layerBytesB := buildTarGzip(t, map[string]string{"b.txt": "layer-b"})
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	var mu sync.Mutex
+	current := 0
+	maxConcurrent := 0
+
+	fake := &fakeFetcher{
+		byDigest: map[string][]byte{
+			layerA: layerBytesA,
+			layerB: layerBytesB,
+		},
+		onDownload: func(digest string) {
+			_ = digest
+			mu.Lock()
+			current++
+			if current > maxConcurrent {
+				maxConcurrent = current
+			}
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			mu.Lock()
+			current--
+			mu.Unlock()
+		},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := svc.EnsureLayers(ctx, &layerstorepb.EnsureLayersRequest{
+			Image: "busybox",
+			Tag:   "latest",
+			Layers: []*layerstorepb.Layer{
+				{Digest: layerA, MediaType: layerformat.OCILayerTarGzipMediaType, CompressedSize: int64(len(layerBytesA))},
+				{Digest: layerB, MediaType: layerformat.OCILayerTarGzipMediaType, CompressedSize: int64(len(layerBytesB))},
+			},
+		})
+		errCh <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("download %d did not start before timeout", i+1)
+		}
+	}
+	close(release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("EnsureLayers: %v", err)
+	}
+	if maxConcurrent < 2 {
+		t.Fatalf("maxConcurrent=%d, want at least 2", maxConcurrent)
+	}
+}
+
 func TestHasImage(t *testing.T) {
 	t.Parallel()
 
@@ -463,10 +539,12 @@ func TestReservePullSpaceConcurrentAccounting(t *testing.T) {
 }
 
 type fakeFetcher struct {
+	mu             sync.Mutex
 	layers         []registry.Layer
 	byDigest       map[string][]byte
 	downloadCalls  int
 	getLayersCalls int
+	onDownload     func(digest string)
 }
 
 func (f *fakeFetcher) GetLayersForPlatform(ctx context.Context, image, tag, os, arch, variant string) ([]registry.Layer, error) {
@@ -476,16 +554,26 @@ func (f *fakeFetcher) GetLayersForPlatform(ctx context.Context, image, tag, os, 
 	_ = os
 	_ = arch
 	_ = variant
+	f.mu.Lock()
 	f.getLayersCalls++
-	return append([]registry.Layer(nil), f.layers...), nil
+	layers := append([]registry.Layer(nil), f.layers...)
+	f.mu.Unlock()
+	return layers, nil
 }
 
 func (f *fakeFetcher) DownloadLayer(ctx context.Context, image, tag, digest string) (io.ReadCloser, error) {
 	_ = ctx
 	_ = image
 	_ = tag
+	f.mu.Lock()
 	f.downloadCalls++
-	return io.NopCloser(bytes.NewReader(f.byDigest[digest])), nil
+	payload := append([]byte(nil), f.byDigest[digest]...)
+	onDownload := f.onDownload
+	f.mu.Unlock()
+	if onDownload != nil {
+		onDownload(digest)
+	}
+	return io.NopCloser(bytes.NewReader(payload)), nil
 }
 
 func (f *fakeFetcher) Login(registry, username, password string) error {

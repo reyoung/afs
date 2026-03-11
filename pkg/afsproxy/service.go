@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,6 +95,33 @@ type dispatchStatusResponse struct {
 	ClusterDispatching int64  `json:"cluster_dispatching"`
 	QueriedPeers       int    `json:"queried_peers"`
 	PeerErrors         int    `json:"peer_errors"`
+}
+
+func availableCacheBytes(svc *discoverypb.ServiceInstance) int64 {
+	if svc == nil {
+		return 0
+	}
+	max := svc.GetCacheMaxBytes()
+	if max <= 0 {
+		return 0
+	}
+	var used int64
+	for _, ls := range svc.GetLayerStats() {
+		used += ls.GetAfsSize()
+	}
+	available := max - used
+	if available < 0 {
+		return 0
+	}
+	return available
+}
+
+func sortCandidatesByAvailableCache(candidates []string, svcByEndpoint map[string]*discoverypb.ServiceInstance) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := availableCacheBytes(svcByEndpoint[candidates[i]])
+		right := availableCacheBytes(svcByEndpoint[candidates[j]])
+		return left > right
+	})
 }
 
 func NewService(cfg Config) *Service {
@@ -379,66 +407,51 @@ func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.Rec
 		valueOrDefault(req.GetPlatformArch(), defaultPlatformArch),
 		req.GetPlatformVariant(),
 	)
-
-	services, err := s.fetchDiscoveryImageProviders(ctx, imageKey)
+	resolved, err := s.resolveImage(ctx, req)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "query discovery: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "resolve image: %v", err)
 	}
+	targetLayers := uniqueResolvedLayers(resolved.GetLayers())
 
-	currentReplica := countImageReplica(services)
 	requestedReplica := req.GetReplica()
-	if int32(currentReplica) >= requestedReplica {
-		return &afsproxypb.ReconcileImageReplicaResponse{
-			ImageKey:         imageKey,
-			CurrentReplica:   int32(currentReplica),
-			RequestedReplica: requestedReplica,
-			Ensured:          true,
-		}, nil
+	if len(targetLayers) == 0 {
+		return buildReconcileImageReplicaResponse(imageKey, requestedReplica, 0, requestedReplica == 0, nil, nil), nil
 	}
 
 	allServices, err := s.fetchDiscoveryProviders(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "query discovery candidates: %v", err)
 	}
-
-	already := endpointsWithImage(services)
-	candidates := make([]string, 0, len(allServices))
-	for _, svc := range allServices {
-		if svc == nil {
-			continue
-		}
-		ep := strings.TrimSpace(svc.GetEndpoint())
-		if ep == "" {
-			continue
-		}
-		if _, ok := already[ep]; ok {
-			continue
-		}
-		already[ep] = struct{}{}
-		candidates = append(candidates, ep)
+	currentReplica := minLayerReplica(targetLayers, allServices)
+	if int32(currentReplica) >= requestedReplica {
+		return buildReconcileImageReplicaResponse(imageKey, requestedReplica, int32(currentReplica), true, targetLayers, allServices), nil
 	}
 
-	for _, ep := range candidates {
-		if int32(currentReplica) >= requestedReplica {
-			break
+	plan := planLayerReplicaAssignments(targetLayers, int(requestedReplica), allServices)
+	if len(plan) > 0 {
+		if execErr := s.ensureLayerReplicaPlan(ctx, req, plan); execErr != nil {
+			log.Printf("[reconcile-image] ensure plan completed with errors image=%s tag=%s err=%v", req.GetImage(), req.GetTag(), execErr)
 		}
-		if err := s.pullImageOnLayerstore(ctx, ep, req); err != nil {
-			log.Printf("[reconcile-image] pull failed endpoint=%s image=%s tag=%s err=%v", ep, req.GetImage(), req.GetTag(), err)
-			continue
-		}
-		currentReplica++
 	}
-
-	confirmedReplica, err := s.waitDiscoveryReplica(ctx, imageKey, currentReplica)
-	if err == nil {
+	confirmedReplica, waitErr := s.waitLayerReplica(ctx, targetLayers, int(requestedReplica))
+	if waitErr == nil {
 		currentReplica = confirmedReplica
 	}
-	return &afsproxypb.ReconcileImageReplicaResponse{
-		ImageKey:         imageKey,
-		CurrentReplica:   int32(currentReplica),
-		RequestedReplica: requestedReplica,
-		Ensured:          int32(currentReplica) >= requestedReplica,
-	}, nil
+	responseServices := allServices
+	if refreshedServices, refreshErr := s.fetchDiscoveryProviders(ctx); refreshErr == nil {
+		responseServices = refreshedServices
+		currentReplica = minLayerReplica(targetLayers, refreshedServices)
+	} else if waitErr != nil {
+		currentReplica = minLayerReplica(targetLayers, allServices)
+	}
+	return buildReconcileImageReplicaResponse(
+		imageKey,
+		requestedReplica,
+		int32(currentReplica),
+		int32(currentReplica) >= requestedReplica,
+		targetLayers,
+		responseServices,
+	), nil
 }
 
 func (s *Service) HandleStatusHTTP(w http.ResponseWriter, r *http.Request) {
@@ -732,81 +745,7 @@ func (s *Service) fetchDiscoveryProviders(ctx context.Context) ([]*discoverypb.S
 	return nil, fmt.Errorf("no discovery targets available")
 }
 
-func (s *Service) fetchDiscoveryImageProviders(ctx context.Context, imageKey string) ([]*discoverypb.ServiceInstance, error) {
-	if strings.TrimSpace(imageKey) == "" {
-		return nil, fmt.Errorf("image key is empty")
-	}
-	if strings.TrimSpace(s.discoveryTarget) == "" {
-		return nil, fmt.Errorf("discovery target is empty")
-	}
-	targets, err := resolveHostPorts(ctx, s.discoveryTarget)
-	if err != nil {
-		return nil, err
-	}
-	var lastErr error
-	for _, target := range targets {
-		dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
-		conn, err := grpc.DialContext(dialCtx, target, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-		cancel()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		client := discoverypb.NewServiceDiscoveryClient(conn)
-		callCtx, callCancel := context.WithTimeout(ctx, s.statusTimeout)
-		resp, err := client.FindImageProvider(callCtx, &discoverypb.FindImageProviderRequest{
-			ImageKey: strings.TrimSpace(imageKey),
-		})
-		callCancel()
-		_ = conn.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return resp.GetServices(), nil
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, fmt.Errorf("no discovery targets available")
-}
-
-func countImageReplica(services []*discoverypb.ServiceInstance) int {
-	seen := make(map[string]struct{}, len(services))
-	count := 0
-	for _, svc := range services {
-		if svc == nil {
-			continue
-		}
-		endpoint := strings.TrimSpace(svc.GetEndpoint())
-		if endpoint == "" {
-			continue
-		}
-		if _, ok := seen[endpoint]; ok {
-			continue
-		}
-		seen[endpoint] = struct{}{}
-		count++
-	}
-	return count
-}
-
-func endpointsWithImage(services []*discoverypb.ServiceInstance) map[string]struct{} {
-	out := make(map[string]struct{}, len(services))
-	for _, svc := range services {
-		if svc == nil {
-			continue
-		}
-		ep := strings.TrimSpace(svc.GetEndpoint())
-		if ep == "" {
-			continue
-		}
-		out[ep] = struct{}{}
-	}
-	return out
-}
-
-func (s *Service) pullImageOnLayerstore(ctx context.Context, endpoint string, req *afsproxypb.ReconcileImageReplicaRequest) error {
+func (s *Service) ensureLayersOnLayerstore(ctx context.Context, endpoint string, req *afsproxypb.ReconcileImageReplicaRequest, layers []*discoverypb.ImageLayer) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, s.dialTimeout)
 	defer dialCancel()
 	conn, err := grpc.DialContext(dialCtx, endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
@@ -818,17 +757,75 @@ func (s *Service) pullImageOnLayerstore(ctx context.Context, endpoint string, re
 	pullCtx, pullCancel := context.WithTimeout(ctx, pullImageRPCTimeout)
 	defer pullCancel()
 	client := layerstorepb.NewLayerStoreClient(conn)
-	_, err = client.PullImage(pullCtx, &layerstorepb.PullImageRequest{
+	ensureReq := &layerstorepb.EnsureLayersRequest{
 		Image:           req.GetImage(),
 		Tag:             req.GetTag(),
 		PlatformOs:      valueOrDefault(req.GetPlatformOs(), defaultPlatformOS),
 		PlatformArch:    valueOrDefault(req.GetPlatformArch(), defaultPlatformArch),
 		PlatformVariant: strings.TrimSpace(req.GetPlatformVariant()),
-	})
+		Layers:          make([]*layerstorepb.Layer, 0, len(layers)),
+	}
+	for _, layer := range layers {
+		if layer == nil {
+			continue
+		}
+		ensureReq.Layers = append(ensureReq.Layers, &layerstorepb.Layer{
+			Digest:         layer.GetDigest(),
+			MediaType:      layer.GetMediaType(),
+			CompressedSize: layer.GetCompressedSize(),
+		})
+	}
+	_, err = client.EnsureLayers(pullCtx, ensureReq)
 	return err
 }
 
-func (s *Service) waitDiscoveryReplica(ctx context.Context, imageKey string, minReplica int) (int, error) {
+func (s *Service) ensureLayerReplicaPlan(ctx context.Context, req *afsproxypb.ReconcileImageReplicaRequest, plan map[string][]*discoverypb.ImageLayer) error {
+	type ensureResult struct {
+		endpoint string
+		err      error
+	}
+	results := make(chan ensureResult, len(plan))
+	for endpoint, layers := range plan {
+		endpoint := endpoint
+		layers := append([]*discoverypb.ImageLayer(nil), layers...)
+		go func() {
+			results <- ensureResult{
+				endpoint: endpoint,
+				err:      s.ensureLayersOnLayerstore(ctx, endpoint, req, layers),
+			}
+		}()
+	}
+
+	var firstErr error
+	for range plan {
+		result := <-results
+		if result.err != nil {
+			log.Printf("[reconcile-image] ensure layers failed endpoint=%s err=%v", result.endpoint, result.err)
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			continue
+		}
+		log.Printf("[reconcile-image] ensured layers endpoint=%s", result.endpoint)
+	}
+	return firstErr
+}
+
+func waitForLayerReplicaFromServices(layers []*discoverypb.ImageLayer, services []*discoverypb.ServiceInstance) int {
+	return minLayerReplica(layers, services)
+}
+
+func buildReconcileImageReplicaResponse(imageKey string, requestedReplica int32, currentReplica int32, ensured bool, layers []*discoverypb.ImageLayer, services []*discoverypb.ServiceInstance) *afsproxypb.ReconcileImageReplicaResponse {
+	return &afsproxypb.ReconcileImageReplicaResponse{
+		ImageKey:         imageKey,
+		CurrentReplica:   currentReplica,
+		RequestedReplica: requestedReplica,
+		Ensured:          ensured,
+		Layers:           buildReconciledLayerPlacements(layers, services),
+	}
+}
+
+func (s *Service) waitLayerReplica(ctx context.Context, layers []*discoverypb.ImageLayer, minReplica int) (int, error) {
 	waitCtx, waitCancel := context.WithTimeout(ctx, reconcilePollTimeout)
 	defer waitCancel()
 
@@ -837,9 +834,9 @@ func (s *Service) waitDiscoveryReplica(ctx context.Context, imageKey string, min
 
 	last := 0
 	for {
-		services, err := s.fetchDiscoveryImageProviders(waitCtx, imageKey)
+		services, err := s.fetchDiscoveryProviders(waitCtx)
 		if err == nil {
-			last = countImageReplica(services)
+			last = waitForLayerReplicaFromServices(layers, services)
 			if last >= minReplica {
 				return last, nil
 			}
@@ -853,6 +850,277 @@ func (s *Service) waitDiscoveryReplica(ctx context.Context, imageKey string, min
 		case <-ticker.C:
 		}
 	}
+}
+
+func buildReconciledLayerPlacements(layers []*discoverypb.ImageLayer, services []*discoverypb.ServiceInstance) []*afsproxypb.ReconciledLayerPlacement {
+	if len(layers) == 0 {
+		return nil
+	}
+
+	instancesByDigest := make(map[string][]*afsproxypb.LayerstoreTarget, len(layers))
+	for _, svc := range services {
+		if svc == nil {
+			continue
+		}
+		endpoint := strings.TrimSpace(svc.GetEndpoint())
+		if endpoint == "" {
+			continue
+		}
+		target := &afsproxypb.LayerstoreTarget{
+			NodeId:   strings.TrimSpace(svc.GetNodeId()),
+			Endpoint: endpoint,
+		}
+		layerSet := serviceLayerSet(svc)
+		for _, layer := range layers {
+			if layer == nil {
+				continue
+			}
+			digest := strings.TrimSpace(layer.GetDigest())
+			if digest == "" {
+				continue
+			}
+			if _, ok := layerSet[digest]; ok {
+				instancesByDigest[digest] = append(instancesByDigest[digest], target)
+			}
+		}
+	}
+
+	out := make([]*afsproxypb.ReconciledLayerPlacement, 0, len(layers))
+	seen := make(map[string]struct{}, len(layers))
+	for _, layer := range layers {
+		if layer == nil {
+			continue
+		}
+		digest := strings.TrimSpace(layer.GetDigest())
+		if digest == "" {
+			continue
+		}
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+		seen[digest] = struct{}{}
+		instances := append([]*afsproxypb.LayerstoreTarget(nil), instancesByDigest[digest]...)
+		sort.SliceStable(instances, func(i, j int) bool {
+			if instances[i].GetNodeId() != instances[j].GetNodeId() {
+				return instances[i].GetNodeId() < instances[j].GetNodeId()
+			}
+			return instances[i].GetEndpoint() < instances[j].GetEndpoint()
+		})
+		out = append(out, &afsproxypb.ReconciledLayerPlacement{
+			Digest:    digest,
+			Instances: instances,
+		})
+	}
+	return out
+}
+
+func uniqueResolvedLayers(layers []*discoverypb.ImageLayer) []*discoverypb.ImageLayer {
+	seen := make(map[string]struct{}, len(layers))
+	out := make([]*discoverypb.ImageLayer, 0, len(layers))
+	for _, layer := range layers {
+		if layer == nil {
+			continue
+		}
+		digest := strings.TrimSpace(layer.GetDigest())
+		if digest == "" {
+			continue
+		}
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+		seen[digest] = struct{}{}
+		out = append(out, layer)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].GetCompressedSize() != out[j].GetCompressedSize() {
+			return out[i].GetCompressedSize() > out[j].GetCompressedSize()
+		}
+		return out[i].GetDigest() < out[j].GetDigest()
+	})
+	return out
+}
+
+func serviceLayerSet(svc *discoverypb.ServiceInstance) map[string]struct{} {
+	out := make(map[string]struct{}, len(svc.GetLayerDigests())+len(svc.GetLayerStats()))
+	for _, digest := range svc.GetLayerDigests() {
+		digest = strings.TrimSpace(digest)
+		if digest == "" {
+			continue
+		}
+		out[digest] = struct{}{}
+	}
+	for _, stat := range svc.GetLayerStats() {
+		if stat == nil {
+			continue
+		}
+		digest := strings.TrimSpace(stat.GetDigest())
+		if digest == "" {
+			continue
+		}
+		out[digest] = struct{}{}
+	}
+	return out
+}
+
+func minLayerReplica(layers []*discoverypb.ImageLayer, services []*discoverypb.ServiceInstance) int {
+	if len(layers) == 0 {
+		return 0
+	}
+	counts := make(map[string]int, len(layers))
+	for _, svc := range services {
+		if svc == nil {
+			continue
+		}
+		layerSet := serviceLayerSet(svc)
+		for _, layer := range layers {
+			if layer == nil {
+				continue
+			}
+			if _, ok := layerSet[strings.TrimSpace(layer.GetDigest())]; ok {
+				counts[strings.TrimSpace(layer.GetDigest())]++
+			}
+		}
+	}
+	minReplica := -1
+	for _, layer := range layers {
+		if layer == nil {
+			continue
+		}
+		count := counts[strings.TrimSpace(layer.GetDigest())]
+		if minReplica < 0 || count < minReplica {
+			minReplica = count
+		}
+	}
+	if minReplica < 0 {
+		return 0
+	}
+	return minReplica
+}
+
+type endpointReplicaState struct {
+	endpoint         string
+	layers           map[string]struct{}
+	targetCoverage   int
+	assignedCount    int
+	remainingBytes   int64
+	hasCacheEstimate bool
+}
+
+func planLayerReplicaAssignments(layers []*discoverypb.ImageLayer, requestedReplica int, services []*discoverypb.ServiceInstance) map[string][]*discoverypb.ImageLayer {
+	if requestedReplica <= 0 || len(layers) == 0 {
+		return nil
+	}
+
+	type layerNeed struct {
+		layer   *discoverypb.ImageLayer
+		missing int
+	}
+
+	states := make(map[string]*endpointReplicaState, len(services))
+	counts := make(map[string]int, len(layers))
+	for _, svc := range services {
+		if svc == nil {
+			continue
+		}
+		endpoint := strings.TrimSpace(svc.GetEndpoint())
+		if endpoint == "" {
+			continue
+		}
+		layerSet := serviceLayerSet(svc)
+		state := &endpointReplicaState{
+			endpoint:       endpoint,
+			layers:         layerSet,
+			remainingBytes: availableCacheBytes(svc),
+		}
+		if svc.GetCacheMaxBytes() > 0 {
+			state.hasCacheEstimate = true
+		}
+		for _, layer := range layers {
+			if layer == nil {
+				continue
+			}
+			digest := strings.TrimSpace(layer.GetDigest())
+			if _, ok := layerSet[digest]; ok {
+				counts[digest]++
+				state.targetCoverage++
+			}
+		}
+		states[endpoint] = state
+	}
+
+	needs := make([]layerNeed, 0, len(layers))
+	for _, layer := range layers {
+		if layer == nil {
+			continue
+		}
+		digest := strings.TrimSpace(layer.GetDigest())
+		missing := requestedReplica - counts[digest]
+		if missing > 0 {
+			needs = append(needs, layerNeed{layer: layer, missing: missing})
+		}
+	}
+	sort.SliceStable(needs, func(i, j int) bool {
+		leftCount := counts[strings.TrimSpace(needs[i].layer.GetDigest())]
+		rightCount := counts[strings.TrimSpace(needs[j].layer.GetDigest())]
+		if leftCount != rightCount {
+			return leftCount < rightCount
+		}
+		if needs[i].layer.GetCompressedSize() != needs[j].layer.GetCompressedSize() {
+			return needs[i].layer.GetCompressedSize() > needs[j].layer.GetCompressedSize()
+		}
+		return needs[i].layer.GetDigest() < needs[j].layer.GetDigest()
+	})
+
+	plan := make(map[string][]*discoverypb.ImageLayer)
+	for _, need := range needs {
+		digest := strings.TrimSpace(need.layer.GetDigest())
+		size := need.layer.GetCompressedSize()
+		candidates := make([]*endpointReplicaState, 0, len(states))
+		for _, state := range states {
+			if _, ok := state.layers[digest]; ok {
+				continue
+			}
+			candidates = append(candidates, state)
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			leftFit := !candidates[i].hasCacheEstimate || candidates[i].remainingBytes >= size
+			rightFit := !candidates[j].hasCacheEstimate || candidates[j].remainingBytes >= size
+			if leftFit != rightFit {
+				return leftFit
+			}
+			leftScore := candidates[i].targetCoverage + candidates[i].assignedCount
+			rightScore := candidates[j].targetCoverage + candidates[j].assignedCount
+			if leftScore != rightScore {
+				return leftScore < rightScore
+			}
+			if candidates[i].assignedCount != candidates[j].assignedCount {
+				return candidates[i].assignedCount < candidates[j].assignedCount
+			}
+			if candidates[i].remainingBytes != candidates[j].remainingBytes {
+				return candidates[i].remainingBytes > candidates[j].remainingBytes
+			}
+			return candidates[i].endpoint < candidates[j].endpoint
+		})
+
+		assignments := 0
+		for _, state := range candidates {
+			if assignments >= need.missing {
+				break
+			}
+			state.layers[digest] = struct{}{}
+			state.assignedCount++
+			state.targetCoverage++
+			if state.hasCacheEstimate && size > 0 {
+				state.remainingBytes -= size
+				if state.remainingBytes < 0 {
+					state.remainingBytes = 0
+				}
+			}
+			plan[state.endpoint] = append(plan[state.endpoint], need.layer)
+			assignments++
+		}
+	}
+	return plan
 }
 
 func valueOrDefault(v, d string) string {

@@ -11,6 +11,19 @@ The unified entrypoint is `scripts/e2e/smoke.sh`. By default it validates:
 - `afs_cli -proxy-status`
 - `afs_cli reconcile-image-replica`
 
+For a dedicated `reconcile-image-replica` regression pass with higher repeat counts and placement checks, use:
+
+```bash
+./scripts/e2e/reconcile_regression.sh --image mirrors.tencent.com/josephyu/afs --tag <tag>
+```
+
+That script will:
+
+- rerun the `pkg/afsproxy` reconcile-image tests with a higher `-count`
+- rerun `bare` mode smoke multiple times
+- optionally rerun `helm` mode smoke multiple times (`--helm-start-stop` uses `./helm/start.sh` / `./helm/stop.sh`)
+- wait for the Helm release Deployment / DaemonSet rollout to complete before Helm smoke starts, then allow a short extra heartbeat-settle window
+
 That covers the full discovery -> layerstore -> afslet -> afs_proxy control-plane and scheduling path. The privileged execute path (`afs_mount + afs_runc`) should still stay covered by the existing integration tests.
 
 ## Prerequisites

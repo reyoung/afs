@@ -11,6 +11,19 @@
 - `afs_cli -proxy-status`
 - `afs_cli reconcile-image-replica`
 
+如果你要专门回归 `reconcile-image-replica` 的稳定性、分布结果和重复执行行为，使用：
+
+```bash
+./scripts/e2e/reconcile_regression.sh --image mirrors.tencent.com/josephyu/afs --tag <tag>
+```
+
+这个脚本会：
+
+- 用更高的 `-count` 重复运行 `pkg/afsproxy` 里的 `reconcile-image` 相关测试
+- 重复执行 `bare` 模式 smoke
+- 可选重复执行 `helm` 模式 smoke（`--helm-start-stop` 会自动调用 `./helm/start.sh` / `./helm/stop.sh`）
+- 在执行 Helm smoke 前，先等待该 release 下的 Deployment / DaemonSet rollout 完成，并额外等待一小段 heartbeat 收敛时间
+
 它验证的是 discovery、layerstore、afslet、afs_proxy 这一整条控制面/调度链路是否连通。完整的特权执行链路（`afs_mount + afs_runc`）仍然建议继续用现有 integration 测试单独覆盖。
 
 ## 前置条件

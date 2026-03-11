@@ -28,6 +28,17 @@ message ReconcileImageReplicaResponse {
   int32 current_replica = 2;
   int32 requested_replica = 3;
   bool ensured = 4;
+  repeated ReconciledLayerPlacement layers = 5;
+}
+
+message ReconciledLayerPlacement {
+  string digest = 1;
+  repeated LayerstoreTarget instances = 2;
+}
+
+message LayerstoreTarget {
+  string node_id = 1;
+  string endpoint = 2;
 }
 
 message StatusSummary {

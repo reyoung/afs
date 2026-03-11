@@ -131,7 +131,7 @@ func TestScanCachedLayerStats(t *testing.T) {
 	}
 }
 
-func TestScanCachedImageKeys(t *testing.T) {
+func TestScanCachedImageKeys_NoLayersField(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -148,7 +148,58 @@ func TestScanCachedImageKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scanCachedImageKeys: %v", err)
 	}
+	if len(got) != 0 {
+		t.Fatalf("got=%v, want []", got)
+	}
+}
+
+func TestScanCachedImageKeys_LayersComplete(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	metaPath := filepath.Join(tmp, "metadata", "a.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":"","layers":[{"Digest":"sha256:abcdef"}]}`
+	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
+	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll layer dir: %v", err)
+	}
+	if err := os.WriteFile(layerPath, []byte("layer"), 0o644); err != nil {
+		t.Fatalf("WriteFile layer: %v", err)
+	}
+
+	got, err := scanCachedImageKeys(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedImageKeys: %v", err)
+	}
 	if len(got) != 1 || got[0] != "nginx|latest|linux|amd64|" {
 		t.Fatalf("got=%v, want [nginx|latest|linux|amd64|]", got)
+	}
+}
+
+func TestScanCachedImageKeys_LayersMissing(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	metaPath := filepath.Join(tmp, "metadata", "a.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":"","layers":[{"Digest":"sha256:abcdef"}]}`
+	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := scanCachedImageKeys(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedImageKeys: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got=%v, want []", got)
 	}
 }

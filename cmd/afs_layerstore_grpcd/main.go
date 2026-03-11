@@ -342,11 +342,29 @@ func scanCachedLayerStats(cacheDir string) ([]*discoverypb.LayerStat, error) {
 }
 
 type cachedMeta struct {
-	Image           string `json:"image"`
-	Tag             string `json:"tag"`
-	PlatformOS      string `json:"platform_os"`
-	PlatformArch    string `json:"platform_arch"`
-	PlatformVariant string `json:"platform_variant"`
+	Image           string            `json:"image"`
+	Tag             string            `json:"tag"`
+	PlatformOS      string            `json:"platform_os"`
+	PlatformArch    string            `json:"platform_arch"`
+	PlatformVariant string            `json:"platform_variant"`
+	Layers          []cachedMetaLayer `json:"layers"`
+}
+
+type cachedMetaLayer struct {
+	Digest string `json:"Digest"`
+}
+
+func layerFileExists(cacheDir, digest string) bool {
+	digest = strings.TrimSpace(digest)
+	idx := strings.Index(digest, ":")
+	if idx <= 0 || idx == len(digest)-1 {
+		return false
+	}
+	algo := strings.ToLower(digest[:idx])
+	hex := strings.ToLower(digest[idx+1:])
+	path := filepath.Join(cacheDir, "layers", algo, hex+".afslyr")
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func scanCachedImageKeys(cacheDir string) ([]string, error) {
@@ -374,6 +392,16 @@ func scanCachedImageKeys(cacheDir string) ([]string, error) {
 			continue
 		}
 		if strings.TrimSpace(m.Image) == "" {
+			continue
+		}
+		allLayersPresent := len(m.Layers) > 0
+		for _, layer := range m.Layers {
+			if !layerFileExists(cacheDir, layer.Digest) {
+				allLayersPresent = false
+				break
+			}
+		}
+		if !allLayersPresent {
 			continue
 		}
 		key := imageKey(m.Image, m.Tag, m.PlatformOS, m.PlatformArch, m.PlatformVariant)
