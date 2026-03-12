@@ -1,0 +1,6 @@
+.git
+.idea
+.codex-tasks
+.tmp
+dist
+python/afs_sdk/__pycache__

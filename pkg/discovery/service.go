@@ -28,6 +28,10 @@ type Resolver interface {
 	LoginWithToken(registry, token string) error
 }
 
+type imageMetadataResolver interface {
+	GetImageMetadataForPlatform(ctx context.Context, image, tag, os, arch, variant string) (registry.ImageMetadata, error)
+}
+
 type RegistryAuthConfig struct {
 	RegistryHost string
 	Username     string
@@ -41,6 +45,7 @@ type imageRecord struct {
 	resolvedRepository string
 	resolvedReference  string
 	layers             []registry.Layer
+	runtimeConfig      registry.ImageRuntimeConfig
 	expireAt           time.Time
 }
 
@@ -213,9 +218,23 @@ func (s *Service) ResolveImage(ctx context.Context, req *discoverypb.ResolveImag
 		return nil, status.Errorf(codes.InvalidArgument, "registry mirror config: %v", err)
 	}
 
-	layers, err := r.GetLayersForPlatform(ctx, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "resolve image layers: %v", err)
+	var (
+		layers        []registry.Layer
+		runtimeConfig registry.ImageRuntimeConfig
+	)
+	if mr, ok := r.(imageMetadataResolver); ok {
+		meta, err := mr.GetImageMetadataForPlatform(ctx, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "resolve image metadata: %v", err)
+		}
+		layers = append([]registry.Layer(nil), meta.Layers...)
+		runtimeConfig = meta.RuntimeConfig
+	} else {
+		var err error
+		layers, err = r.GetLayersForPlatform(ctx, req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "resolve image layers: %v", err)
+		}
 	}
 	record := imageRecord{
 		imageKey:           key,
@@ -223,6 +242,7 @@ func (s *Service) ResolveImage(ctx context.Context, req *discoverypb.ResolveImag
 		resolvedRepository: ref.Repository,
 		resolvedReference:  ref.Reference,
 		layers:             append([]registry.Layer(nil), layers...),
+		runtimeConfig:      runtimeConfig,
 		expireAt:           s.now().Add(s.imageCacheTTL),
 	}
 
@@ -388,6 +408,13 @@ func imageRecordToProto(v imageRecord) *discoverypb.ResolveImageResponse {
 		ResolvedRepository: v.resolvedRepository,
 		ResolvedReference:  v.resolvedReference,
 		Layers:             make([]*discoverypb.ImageLayer, 0, len(v.layers)),
+		RuntimeConfig: &discoverypb.ImageRuntimeConfig{
+			Entrypoint: append([]string(nil), v.runtimeConfig.Entrypoint...),
+			Cmd:        append([]string(nil), v.runtimeConfig.Cmd...),
+			Env:        append([]string(nil), v.runtimeConfig.Env...),
+			WorkingDir: v.runtimeConfig.WorkingDir,
+			User:       v.runtimeConfig.User,
+		},
 	}
 	for _, layer := range v.layers {
 		resp.Layers = append(resp.Layers, &discoverypb.ImageLayer{

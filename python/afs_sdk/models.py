@@ -42,7 +42,7 @@ ExtraEntry = Union[ExtraDirectory, ExtraSymlink, ExtraFile]
 @dataclass(slots=True)
 class ExecuteInput:
     image: str
-    command: Sequence[str]
+    command: Sequence[str] = field(default_factory=tuple)
     tag: str = ""
     cpu_cores: int = 1
     memory_mb: int = 256

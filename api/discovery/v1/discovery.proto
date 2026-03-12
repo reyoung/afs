@@ -61,6 +61,15 @@ message ResolveImageResponse {
   string resolved_repository = 3;
   string resolved_reference = 4;
   repeated ImageLayer layers = 5;
+  ImageRuntimeConfig runtime_config = 6;
+}
+
+message ImageRuntimeConfig {
+  repeated string entrypoint = 1;
+  repeated string cmd = 2;
+  repeated string env = 3;
+  string working_dir = 4;
+  string user = 5;
 }
 
 message FindProviderRequest {

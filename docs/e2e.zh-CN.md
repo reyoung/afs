@@ -40,6 +40,23 @@
 
 它验证的是 discovery、layerstore、afslet、afs_proxy 这一整条控制面/调度链路是否连通。完整的特权执行链路（`afs_mount + afs_runc`）仍然建议继续用现有 integration 测试单独覆盖。
 
+如果你要做一个运行时配置的端到端回归，验证镜像里的 `ENTRYPOINT`、`CMD`、`ENV`、`WORKDIR` 和 `USER` 是否都被尊重，使用：
+
+```bash
+./scripts/e2e/runtime_config.sh --mode raw
+./scripts/e2e/runtime_config.sh --mode compose
+./scripts/e2e/runtime_config.sh --mode kubernetes --namespace afs
+```
+
+这个脚本会验证：
+
+- 默认镜像命令解析
+- `entrypoint` 和显式命令的组合规则
+- 镜像 `USER` 和 `ENV`
+- 镜像 `WORKDIR` 和 `ENV`
+- 默认测试镜像来自 `mirror.ccs.tencentyun.com/library/*`，用来避开 Docker Hub 匿名拉取限流
+- 裸进程 / raw 模式会启用 `-sudo-binaries`，因此特权执行链要求本机可免密 `sudo`
+
 ## 前置条件
 
 - Linux 环境
@@ -152,6 +169,18 @@ make build-local
 - `--iterations <n>`：重复做多轮冷态对比
 - `--grpc-timeout <dur>`：覆盖 reconcile RPC 超时
 - `compose` 模式每轮开始前都会执行一次 `docker compose down -v`，确保 AFS cache 保持冷态
+
+运行时配置脚本的帮助：
+
+```bash
+./scripts/e2e/runtime_config.sh --help
+```
+
+常见覆盖项：
+
+- `--mode <raw|bare|compose|helm|kubernetes|k8s>`：选择运行时配置回归所使用的运行形态
+- `--namespace <name>`：指定 Kubernetes 模式的命名空间
+- `--addr <host:port>`：手动指定 `afs_proxy` gRPC 地址，跳过 `kubectl port-forward`
 
 ## 输出
 

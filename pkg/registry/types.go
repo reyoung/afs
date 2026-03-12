@@ -11,9 +11,9 @@ type Descriptor struct {
 
 // Manifest describes a single image manifest.
 type Manifest struct {
-	SchemaVersion int        `json:"schemaVersion"`
-	MediaType     string     `json:"mediaType"`
-	Config        Descriptor `json:"config"`
+	SchemaVersion int          `json:"schemaVersion"`
+	MediaType     string       `json:"mediaType"`
+	Config        Descriptor   `json:"config"`
 	Layers        []Descriptor `json:"layers"`
 }
 
@@ -42,4 +42,19 @@ type Layer struct {
 	Digest    string
 	MediaType string
 	Size      int64
+}
+
+// ImageRuntimeConfig describes container runtime defaults embedded in image config.
+type ImageRuntimeConfig struct {
+	Entrypoint []string
+	Cmd        []string
+	Env        []string
+	WorkingDir string
+	User       string
+}
+
+// ImageMetadata contains the runtime config and flattened layer metadata for one image.
+type ImageMetadata struct {
+	Layers        []Layer
+	RuntimeConfig ImageRuntimeConfig
 }

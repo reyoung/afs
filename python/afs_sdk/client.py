@@ -286,8 +286,6 @@ class AfsClient:
             raise ValueError("upload_chunk_size must be > 0")
         if not req.image.strip():
             raise ValueError("image is required")
-        if not req.command:
-            raise ValueError("command is required")
 
         yield pb.ExecuteRequest(
             start=pb.StartRequest(

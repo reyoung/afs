@@ -40,6 +40,23 @@ That script will:
 
 That covers the full discovery -> layerstore -> afslet -> afs_proxy control-plane and scheduling path. The privileged execute path (`afs_mount + afs_runc`) should still stay covered by the existing integration tests.
 
+For an end-to-end runtime-config pass that validates image `ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, and `USER`, use:
+
+```bash
+./scripts/e2e/runtime_config.sh --mode raw
+./scripts/e2e/runtime_config.sh --mode compose
+./scripts/e2e/runtime_config.sh --mode kubernetes --namespace afs
+```
+
+That script checks:
+
+- default image command resolution
+- entrypoint + requested command composition
+- image `USER` + `ENV`
+- image `WORKDIR` + `ENV`
+- default test images come from `mirror.ccs.tencentyun.com/library/*` to avoid Docker Hub anonymous rate limits
+- bare/raw mode uses `-sudo-binaries`, so passwordless `sudo` is required for the privileged execute path
+
 ## Prerequisites
 
 - Linux host
@@ -152,6 +169,18 @@ Common overrides:
 - `--iterations <n>`: repeat the cold comparison multiple times
 - `--grpc-timeout <dur>`: timeout for the reconcile RPC
 - compose mode always runs `docker compose down -v` before each iteration so that the AFS cache stays cold
+
+For the runtime-config script:
+
+```bash
+./scripts/e2e/runtime_config.sh --help
+```
+
+Common overrides:
+
+- `--mode <raw|bare|compose|helm|kubernetes|k8s>`: runtime shape for the runtime-config pass
+- `--namespace <name>`: namespace for Kubernetes mode
+- `--addr <host:port>`: explicit `afs_proxy` gRPC address, skipping `kubectl port-forward`
 
 ## Output
 

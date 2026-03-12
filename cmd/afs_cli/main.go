@@ -97,9 +97,6 @@ func parseFlags() (config, []string) {
 	if strings.TrimSpace(cfg.image) == "" {
 		log.Fatal("-image is required")
 	}
-	if len(cmdArgs) == 0 {
-		log.Fatal("command is required, example: -- /bin/sh -c 'echo ok'")
-	}
 	if cfg.cpu <= 0 {
 		log.Fatal("-cpu must be > 0")
 	}

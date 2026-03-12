@@ -82,8 +82,6 @@ async def main() -> None:
 
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
-    if not args.command:
-        raise SystemExit("command is required, e.g. -- /bin/sh -c 'echo ok'")
 
     host, port_str = args.addr.rsplit(":", 1)
     port = int(port_str)

@@ -14,7 +14,7 @@ cd python
 
 - Low-level: `AfsClient.raw_execute(requests: AsyncIterator[ExecuteRequest])`
 - High-level: `AfsClient.execute(request: ExecuteInput)`
-  - request is a single typed object (`image`, `command`, resources, and extra file entries)
+  - request is a single typed object (`image`, optional `command`, resources, and extra file entries)
   - set `force_local_fetch=True` to force local layer fetch on selected layerstore
   - response is `AsyncIterator[ExecuteEvent]`
 - Proxy status stream: `AfsClient.status(include_layerstores=True, include_afslets=True)`
@@ -71,6 +71,8 @@ PYTHONPATH=python ~/.local/bin/uv run python python/examples/execute_stream.py \
   --image alpine --tag latest \
   -- /bin/sh -c 'echo ok >/tmp/ok.txt'
 ```
+
+If `command` is omitted, AFS uses the image `Entrypoint`/`Cmd` defaults returned by discovery.
 
 Reconcile image replica demo:
 

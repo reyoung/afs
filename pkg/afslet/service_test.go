@@ -11,7 +11,83 @@ import (
 
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsmount"
+	"github.com/reyoung/afs/pkg/discoverypb"
 )
+
+func TestBuildRuntimeProcessConfigUsesImageDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := buildRuntimeProcessConfig(&afsletpb.StartRequest{
+		Image:    "nginx",
+		CpuCores: 1,
+		MemoryMb: 256,
+	}, &discoverypb.ImageRuntimeConfig{
+		Entrypoint: []string{"/docker-entrypoint.sh"},
+		Cmd:        []string{"nginx", "-g", "daemon off;"},
+		Env:        []string{"FOO=bar"},
+		WorkingDir: "/work",
+		User:       "472",
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeProcessConfig() error: %v", err)
+	}
+	if got := cfg.command; len(got) != 4 || got[0] != "/docker-entrypoint.sh" || got[1] != "nginx" || got[3] != "daemon off;" {
+		t.Fatalf("command=%v, want image entrypoint+cmd", got)
+	}
+	if got := cfg.env; len(got) != 2 || got[0] != "FOO=bar" || got[1] != "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
+		t.Fatalf("env=%v, want image env + default PATH", got)
+	}
+	if got := cfg.workingDir; got != "/work" {
+		t.Fatalf("workingDir=%q, want /work", got)
+	}
+	if got := cfg.user; got != "472" {
+		t.Fatalf("user=%q, want 472", got)
+	}
+}
+
+func TestBuildRuntimeProcessConfigRequestedCommandOverridesImageCmd(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := buildRuntimeProcessConfig(&afsletpb.StartRequest{
+		Image:    "nginx",
+		Command:  []string{"echo", "ok"},
+		CpuCores: 1,
+		MemoryMb: 256,
+	}, &discoverypb.ImageRuntimeConfig{
+		Entrypoint: []string{"/docker-entrypoint.sh"},
+		Cmd:        []string{"nginx", "-g", "daemon off;"},
+		Env:        []string{"PATH=/custom/bin", "FOO=bar"},
+		User:       "memcache",
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeProcessConfig() error: %v", err)
+	}
+	if got := cfg.command; len(got) != 3 || got[0] != "/docker-entrypoint.sh" || got[1] != "echo" || got[2] != "ok" {
+		t.Fatalf("command=%v, want entrypoint + requested command", got)
+	}
+	if got := cfg.env; len(got) != 2 || got[0] != "PATH=/custom/bin" || got[1] != "FOO=bar" {
+		t.Fatalf("env=%v, want image env preserved", got)
+	}
+	if got := cfg.workingDir; got != "/" {
+		t.Fatalf("workingDir=%q, want /", got)
+	}
+	if got := cfg.user; got != "memcache" {
+		t.Fatalf("user=%q, want memcache", got)
+	}
+}
+
+func TestBuildRuntimeProcessConfigRejectsMissingCommand(t *testing.T) {
+	t.Parallel()
+
+	_, err := buildRuntimeProcessConfig(&afsletpb.StartRequest{
+		Image:    "scratch",
+		CpuCores: 1,
+		MemoryMb: 256,
+	}, &discoverypb.ImageRuntimeConfig{})
+	if err == nil || !strings.Contains(err.Error(), "no command resolved") {
+		t.Fatalf("expected missing command error, got %v", err)
+	}
+}
 
 func TestRunCommandRequiresExplicitCPUAndMemory(t *testing.T) {
 	t.Parallel()

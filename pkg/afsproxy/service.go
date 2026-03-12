@@ -194,10 +194,6 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 		log.Printf("%s missing image", logPrefix)
 		return status.Error(codes.InvalidArgument, "start.image is required")
 	}
-	if len(start.GetCommand()) == 0 {
-		log.Printf("%s missing command", logPrefix)
-		return status.Error(codes.InvalidArgument, "start.command is required")
-	}
 
 	maxRetries := start.GetProxyDispatchMaxRetries()
 	if maxRetries < 0 {

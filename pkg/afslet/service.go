@@ -18,17 +18,21 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsmount"
+	"github.com/reyoung/afs/pkg/discoverypb"
 )
 
 const (
-	defaultCPUCores = int64(1)
-	defaultMemoryMB = int64(256)
-	defaultTimeout  = time.Second
+	defaultCPUCores       = int64(1)
+	defaultMemoryMB       = int64(256)
+	defaultTimeout        = time.Second
+	defaultProcessPathEnv = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
 type Config struct {
@@ -84,6 +88,7 @@ type Service struct {
 	sharedSpillCacheMaxBytes   int64
 	sharedSpillCacheBinaryPath string
 	layerMountConcurrency      int
+	resolveImageRuntimeConfig  func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
 func NewService(cfg Config) *Service {
@@ -132,6 +137,7 @@ func NewService(cfg Config) *Service {
 	if s.layerMountConcurrency <= 0 {
 		s.layerMountConcurrency = 1
 	}
+	s.resolveImageRuntimeConfig = s.fetchImageRuntimeConfig
 	return s
 }
 
@@ -267,6 +273,13 @@ type commandResult struct {
 	Err      string
 }
 
+type runtimeProcessConfig struct {
+	command    []string
+	env        []string
+	workingDir string
+	user       string
+}
+
 func (s *Service) addRunningContainers(delta int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -318,9 +331,6 @@ func validateStartRequest(start *afsletpb.StartRequest) error {
 	if strings.TrimSpace(start.GetImage()) == "" {
 		return fmt.Errorf("start.image is required")
 	}
-	if len(start.GetCommand()) == 0 {
-		return fmt.Errorf("start.command is required")
-	}
 	if start.GetCpuCores() <= 0 {
 		return fmt.Errorf("start.cpu_cores must be > 0")
 	}
@@ -345,11 +355,23 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if logf != nil {
 		logf("session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir))
-		logf("request", fmt.Sprintf("image=%s tag=%s cmd=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t runc_no_pid_ns=%t runc_no_ipc_ns=%t runc_no_uts_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS, s.runcNoPIDNS, s.runcNoIPCNS, s.runcNoUTSNS))
-		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
 	}
 
 	discoveryAddr := pickDiscoveryAddr(start.GetDiscoveryAddr(), s.defaultDiscovery)
+	imageRuntimeConfig, err := s.resolveImageRuntimeConfig(ctx, discoveryAddr, start)
+	if err != nil {
+		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("resolve image runtime config: %v", err)}
+	}
+	processCfg, err := buildRuntimeProcessConfig(start, imageRuntimeConfig)
+	if err != nil {
+		return commandResult{Success: false, ExitCode: -1, Err: err.Error()}
+	}
+	if logf != nil {
+		logf("image", fmt.Sprintf("resolved entrypoint=%q cmd=%q env=%d working_dir=%q user=%q", imageRuntimeConfig.GetEntrypoint(), imageRuntimeConfig.GetCmd(), len(imageRuntimeConfig.GetEnv()), imageRuntimeConfig.GetWorkingDir(), imageRuntimeConfig.GetUser()))
+		logf("request", fmt.Sprintf("image=%s tag=%s requested_cmd=%q resolved_cmd=%q env=%d cwd=%q user=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t runc_no_pid_ns=%t runc_no_ipc_ns=%t runc_no_uts_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), processCfg.command, len(processCfg.env), processCfg.workingDir, processCfg.user, start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS, s.runcNoPIDNS, s.runcNoIPCNS, s.runcNoUTSNS))
+		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
+	}
+
 	mountCfg := afsmount.Config{
 		Mountpoint:                 sess.mountpoint,
 		WorkDir:                    sess.workDir,
@@ -522,6 +544,15 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		"-memory-mb", strconv.FormatInt(memory, 10),
 		"-timeout", timeout.String(),
 	}
+	if processCfg.user != "" {
+		runcArgs = append(runcArgs, "-user", processCfg.user)
+	}
+	if processCfg.workingDir != "" {
+		runcArgs = append(runcArgs, "-cwd", processCfg.workingDir)
+	}
+	for _, env := range processCfg.env {
+		runcArgs = append(runcArgs, "-env", env)
+	}
 	if s.runcNoPivot {
 		runcArgs = append(runcArgs, "-no-pivot")
 	}
@@ -541,7 +572,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		runcArgs = append(runcArgs, "-no-uts-ns")
 	}
 	runcArgs = append(runcArgs, "--")
-	runcArgs = append(runcArgs, start.GetCommand()...)
+	runcArgs = append(runcArgs, processCfg.command...)
 	runcCmd := s.newCommandContext(ctx, s.runcBinary, runcArgs...)
 	runcStdout := newProcessLogWriter("runc:stdout", logf)
 	runcStderr := newProcessLogWriter("runc:stderr", logf)
@@ -554,7 +585,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if err := runcCmd.Start(); err != nil {
 		stopMountSafe()
-		_ = tryForceUmount(sess.mountpoint)
+		_ = s.tryForceUmount(sess.mountpoint)
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
 	}
 	s.addRunningContainers(1)
@@ -567,7 +598,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=stop_mount_runner ms=%d", time.Since(stopMountStarted).Milliseconds()))
 		logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=mount_lifetime ms=%d", time.Since(mountStart).Milliseconds()))
 	}
-	if umErr := tryForceUmount(sess.mountpoint); umErr != nil {
+	if umErr := s.tryForceUmount(sess.mountpoint); umErr != nil {
 		if logf != nil {
 			logf("cleanup", fmt.Sprintf("umount warning: %v", umErr))
 		}
@@ -596,6 +627,129 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		logf("runc", "completed successfully")
 	}
 	return commandResult{Success: true, ExitCode: 0, Err: strings.TrimSpace(runcStdout.String())}
+}
+
+func (s *Service) fetchImageRuntimeConfig(ctx context.Context, discoveryAddr string, start *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error) {
+	discoveryAddr = strings.TrimSpace(discoveryAddr)
+	if discoveryAddr == "" {
+		return &discoverypb.ImageRuntimeConfig{}, nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(callCtx, discoveryAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		return nil, fmt.Errorf("dial discovery %s: %w", discoveryAddr, err)
+	}
+	defer conn.Close()
+
+	client := discoverypb.NewServiceDiscoveryClient(conn)
+	resp, err := client.ResolveImage(callCtx, &discoverypb.ResolveImageRequest{
+		Image:           start.GetImage(),
+		Tag:             start.GetTag(),
+		PlatformOs:      strings.TrimSpace(start.GetPlatformOs()),
+		PlatformArch:    strings.TrimSpace(start.GetPlatformArch()),
+		PlatformVariant: strings.TrimSpace(start.GetPlatformVariant()),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetRuntimeConfig() == nil {
+		return &discoverypb.ImageRuntimeConfig{}, nil
+	}
+	return resp.GetRuntimeConfig(), nil
+}
+
+func buildRuntimeProcessConfig(start *afsletpb.StartRequest, imageCfg *discoverypb.ImageRuntimeConfig) (runtimeProcessConfig, error) {
+	if start == nil {
+		return runtimeProcessConfig{}, fmt.Errorf("missing start request")
+	}
+	if imageCfg == nil {
+		imageCfg = &discoverypb.ImageRuntimeConfig{}
+	}
+	command, err := resolveCommandArgs(start.GetCommand(), imageCfg.GetEntrypoint(), imageCfg.GetCmd())
+	if err != nil {
+		return runtimeProcessConfig{}, err
+	}
+	return runtimeProcessConfig{
+		command:    command,
+		env:        normalizeProcessEnv(imageCfg.GetEnv()),
+		workingDir: normalizeWorkingDir(imageCfg.GetWorkingDir()),
+		user:       strings.TrimSpace(imageCfg.GetUser()),
+	}, nil
+}
+
+func resolveCommandArgs(requestedCmd, entrypoint, imageCmd []string) ([]string, error) {
+	requestedCmd = append([]string(nil), requestedCmd...)
+	entrypoint = append([]string(nil), entrypoint...)
+	imageCmd = append([]string(nil), imageCmd...)
+
+	if len(requestedCmd) > 0 {
+		if len(entrypoint) > 0 {
+			return append(entrypoint, requestedCmd...), nil
+		}
+		return requestedCmd, nil
+	}
+	if len(entrypoint) == 0 && len(imageCmd) == 0 {
+		return nil, fmt.Errorf("no command resolved from request or image config")
+	}
+	return append(entrypoint, imageCmd...), nil
+}
+
+func normalizeProcessEnv(imageEnv []string) []string {
+	out := dedupeEnvKeepLast(imageEnv)
+	if !hasEnvKey(out, "PATH") {
+		out = append(out, defaultProcessPathEnv)
+	}
+	return out
+}
+
+func dedupeEnvKeepLast(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	reversed := make([]string, 0, len(in))
+	for i := len(in) - 1; i >= 0; i-- {
+		v := strings.TrimSpace(in[i])
+		if v == "" {
+			continue
+		}
+		key := envKey(v)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		reversed = append(reversed, v)
+	}
+	for left, right := 0, len(reversed)-1; left < right; left, right = left+1, right-1 {
+		reversed[left], reversed[right] = reversed[right], reversed[left]
+	}
+	return reversed
+}
+
+func hasEnvKey(env []string, key string) bool {
+	for _, entry := range env {
+		if envKey(entry) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func envKey(entry string) string {
+	if idx := strings.IndexByte(entry, '='); idx >= 0 {
+		return entry[:idx]
+	}
+	return entry
+}
+
+func normalizeWorkingDir(workingDir string) string {
+	workingDir = strings.TrimSpace(workingDir)
+	if workingDir == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(workingDir, "/") {
+		return "/" + workingDir
+	}
+	return workingDir
 }
 
 func (s *Service) sendLog(stream afsletpb.Afslet_ExecuteServer, source string, message string) error {
@@ -1073,8 +1227,8 @@ func terminateProcess(cmd *exec.Cmd, waitCh <-chan error) error {
 	}
 }
 
-func tryForceUmount(mountpoint string) error {
-	cmd := exec.Command("umount", mountpoint)
+func (s *Service) tryForceUmount(mountpoint string) error {
+	cmd := s.newCommandContext(context.Background(), "umount", mountpoint)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		text := strings.TrimSpace(string(out))
 		if text == "" {

@@ -19,6 +19,13 @@ func TestResolveImageAndFindImageProvider(t *testing.T) {
 				{Digest: "sha256:aaa", MediaType: "layer/a", Size: 111},
 				{Digest: "sha256:bbb", MediaType: "layer/b", Size: 222},
 			},
+			runtimeConfig: registry.ImageRuntimeConfig{
+				Entrypoint: []string{"/docker-entrypoint.sh"},
+				Cmd:        []string{"nginx", "-g", "daemon off;"},
+				Env:        []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "FOO=bar"},
+				WorkingDir: "/work",
+				User:       "1000:1001",
+			},
 		}
 	})
 
@@ -55,6 +62,21 @@ func TestResolveImageAndFindImageProvider(t *testing.T) {
 	}
 	if got := len(resolved.GetLayers()); got != 2 {
 		t.Fatalf("resolved layers=%d, want 2", got)
+	}
+	if got := resolved.GetRuntimeConfig().GetEntrypoint(); len(got) != 1 || got[0] != "/docker-entrypoint.sh" {
+		t.Fatalf("entrypoint=%v, want [/docker-entrypoint.sh]", got)
+	}
+	if got := resolved.GetRuntimeConfig().GetCmd(); len(got) != 3 || got[0] != "nginx" || got[1] != "-g" || got[2] != "daemon off;" {
+		t.Fatalf("cmd=%v, want nginx default cmd", got)
+	}
+	if got := resolved.GetRuntimeConfig().GetWorkingDir(); got != "/work" {
+		t.Fatalf("working_dir=%q, want /work", got)
+	}
+	if got := resolved.GetRuntimeConfig().GetUser(); got != "1000:1001" {
+		t.Fatalf("user=%q, want 1000:1001", got)
+	}
+	if got := resolved.GetRuntimeConfig().GetEnv(); len(got) != 2 || got[1] != "FOO=bar" {
+		t.Fatalf("env=%v, want image env", got)
 	}
 
 	resp, err := s.FindImageProvider(context.Background(), &discoverypb.FindImageProviderRequest{
@@ -179,7 +201,8 @@ func TestFindImageProviderRequiresImageKey(t *testing.T) {
 }
 
 type fakeResolver struct {
-	layers []registry.Layer
+	layers        []registry.Layer
+	runtimeConfig registry.ImageRuntimeConfig
 }
 
 func (f *fakeResolver) GetLayersForPlatform(ctx context.Context, image, tag, os, arch, variant string) ([]registry.Layer, error) {
@@ -190,6 +213,25 @@ func (f *fakeResolver) GetLayersForPlatform(ctx context.Context, image, tag, os,
 	_ = arch
 	_ = variant
 	return append([]registry.Layer(nil), f.layers...), nil
+}
+
+func (f *fakeResolver) GetImageMetadataForPlatform(ctx context.Context, image, tag, os, arch, variant string) (registry.ImageMetadata, error) {
+	_ = ctx
+	_ = image
+	_ = tag
+	_ = os
+	_ = arch
+	_ = variant
+	return registry.ImageMetadata{
+		Layers: append([]registry.Layer(nil), f.layers...),
+		RuntimeConfig: registry.ImageRuntimeConfig{
+			Entrypoint: append([]string(nil), f.runtimeConfig.Entrypoint...),
+			Cmd:        append([]string(nil), f.runtimeConfig.Cmd...),
+			Env:        append([]string(nil), f.runtimeConfig.Env...),
+			WorkingDir: f.runtimeConfig.WorkingDir,
+			User:       f.runtimeConfig.User,
+		},
+	}, nil
 }
 
 func (f *fakeResolver) Login(registry, username, password string) error {

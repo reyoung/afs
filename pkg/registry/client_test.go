@@ -90,6 +90,75 @@ func TestClient_GetLayersAndDownloadLayer(t *testing.T) {
 	}
 }
 
+func TestClient_GetImageMetadataIncludesRuntimeConfig(t *testing.T) {
+	const (
+		repo         = "team/runtime"
+		tag          = "v1"
+		token        = "good-token"
+		layerDigest  = "sha256:layer-runtime"
+		configDigest = "sha256:cfg-runtime"
+	)
+
+	var baseURL string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"` + token + `"}`))
+			return
+		case r.URL.Path == "/v2/"+repo+"/manifests/"+tag:
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.Header().Set("Www-Authenticate", `Bearer realm="`+baseURL+`/token",service="fake-registry"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", manifestV2)
+			_, _ = w.Write([]byte(`{"schemaVersion":2,"mediaType":"` + manifestV2 + `","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":100,"digest":"` + configDigest + `"},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":100,"digest":"` + layerDigest + `"}]}`))
+			return
+		case r.URL.Path == "/v2/"+repo+"/blobs/"+configDigest:
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.Header().Set("Www-Authenticate", `Bearer realm="`+baseURL+`/token",service="fake-registry",scope="repository:`+repo+`:pull"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/vnd.oci.image.config.v1+json")
+			_, _ = w.Write([]byte(`{"config":{"Entrypoint":["/docker-entrypoint.sh"],"Cmd":["nginx","-g","daemon off;"],"Env":["FOO=bar","PATH=/custom/bin"],"WorkingDir":"/work","User":"472"}}`))
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	baseURL = server.URL
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	image := host + "/" + repo
+	client := NewClient(server.Client())
+
+	meta, err := client.GetImageMetadataForPlatform(context.Background(), image, tag, "linux", "amd64", "")
+	if err != nil {
+		t.Fatalf("GetImageMetadataForPlatform() error = %v", err)
+	}
+	if len(meta.Layers) != 1 || meta.Layers[0].Digest != layerDigest {
+		t.Fatalf("unexpected layers: %+v", meta.Layers)
+	}
+	if got := meta.RuntimeConfig.Entrypoint; len(got) != 1 || got[0] != "/docker-entrypoint.sh" {
+		t.Fatalf("unexpected entrypoint: %+v", got)
+	}
+	if got := meta.RuntimeConfig.Cmd; len(got) != 3 || got[0] != "nginx" || got[2] != "daemon off;" {
+		t.Fatalf("unexpected cmd: %+v", got)
+	}
+	if got := meta.RuntimeConfig.Env; len(got) != 2 || got[0] != "FOO=bar" || got[1] != "PATH=/custom/bin" {
+		t.Fatalf("unexpected env: %+v", got)
+	}
+	if got := meta.RuntimeConfig.WorkingDir; got != "/work" {
+		t.Fatalf("unexpected working dir: %q", got)
+	}
+	if got := meta.RuntimeConfig.User; got != "472" {
+		t.Fatalf("unexpected user: %q", got)
+	}
+}
+
 func TestClient_LoginUsesBasicAuthForTokenEndpoint(t *testing.T) {
 	const (
 		repo   = "team/private"

@@ -21,6 +21,8 @@ const (
 	defaultPlatformArch = "amd64"
 )
 
+const maxImageConfigBytes = 8 << 20
+
 // Client provides APIs to read image metadata and blobs from a docker registry.
 type Client struct {
 	httpClient *http.Client
@@ -273,6 +275,32 @@ func (c *Client) GetLayersForPlatform(ctx context.Context, image string, tag str
 	return layers, nil
 }
 
+// GetImageMetadataForPlatform returns both layer metadata and runtime config.
+func (c *Client) GetImageMetadataForPlatform(ctx context.Context, image string, tag string, os string, arch string, variant string) (ImageMetadata, error) {
+	ref, err := ParseImageReference(image, tag)
+	if err != nil {
+		return ImageMetadata{}, err
+	}
+	manifest, err := c.getManifestForReference(ctx, ref, ref.Reference, os, arch, variant)
+	if err != nil {
+		return ImageMetadata{}, err
+	}
+
+	layers := make([]Layer, 0, len(manifest.Layers))
+	for _, d := range manifest.Layers {
+		layers = append(layers, Layer{Digest: d.Digest, MediaType: d.MediaType, Size: d.Size})
+	}
+
+	runtimeCfg, err := c.getImageRuntimeConfig(ctx, ref, manifest.Config.Digest)
+	if err != nil {
+		return ImageMetadata{}, err
+	}
+	return ImageMetadata{
+		Layers:        layers,
+		RuntimeConfig: runtimeCfg,
+	}, nil
+}
+
 // DownloadLayer downloads a layer blob by digest.
 func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, digest string) (io.ReadCloser, error) {
 	if strings.TrimSpace(digest) == "" {
@@ -283,6 +311,10 @@ func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, di
 		return nil, err
 	}
 
+	return c.downloadBlob(ctx, ref, digest)
+}
+
+func (c *Client) downloadBlob(ctx context.Context, ref ImageReference, digest string) (io.ReadCloser, error) {
 	hosts := c.requestHosts(ref.Registry)
 	var lastErr error
 	for i, host := range hosts {
@@ -302,7 +334,7 @@ func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, di
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
 		_ = resp.Body.Close()
-		reqErr := fmt.Errorf("download layer failed host=%s status=%d body=%q", host, resp.StatusCode, strings.TrimSpace(string(b)))
+		reqErr := fmt.Errorf("download blob failed host=%s status=%d body=%q", host, resp.StatusCode, strings.TrimSpace(string(b)))
 		lastErr = reqErr
 		if i < len(hosts)-1 && shouldFallbackToNextHost(resp.StatusCode) {
 			continue
@@ -312,7 +344,44 @@ func (c *Client) DownloadLayer(ctx context.Context, image string, tag string, di
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("download layer failed: no available hosts for %s", ref.Registry)
+	return nil, fmt.Errorf("download blob failed: no available hosts for %s", ref.Registry)
+}
+
+func (c *Client) getImageRuntimeConfig(ctx context.Context, ref ImageReference, digest string) (ImageRuntimeConfig, error) {
+	digest = strings.TrimSpace(digest)
+	if digest == "" {
+		return ImageRuntimeConfig{}, nil
+	}
+	rc, err := c.downloadBlob(ctx, ref, digest)
+	if err != nil {
+		return ImageRuntimeConfig{}, fmt.Errorf("download image config %s: %w", digest, err)
+	}
+	defer rc.Close()
+
+	body, err := io.ReadAll(io.LimitReader(rc, maxImageConfigBytes))
+	if err != nil {
+		return ImageRuntimeConfig{}, fmt.Errorf("read image config %s: %w", digest, err)
+	}
+
+	var payload struct {
+		Config struct {
+			Entrypoint []string `json:"Entrypoint"`
+			Cmd        []string `json:"Cmd"`
+			Env        []string `json:"Env"`
+			WorkingDir string   `json:"WorkingDir"`
+			User       string   `json:"User"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ImageRuntimeConfig{}, fmt.Errorf("decode image config %s: %w", digest, err)
+	}
+	return ImageRuntimeConfig{
+		Entrypoint: append([]string(nil), payload.Config.Entrypoint...),
+		Cmd:        append([]string(nil), payload.Config.Cmd...),
+		Env:        append([]string(nil), payload.Config.Env...),
+		WorkingDir: strings.TrimSpace(payload.Config.WorkingDir),
+		User:       strings.TrimSpace(payload.Config.User),
+	}, nil
 }
 
 func (c *Client) doWithAuth(ctx context.Context, req *http.Request, registry, repository string) (*http.Response, error) {
