@@ -56,6 +56,12 @@ type toc struct {
 	Entries []Entry `json:"entries"`
 }
 
+type hardlinkRef struct {
+	entryPath  string
+	linkName   string
+	candidates []string
+}
+
 // ConvertTarGzipToArchive converts an OCI layer tar+gzip stream into the custom format.
 // Files are individually gzip compressed so readers can locate a single file directly.
 func ConvertTarGzipToArchive(layerTarGzip io.Reader, out io.Writer) error {
@@ -69,6 +75,8 @@ func ConvertTarGzipToArchive(layerTarGzip io.Reader, out io.Writer) error {
 
 	entries := make([]Entry, 0, 128)
 	dataChunks := make([][]byte, 0, 128)
+	entryIndexByPath := make(map[string]int, 128)
+	pendingHardlinks := make(map[int]hardlinkRef)
 	var dataOffset int64
 
 	for {
@@ -97,10 +105,12 @@ func ConvertTarGzipToArchive(layerTarGzip io.Reader, out io.Writer) error {
 		case tar.TypeDir:
 			base.Type = EntryTypeDir
 			entries = append(entries, base)
+			entryIndexByPath[normalized] = len(entries) - 1
 		case tar.TypeSymlink:
 			base.Type = EntryTypeSymlink
 			base.SymlinkTarget = hdr.Linkname
 			entries = append(entries, base)
+			entryIndexByPath[normalized] = len(entries) - 1
 		case tar.TypeReg, tar.TypeRegA:
 			base.Type = EntryTypeFile
 			base.UncompressedSize = hdr.Size
@@ -114,9 +124,28 @@ func ConvertTarGzipToArchive(layerTarGzip io.Reader, out io.Writer) error {
 			dataOffset += int64(len(compressed))
 			entries = append(entries, base)
 			dataChunks = append(dataChunks, compressed)
+			entryIndexByPath[normalized] = len(entries) - 1
+		case tar.TypeLink:
+			candidates := hardlinkTargetCandidates(normalized, hdr.Linkname)
+			if len(candidates) == 0 {
+				return fmt.Errorf("hardlink %s has invalid target %q", normalized, hdr.Linkname)
+			}
+			base.Type = EntryTypeFile
+			entries = append(entries, base)
+			idx := len(entries) - 1
+			entryIndexByPath[normalized] = idx
+			pendingHardlinks[idx] = hardlinkRef{
+				entryPath:  normalized,
+				linkName:   hdr.Linkname,
+				candidates: candidates,
+			}
 		default:
-			// Skip unsupported tar objects (hard links, block devices, etc).
+			// Skip unsupported tar objects (block devices, fifos, etc).
 		}
+	}
+
+	if err := resolveHardlinks(entries, pendingHardlinks, entryIndexByPath); err != nil {
+		return err
 	}
 
 	t := toc{Version: 1, Entries: entries}
@@ -252,6 +281,85 @@ func gzipCompressFromReader(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func hardlinkTargetCandidates(entryPath string, linkName string) []string {
+	raw := strings.TrimSpace(linkName)
+	if raw == "" {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	appendIfValid := func(p string) {
+		norm, ok := normalizeTarPath(p)
+		if !ok {
+			return
+		}
+		if _, exists := seen[norm]; exists {
+			return
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	appendIfValid(raw)
+	parent := path.Dir(entryPath)
+	if parent == "." {
+		parent = ""
+	}
+	appendIfValid(path.Join(parent, raw))
+	return out
+}
+
+func resolveHardlinks(entries []Entry, pending map[int]hardlinkRef, entryIndexByPath map[string]int) error {
+	resolving := make(map[int]struct{}, len(pending))
+	resolved := make(map[int]struct{}, len(pending))
+
+	var resolve func(idx int) error
+	resolve = func(idx int) error {
+		if _, ok := resolved[idx]; ok {
+			return nil
+		}
+		ref, ok := pending[idx]
+		if !ok {
+			return nil
+		}
+		if _, ok := resolving[idx]; ok {
+			return fmt.Errorf("hardlink cycle detected for %s", ref.entryPath)
+		}
+		resolving[idx] = struct{}{}
+		defer delete(resolving, idx)
+
+		for _, candidate := range ref.candidates {
+			targetIdx, ok := entryIndexByPath[candidate]
+			if !ok {
+				continue
+			}
+			if targetIdx == idx {
+				return fmt.Errorf("hardlink %s points to itself", ref.entryPath)
+			}
+			if err := resolve(targetIdx); err != nil {
+				return err
+			}
+			target := entries[targetIdx]
+			if target.Type != EntryTypeFile {
+				return fmt.Errorf("hardlink %s target %s is not a regular file", ref.entryPath, candidate)
+			}
+			entries[idx].UncompressedSize = target.UncompressedSize
+			entries[idx].CompressedOffset = target.CompressedOffset
+			entries[idx].CompressedSize = target.CompressedSize
+			delete(pending, idx)
+			resolved[idx] = struct{}{}
+			return nil
+		}
+		return fmt.Errorf("hardlink %s target %q not found in layer", ref.entryPath, ref.linkName)
+	}
+
+	for idx := range pending {
+		if err := resolve(idx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeTarPath(p string) (string, bool) {

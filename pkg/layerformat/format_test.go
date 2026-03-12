@@ -55,6 +55,21 @@ func TestConvertTarGzipToArchive_ReadFileAndStat(t *testing.T) {
 	if symlink.Type != EntryTypeSymlink || symlink.SymlinkTarget != "hello.txt" {
 		t.Fatalf("unexpected symlink metadata: %+v", symlink)
 	}
+
+	hardlink, err := r.Stat("dir/hard")
+	if err != nil {
+		t.Fatalf("Stat(hardlink) error = %v", err)
+	}
+	if hardlink.Type != EntryTypeFile {
+		t.Fatalf("unexpected hardlink entry type: %s", hardlink.Type)
+	}
+	hardlinkData, err := r.ReadFile("dir/hard")
+	if err != nil {
+		t.Fatalf("ReadFile(hardlink) error = %v", err)
+	}
+	if string(hardlinkData) != "hello world" {
+		t.Fatalf("unexpected hardlink content: %q", string(hardlinkData))
+	}
 }
 
 func buildLayerTarGz(t *testing.T) []byte {
@@ -65,6 +80,7 @@ func buildLayerTarGz(t *testing.T) []byte {
 	mustWriteTarHdr(t, tw, &tar.Header{Name: "dir", Typeflag: tar.TypeDir, Mode: 0o755})
 	mustWriteTarFile(t, tw, "dir/hello.txt", []byte("hello world"), 0o644)
 	mustWriteTarHdr(t, tw, &tar.Header{Name: "dir/link", Typeflag: tar.TypeSymlink, Linkname: "hello.txt", Mode: 0o777})
+	mustWriteTarHdr(t, tw, &tar.Header{Name: "dir/hard", Typeflag: tar.TypeLink, Linkname: "hello.txt", Mode: 0o644})
 
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar writer: %v", err)
