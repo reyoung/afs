@@ -17,6 +17,7 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsproxy"
 	"github.com/reyoung/afs/pkg/afsproxypb"
+	"github.com/reyoung/afs/pkg/debughttp"
 )
 
 func main() {
@@ -32,6 +33,7 @@ func main() {
 		httpPeerTimeout time.Duration
 		gracefulTimeout time.Duration
 		discoveryTarget string
+		pprofListen     string
 	)
 
 	flag.StringVar(&grpcListen, "listen", ":62051", "gRPC listen address")
@@ -45,6 +47,7 @@ func main() {
 	flag.DurationVar(&httpPeerTimeout, "peer-http-timeout", 2*time.Second, "peer query timeout for cluster dispatching status")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "graceful shutdown timeout")
 	flag.StringVar(&discoveryTarget, "discovery-target", "", "discovery DNS target host:port for layerstore status query")
+	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof; use the same value as -http-listen to expose pprof on the main HTTP server")
 	flag.Parse()
 
 	svc := afsproxy.NewService(afsproxy.Config{
@@ -76,7 +79,16 @@ func main() {
 	httpMux.HandleFunc("/status", svc.HandleStatusHTTP)
 	// Backward compatibility for old clients.
 	httpMux.HandleFunc("/dispatching", svc.HandleStatusHTTP)
+	if pprofListen != "" && pprofListen == httpListen {
+		debughttp.RegisterPprof(httpMux)
+	}
 	httpServer := &http.Server{Handler: httpMux}
+	shutdownPprof := func(context.Context) error { return nil }
+	if pprofListen != "" && pprofListen != httpListen {
+		if stopper := debughttp.StartPprofServer("afs_proxy", pprofListen); stopper != nil {
+			shutdownPprof = stopper
+		}
+	}
 
 	go func() {
 		log.Printf("afs_proxy gRPC listening on %s (afslet-target=%s)", grpcListen, afsletTarget)
@@ -108,4 +120,5 @@ func main() {
 	case <-ctx.Done():
 		grpcServer.Stop()
 	}
+	_ = shutdownPprof(ctx)
 }

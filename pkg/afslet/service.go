@@ -36,85 +36,88 @@ const (
 )
 
 type Config struct {
-	MountBinary                string
-	MountInProcess             bool
-	RuncBinary                 string
-	RuncNoPivot                bool
-	RuncNoNewKeyring           bool
-	RuncNoCgroupNS             bool
-	RuncNoPIDNS                bool
-	RuncNoIPCNS                bool
-	RuncNoUTSNS                bool
-	UseSudo                    bool
-	TarChunk                   int
-	DefaultDiscovery           string
-	TempDir                    string
-	LimitCPUCores              int64
-	LimitMemoryMB              int64
-	SharedSpillCacheEnabled    bool
-	SharedSpillCacheDir        string
-	SharedSpillCacheSock       string
-	SharedSpillCacheMaxBytes   int64
-	SharedSpillCacheBinaryPath string
-	LayerMountConcurrency      int
+	MountBinary                 string
+	MountInProcess              bool
+	RuncBinary                  string
+	RuncNoPivot                 bool
+	RuncNoNewKeyring            bool
+	RuncNoCgroupNS              bool
+	RuncNoPIDNS                 bool
+	RuncNoIPCNS                 bool
+	RuncNoUTSNS                 bool
+	UseSudo                     bool
+	TarChunk                    int
+	DefaultDiscovery            string
+	TempDir                     string
+	LimitCPUCores               int64
+	LimitMemoryMB               int64
+	SharedSpillCacheEnabled     bool
+	SharedSpillCacheDir         string
+	SharedSpillCacheSock        string
+	SharedSpillCacheMaxBytes    int64
+	SharedSpillCacheBinaryPath  string
+	SharedSpillCachePprofListen string
+	LayerMountConcurrency       int
 }
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountBinary                string
-	mountInProcess             bool
-	mountRunner                func(context.Context, afsmount.Config) error
-	runcBinary                 string
-	runcNoPivot                bool
-	runcNoNewKeyring           bool
-	runcNoCgroupNS             bool
-	runcNoPIDNS                bool
-	runcNoIPCNS                bool
-	runcNoUTSNS                bool
-	useSudo                    bool
-	tarChunk                   int
-	defaultDiscovery           string
-	tempDir                    string
-	mu                         sync.Mutex
-	limitCPUCores              int64
-	limitMemoryMB              int64
-	usedCPUCores               int64
-	usedMemoryMB               int64
-	runningContainers          int64
-	sharedSpillCacheEnabled    bool
-	sharedSpillCacheDir        string
-	sharedSpillCacheSock       string
-	sharedSpillCacheMaxBytes   int64
-	sharedSpillCacheBinaryPath string
-	layerMountConcurrency      int
-	resolveImageRuntimeConfig  func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
+	mountBinary                 string
+	mountInProcess              bool
+	mountRunner                 func(context.Context, afsmount.Config) error
+	runcBinary                  string
+	runcNoPivot                 bool
+	runcNoNewKeyring            bool
+	runcNoCgroupNS              bool
+	runcNoPIDNS                 bool
+	runcNoIPCNS                 bool
+	runcNoUTSNS                 bool
+	useSudo                     bool
+	tarChunk                    int
+	defaultDiscovery            string
+	tempDir                     string
+	mu                          sync.Mutex
+	limitCPUCores               int64
+	limitMemoryMB               int64
+	usedCPUCores                int64
+	usedMemoryMB                int64
+	runningContainers           int64
+	sharedSpillCacheEnabled     bool
+	sharedSpillCacheDir         string
+	sharedSpillCacheSock        string
+	sharedSpillCacheMaxBytes    int64
+	sharedSpillCacheBinaryPath  string
+	sharedSpillCachePprofListen string
+	layerMountConcurrency       int
+	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountBinary:                strings.TrimSpace(cfg.MountBinary),
-		mountInProcess:             cfg.MountInProcess,
-		mountRunner:                afsmount.Run,
-		runcBinary:                 strings.TrimSpace(cfg.RuncBinary),
-		runcNoPivot:                cfg.RuncNoPivot,
-		runcNoNewKeyring:           cfg.RuncNoNewKeyring,
-		runcNoCgroupNS:             cfg.RuncNoCgroupNS,
-		runcNoPIDNS:                cfg.RuncNoPIDNS,
-		runcNoIPCNS:                cfg.RuncNoIPCNS,
-		runcNoUTSNS:                cfg.RuncNoUTSNS,
-		useSudo:                    cfg.UseSudo,
-		tarChunk:                   cfg.TarChunk,
-		defaultDiscovery:           strings.TrimSpace(cfg.DefaultDiscovery),
-		tempDir:                    strings.TrimSpace(cfg.TempDir),
-		limitCPUCores:              cfg.LimitCPUCores,
-		limitMemoryMB:              cfg.LimitMemoryMB,
-		sharedSpillCacheEnabled:    cfg.SharedSpillCacheEnabled,
-		sharedSpillCacheDir:        strings.TrimSpace(cfg.SharedSpillCacheDir),
-		sharedSpillCacheSock:       strings.TrimSpace(cfg.SharedSpillCacheSock),
-		sharedSpillCacheMaxBytes:   cfg.SharedSpillCacheMaxBytes,
-		sharedSpillCacheBinaryPath: strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
-		layerMountConcurrency:      cfg.LayerMountConcurrency,
+		mountBinary:                 strings.TrimSpace(cfg.MountBinary),
+		mountInProcess:              cfg.MountInProcess,
+		mountRunner:                 afsmount.Run,
+		runcBinary:                  strings.TrimSpace(cfg.RuncBinary),
+		runcNoPivot:                 cfg.RuncNoPivot,
+		runcNoNewKeyring:            cfg.RuncNoNewKeyring,
+		runcNoCgroupNS:              cfg.RuncNoCgroupNS,
+		runcNoPIDNS:                 cfg.RuncNoPIDNS,
+		runcNoIPCNS:                 cfg.RuncNoIPCNS,
+		runcNoUTSNS:                 cfg.RuncNoUTSNS,
+		useSudo:                     cfg.UseSudo,
+		tarChunk:                    cfg.TarChunk,
+		defaultDiscovery:            strings.TrimSpace(cfg.DefaultDiscovery),
+		tempDir:                     strings.TrimSpace(cfg.TempDir),
+		limitCPUCores:               cfg.LimitCPUCores,
+		limitMemoryMB:               cfg.LimitMemoryMB,
+		sharedSpillCacheEnabled:     cfg.SharedSpillCacheEnabled,
+		sharedSpillCacheDir:         strings.TrimSpace(cfg.SharedSpillCacheDir),
+		sharedSpillCacheSock:        strings.TrimSpace(cfg.SharedSpillCacheSock),
+		sharedSpillCacheMaxBytes:    cfg.SharedSpillCacheMaxBytes,
+		sharedSpillCacheBinaryPath:  strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
+		sharedSpillCachePprofListen: strings.TrimSpace(cfg.SharedSpillCachePprofListen),
+		layerMountConcurrency:       cfg.LayerMountConcurrency,
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -162,6 +165,7 @@ func newFileAssembler(baseDir string) *fileAssembler {
 
 func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	ctx := stream.Context()
+	executeStart := time.Now()
 	sess, cleanup, err := newSession(s.tempDir)
 	if err != nil {
 		return status.Errorf(codes.Internal, "create session: %v", err)
@@ -186,10 +190,18 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	if err := validateStartRequest(start); err != nil {
 		return status.Errorf(codes.InvalidArgument, "%v", err)
 	}
-	release, reserveErr := s.reserveResources(start.GetCpuCores(), start.GetMemoryMb())
+
+	// Log execute request timing
+	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=execute_request_enter ms=%d", time.Since(executeStart).Milliseconds()))
+
+	reserveStart := time.Now()
+	release, reserveMs, reserveLockMs, reserveErr := s.reserveResourcesWithTiming(start.GetCpuCores(), start.GetMemoryMb())
+	admissionQueueWaitMs := time.Since(reserveStart).Milliseconds() - reserveMs
 	if reserveErr != nil {
+		_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=false", reserveMs, reserveLockMs, admissionQueueWaitMs))
 		return status.Errorf(codes.ResourceExhausted, "%v", reserveErr)
 	}
+	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=true", reserveMs, reserveLockMs, admissionQueueWaitMs))
 	defer release()
 
 	if err := stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Accepted{Accepted: &afsletpb.Accepted{Accepted: true}}}); err != nil {
@@ -289,25 +301,33 @@ func (s *Service) addRunningContainers(delta int64) {
 	}
 }
 
-func (s *Service) reserveResources(cpu int64, memoryMB int64) (func(), error) {
+func (s *Service) reserveResourcesWithTiming(cpu int64, memoryMB int64) (func(), int64, int64, error) {
+	lockStart := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	lockWaitMs := time.Since(lockStart).Milliseconds()
 
+	resourceCheckStart := time.Now()
 	if cpu > s.limitCPUCores {
-		return nil, fmt.Errorf("requested cpu=%d exceeds limit=%d", cpu, s.limitCPUCores)
+		s.mu.Unlock()
+		return nil, lockWaitMs, 0, fmt.Errorf("requested cpu=%d exceeds limit=%d", cpu, s.limitCPUCores)
 	}
 	if memoryMB > s.limitMemoryMB {
-		return nil, fmt.Errorf("requested memory_mb=%d exceeds limit=%d", memoryMB, s.limitMemoryMB)
+		s.mu.Unlock()
+		return nil, lockWaitMs, 0, fmt.Errorf("requested memory_mb=%d exceeds limit=%d", memoryMB, s.limitMemoryMB)
 	}
 	remainCPU := s.limitCPUCores - s.usedCPUCores
 	remainMem := s.limitMemoryMB - s.usedMemoryMB
 	if cpu > remainCPU || memoryMB > remainMem {
-		return nil, fmt.Errorf("insufficient resources: request cpu=%d memory_mb=%d, available cpu=%d memory_mb=%d", cpu, memoryMB, remainCPU, remainMem)
+		s.mu.Unlock()
+		admissionQueueWaitMs := time.Since(resourceCheckStart).Milliseconds()
+		return nil, lockWaitMs, admissionQueueWaitMs, fmt.Errorf("insufficient resources: request cpu=%d memory_mb=%d, available cpu=%d memory_mb=%d", cpu, memoryMB, remainCPU, remainMem)
 	}
 
 	s.usedCPUCores += cpu
 	s.usedMemoryMB += memoryMB
-	return func() {
+	resourceCheckMs := time.Since(resourceCheckStart).Milliseconds()
+
+	release := func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.usedCPUCores -= cpu
@@ -318,7 +338,15 @@ func (s *Service) reserveResources(cpu int64, memoryMB int64) (func(), error) {
 		if s.usedMemoryMB < 0 {
 			s.usedMemoryMB = 0
 		}
-	}, nil
+	}
+
+	s.mu.Unlock()
+	return release, lockWaitMs, resourceCheckMs, nil
+}
+
+func (s *Service) reserveResources(cpu int64, memoryMB int64) (func(), error) {
+	release, _, _, err := s.reserveResourcesWithTiming(cpu, memoryMB)
+	return release, err
 }
 
 func validateStartRequest(start *afsletpb.StartRequest) error {
@@ -373,24 +401,25 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 
 	mountCfg := afsmount.Config{
-		Mountpoint:                 sess.mountpoint,
-		WorkDir:                    sess.workDir,
-		ExtraDir:                   sess.extraDir,
-		MountProcDev:               false,
-		Image:                      image,
-		Tag:                        tag,
-		DiscoveryAddr:              discoveryAddr,
-		NodeID:                     strings.TrimSpace(start.GetNodeId()),
-		PlatformOS:                 strings.TrimSpace(start.GetPlatformOs()),
-		PlatformArch:               strings.TrimSpace(start.GetPlatformArch()),
-		PlatformVariant:            strings.TrimSpace(start.GetPlatformVariant()),
-		ForceLocalFetch:            start.GetForceLocalFetch(),
-		SharedSpillCacheEnabled:    s.sharedSpillCacheEnabled,
-		SharedSpillCacheDir:        s.sharedSpillCacheDir,
-		SharedSpillCacheSock:       s.sharedSpillCacheSock,
-		SharedSpillCacheMaxBytes:   s.sharedSpillCacheMaxBytes,
-		SharedSpillCacheBinaryPath: s.sharedSpillCacheBinaryPath,
-		LayerMountConcurrency:      s.layerMountConcurrency,
+		Mountpoint:                  sess.mountpoint,
+		WorkDir:                     sess.workDir,
+		ExtraDir:                    sess.extraDir,
+		MountProcDev:                false,
+		Image:                       image,
+		Tag:                         tag,
+		DiscoveryAddr:               discoveryAddr,
+		NodeID:                      strings.TrimSpace(start.GetNodeId()),
+		PlatformOS:                  strings.TrimSpace(start.GetPlatformOs()),
+		PlatformArch:                strings.TrimSpace(start.GetPlatformArch()),
+		PlatformVariant:             strings.TrimSpace(start.GetPlatformVariant()),
+		ForceLocalFetch:             start.GetForceLocalFetch(),
+		SharedSpillCacheEnabled:     s.sharedSpillCacheEnabled,
+		SharedSpillCacheDir:         s.sharedSpillCacheDir,
+		SharedSpillCacheSock:        s.sharedSpillCacheSock,
+		SharedSpillCacheMaxBytes:    s.sharedSpillCacheMaxBytes,
+		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
+		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
+		LayerMountConcurrency:       s.layerMountConcurrency,
 	}
 	mountArgs := []string{
 		"-mountpoint", sess.mountpoint,
@@ -433,6 +462,9 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		}
 		if s.sharedSpillCacheBinaryPath != "" {
 			mountArgs = append(mountArgs, "-shared-spill-cache-binary", s.sharedSpillCacheBinaryPath)
+		}
+		if s.sharedSpillCachePprofListen != "" {
+			mountArgs = append(mountArgs, "-shared-spill-cache-pprof-listen", s.sharedSpillCachePprofListen)
 		}
 	}
 	if s.layerMountConcurrency > 0 {
@@ -583,14 +615,25 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	if logf != nil {
 		logf("runc", fmt.Sprintf("running: %s %s", s.runcBinary, strings.Join(runcArgs, " ")))
 	}
+	runcStart := time.Now()
 	if err := runcCmd.Start(); err != nil {
 		stopMountSafe()
 		_ = s.tryForceUmount(sess.mountpoint)
+		if logf != nil {
+			logf("runc", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=runc_start ms=%d ok=false", time.Since(runcStart).Milliseconds()))
+		}
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
+	}
+	if logf != nil {
+		logf("runc", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=runc_start ms=%d ok=true", time.Since(runcStart).Milliseconds()))
 	}
 	s.addRunningContainers(1)
 	defer s.addRunningContainers(-1)
+	runcWaitStart := time.Now()
 	runErr := runcCmd.Wait()
+	if logf != nil {
+		logf("runc", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=runc_wait ms=%d", time.Since(runcWaitStart).Milliseconds()))
+	}
 
 	stopMountStarted := time.Now()
 	stopMountSafe()

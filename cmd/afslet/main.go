@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/reyoung/afs/pkg/afslet"
 	"github.com/reyoung/afs/pkg/afsletpb"
+	"github.com/reyoung/afs/pkg/debughttp"
 )
 
 func main() {
@@ -39,7 +41,9 @@ func main() {
 	var sharedSpillCacheSock string
 	var sharedSpillCacheMaxBytes int64
 	var sharedSpillCacheBinary string
+	var sharedSpillCachePprofListen string
 	var layerMountConcurrency int
+	var pprofListen string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -63,7 +67,9 @@ func main() {
 	flag.StringVar(&sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache socket path for afs_mount")
 	flag.Int64Var(&sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes for afs_mount")
 	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
+	flag.StringVar(&sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
+	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -72,32 +78,34 @@ func main() {
 	}
 
 	svc := afslet.NewService(afslet.Config{
-		MountBinary:                mountBinary,
-		MountInProcess:             mountInProcess,
-		RuncBinary:                 runcBinary,
-		RuncNoPivot:                runcNoPivot,
-		RuncNoNewKeyring:           runcNoNewKeyring,
-		RuncNoCgroupNS:             runcNoCgroupNS,
-		RuncNoPIDNS:                runcNoPIDNS,
-		RuncNoIPCNS:                runcNoIPCNS,
-		RuncNoUTSNS:                runcNoUTSNS,
-		UseSudo:                    useSudo,
-		TarChunk:                   tarChunk,
-		DefaultDiscovery:           defaultDiscoveryAddr,
-		TempDir:                    tempDir,
-		LimitCPUCores:              limitCPUCores,
-		LimitMemoryMB:              limitMemoryMB,
-		SharedSpillCacheEnabled:    sharedSpillCache,
-		SharedSpillCacheDir:        sharedSpillCacheDir,
-		SharedSpillCacheSock:       sharedSpillCacheSock,
-		SharedSpillCacheMaxBytes:   sharedSpillCacheMaxBytes,
-		SharedSpillCacheBinaryPath: sharedSpillCacheBinary,
-		LayerMountConcurrency:      layerMountConcurrency,
+		MountBinary:                 mountBinary,
+		MountInProcess:              mountInProcess,
+		RuncBinary:                  runcBinary,
+		RuncNoPivot:                 runcNoPivot,
+		RuncNoNewKeyring:            runcNoNewKeyring,
+		RuncNoCgroupNS:              runcNoCgroupNS,
+		RuncNoPIDNS:                 runcNoPIDNS,
+		RuncNoIPCNS:                 runcNoIPCNS,
+		RuncNoUTSNS:                 runcNoUTSNS,
+		UseSudo:                     useSudo,
+		TarChunk:                    tarChunk,
+		DefaultDiscovery:            defaultDiscoveryAddr,
+		TempDir:                     tempDir,
+		LimitCPUCores:               limitCPUCores,
+		LimitMemoryMB:               limitMemoryMB,
+		SharedSpillCacheEnabled:     sharedSpillCache,
+		SharedSpillCacheDir:         sharedSpillCacheDir,
+		SharedSpillCacheSock:        sharedSpillCacheSock,
+		SharedSpillCacheMaxBytes:    sharedSpillCacheMaxBytes,
+		SharedSpillCacheBinaryPath:  sharedSpillCacheBinary,
+		SharedSpillCachePprofListen: sharedSpillCachePprofListen,
+		LayerMountConcurrency:       layerMountConcurrency,
 	})
 
 	grpcServer := grpc.NewServer()
 	afsletpb.RegisterAfsletServer(grpcServer, svc)
 	reflection.Register(grpcServer)
+	shutdownPprof := debughttp.StartPprofServer("afslet", pprofListen)
 
 	go func() {
 		log.Printf("afslet listening on %s", listenAddr)
@@ -121,5 +129,10 @@ func main() {
 	case <-time.After(gracefulTimeout):
 		log.Printf("graceful stop timed out, forcing stop")
 		grpcServer.Stop()
+	}
+	if shutdownPprof != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulTimeout)
+		defer cancel()
+		_ = shutdownPprof(ctx)
 	}
 }

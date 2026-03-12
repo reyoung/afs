@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerstore"
 	"github.com/reyoung/afs/pkg/layerstorepb"
@@ -43,6 +44,7 @@ func main() {
 		mirrorPairs        multiStringFlag
 		discoveryEndpoints multiStringFlag
 		cacheMaxBytes      int64
+		pprofListen        string
 	)
 
 	flag.StringVar(&listenAddr, "listen", "", "gRPC listen endpoint with IP, e.g. 10.0.0.12:50051")
@@ -57,6 +59,7 @@ func main() {
 	flag.Var(&mirrorPairs, "registry-mirror", "repeatable registry mirror mapping, format <registry>=<mirror>[,<mirror>...]")
 	flag.Var(&discoveryEndpoints, "discovery-endpoint", "repeatable discovery gRPC endpoint, e.g. 10.0.0.2:60051")
 	flag.Int64Var(&cacheMaxBytes, "cache-max-bytes", 0, "max layer cache bytes (0 means default: min(1TB, 60% of free space))")
+	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6063")
 	flag.Parse()
 
 	if err := validateListenEndpoint(listenAddr); err != nil {
@@ -148,6 +151,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	layerstorepb.RegisterLayerStoreServer(grpcServer, svc)
 	reflection.Register(grpcServer)
+	shutdownPprof := debughttp.StartPprofServer("afs_layerstore_grpcd", pprofListen)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -182,6 +186,11 @@ func main() {
 	cancel()
 	log.Printf("shutting down layerstore gRPC server")
 	grpcServer.GracefulStop()
+	if shutdownPprof != nil {
+		ctx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stopCancel()
+		_ = shutdownPprof(ctx)
+	}
 }
 
 func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, cacheMaxBytes int64, pendingImages func() []string, trigger <-chan struct{}) {

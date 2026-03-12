@@ -56,6 +56,45 @@ func TestCacheStoreAcquireCommitAndHit(t *testing.T) {
 	}
 }
 
+func TestCacheStoreHitDoesNotRewriteIndexDB(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := newCacheStore(dir, 1<<20)
+	if err != nil {
+		t.Fatalf("newCacheStore: %v", err)
+	}
+
+	_, _, lease, err := store.acquire(cacheKey{Digest: "sha256:abc", FilePath: "/a/b"})
+	if err != nil {
+		t.Fatalf("acquire miss: %v", err)
+	}
+	if err := os.WriteFile(lease.TempPath, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if _, _, err := store.commit(lease.Token); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	dbPath := filepath.Join(dir, indexDBFileName)
+	before, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat db before hit: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+
+	if _, _, _, err := store.acquire(cacheKey{Digest: "sha256:abc", FilePath: "/a/b"}); err != nil {
+		t.Fatalf("acquire hit: %v", err)
+	}
+
+	after, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat db after hit: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("index db modtime changed on cache hit: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}
+
 func TestCacheStoreEvictionApproxLRU(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

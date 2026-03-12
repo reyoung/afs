@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerfuse"
@@ -32,32 +33,34 @@ import (
 )
 
 type config struct {
-	mountpoint                 string
-	debug                      bool
-	mountProcDev               bool
-	noSpillCache               bool
-	extraDir                   string
-	discoveryAddr              string
-	grpcTimeout                time.Duration
-	grpcMaxChunk               int
-	grpcInsecure               bool
-	nodeID                     string
-	image                      string
-	tag                        string
-	platformOS                 string
-	platformArch               string
-	platformVariant            string
-	forceLocalFetch            bool
-	pullTimeout                time.Duration
-	workDir                    string
-	keepWorkDir                bool
-	fuseTempDir                string
-	sharedSpillCacheEnabled    bool
-	sharedSpillCacheDir        string
-	sharedSpillCacheSock       string
-	sharedSpillCacheMaxBytes   int64
-	sharedSpillCacheBinaryPath string
-	layerMountConcurrency      int
+	mountpoint                  string
+	debug                       bool
+	mountProcDev                bool
+	noSpillCache                bool
+	extraDir                    string
+	discoveryAddr               string
+	grpcTimeout                 time.Duration
+	grpcMaxChunk                int
+	grpcInsecure                bool
+	nodeID                      string
+	image                       string
+	tag                         string
+	platformOS                  string
+	platformArch                string
+	platformVariant             string
+	forceLocalFetch             bool
+	pullTimeout                 time.Duration
+	workDir                     string
+	keepWorkDir                 bool
+	fuseTempDir                 string
+	sharedSpillCacheEnabled     bool
+	sharedSpillCacheDir         string
+	sharedSpillCacheSock        string
+	sharedSpillCacheMaxBytes    int64
+	sharedSpillCacheBinaryPath  string
+	sharedSpillCachePprofListen string
+	layerMountConcurrency       int
+	pprofListen                 string
 }
 
 type serviceInfo struct {
@@ -67,6 +70,14 @@ type serviceInfo struct {
 
 func main() {
 	cfg := parseFlags()
+	shutdownPprof := debughttp.StartPprofServer("afs_mount", cfg.pprofListen)
+	if shutdownPprof != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownPprof(ctx)
+		}()
+	}
 	log.Printf("starting mount client: image=%s tag=%s mountpoint=%s discovery=%s node-id=%s platform=%s/%s variant=%s force_local_fetch=%v", cfg.image, cfg.tag, cfg.mountpoint, cfg.discoveryAddr, cfg.nodeID, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forceLocalFetch)
 
 	if err := ensureMountpoint(cfg.mountpoint); err != nil {
@@ -113,7 +124,9 @@ func parseFlags() config {
 	flag.StringVar(&cfg.sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache unix socket path (default: <shared-spill-cache-dir>/daemon.sock)")
 	flag.Int64Var(&cfg.sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes")
 	flag.StringVar(&cfg.sharedSpillCacheBinaryPath, "shared-spill-cache-binary", "afs_mount_cached", "path of shared spill cache daemon binary")
+	flag.StringVar(&cfg.sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
+	flag.StringVar(&cfg.pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6065")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -206,10 +219,11 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 	var sharedCacheClient *spillcache.Client
 	if cfg.sharedSpillCacheEnabled {
 		launcher, err := spillcache.NewLauncher(spillcache.LauncherConfig{
-			CacheDir:   cfg.sharedSpillCacheDir,
-			SockPath:   cfg.sharedSpillCacheSock,
-			MaxBytes:   cfg.sharedSpillCacheMaxBytes,
-			BinaryPath: cfg.sharedSpillCacheBinaryPath,
+			CacheDir:    cfg.sharedSpillCacheDir,
+			SockPath:    cfg.sharedSpillCacheSock,
+			MaxBytes:    cfg.sharedSpillCacheMaxBytes,
+			BinaryPath:  cfg.sharedSpillCacheBinaryPath,
+			PprofListen: cfg.sharedSpillCachePprofListen,
 		})
 		if err != nil {
 			return fmt.Errorf("configure shared spill cache: %w", err)

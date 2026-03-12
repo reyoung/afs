@@ -4,6 +4,7 @@ go 1.25.3
 
 require (
 	github.com/hanwen/go-fuse/v2 v2.9.0
+	go.etcd.io/bbolt v1.4.3
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
 )

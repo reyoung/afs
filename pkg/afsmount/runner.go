@@ -44,63 +44,65 @@ const (
 )
 
 type Config struct {
-	Mountpoint                 string
-	Debug                      bool
-	MountProcDev               bool
-	NoSpillCache               bool
-	ExtraDir                   string
-	DiscoveryAddr              string
-	GRPCTimeout                time.Duration
-	GRPCMaxChunk               int
-	GRPCInsecure               bool
-	NodeID                     string
-	Image                      string
-	Tag                        string
-	PlatformOS                 string
-	PlatformArch               string
-	PlatformVariant            string
-	ForceLocalFetch            bool
-	PullTimeout                time.Duration
-	WorkDir                    string
-	KeepWorkDir                bool
-	FUSETempDir                string
-	SharedSpillCacheEnabled    bool
-	SharedSpillCacheDir        string
-	SharedSpillCacheSock       string
-	SharedSpillCacheMaxBytes   int64
-	SharedSpillCacheBinaryPath string
-	LayerMountConcurrency      int
-	OnReady                    func()
+	Mountpoint                  string
+	Debug                       bool
+	MountProcDev                bool
+	NoSpillCache                bool
+	ExtraDir                    string
+	DiscoveryAddr               string
+	GRPCTimeout                 time.Duration
+	GRPCMaxChunk                int
+	GRPCInsecure                bool
+	NodeID                      string
+	Image                       string
+	Tag                         string
+	PlatformOS                  string
+	PlatformArch                string
+	PlatformVariant             string
+	ForceLocalFetch             bool
+	PullTimeout                 time.Duration
+	WorkDir                     string
+	KeepWorkDir                 bool
+	FUSETempDir                 string
+	SharedSpillCacheEnabled     bool
+	SharedSpillCacheDir         string
+	SharedSpillCacheSock        string
+	SharedSpillCacheMaxBytes    int64
+	SharedSpillCacheBinaryPath  string
+	SharedSpillCachePprofListen string
+	LayerMountConcurrency       int
+	OnReady                     func()
 }
 
 type config struct {
-	mountpoint                 string
-	debug                      bool
-	mountProcDev               bool
-	noSpillCache               bool
-	extraDir                   string
-	discoveryAddr              string
-	grpcTimeout                time.Duration
-	grpcMaxChunk               int
-	grpcInsecure               bool
-	nodeID                     string
-	image                      string
-	tag                        string
-	platformOS                 string
-	platformArch               string
-	platformVariant            string
-	forceLocalFetch            bool
-	pullTimeout                time.Duration
-	workDir                    string
-	keepWorkDir                bool
-	fuseTempDir                string
-	sharedSpillCacheEnabled    bool
-	sharedSpillCacheDir        string
-	sharedSpillCacheSock       string
-	sharedSpillCacheMaxBytes   int64
-	sharedSpillCacheBinaryPath string
-	layerMountConcurrency      int
-	onReady                    func()
+	mountpoint                  string
+	debug                       bool
+	mountProcDev                bool
+	noSpillCache                bool
+	extraDir                    string
+	discoveryAddr               string
+	grpcTimeout                 time.Duration
+	grpcMaxChunk                int
+	grpcInsecure                bool
+	nodeID                      string
+	image                       string
+	tag                         string
+	platformOS                  string
+	platformArch                string
+	platformVariant             string
+	forceLocalFetch             bool
+	pullTimeout                 time.Duration
+	workDir                     string
+	keepWorkDir                 bool
+	fuseTempDir                 string
+	sharedSpillCacheEnabled     bool
+	sharedSpillCacheDir         string
+	sharedSpillCacheSock        string
+	sharedSpillCacheMaxBytes    int64
+	sharedSpillCacheBinaryPath  string
+	sharedSpillCachePprofListen string
+	layerMountConcurrency       int
+	onReady                     func()
 }
 
 type serviceInfo struct {
@@ -184,33 +186,34 @@ func Run(ctx context.Context, userCfg Config) error {
 
 func normalizeConfig(userCfg Config) (config, error) {
 	cfg := config{
-		mountpoint:                 strings.TrimSpace(userCfg.Mountpoint),
-		debug:                      userCfg.Debug,
-		mountProcDev:               userCfg.MountProcDev,
-		noSpillCache:               userCfg.NoSpillCache,
-		extraDir:                   strings.TrimSpace(userCfg.ExtraDir),
-		discoveryAddr:              strings.TrimSpace(userCfg.DiscoveryAddr),
-		grpcTimeout:                userCfg.GRPCTimeout,
-		grpcMaxChunk:               userCfg.GRPCMaxChunk,
-		grpcInsecure:               userCfg.GRPCInsecure,
-		nodeID:                     strings.TrimSpace(userCfg.NodeID),
-		image:                      strings.TrimSpace(userCfg.Image),
-		tag:                        strings.TrimSpace(userCfg.Tag),
-		platformOS:                 strings.TrimSpace(userCfg.PlatformOS),
-		platformArch:               strings.TrimSpace(userCfg.PlatformArch),
-		platformVariant:            strings.TrimSpace(userCfg.PlatformVariant),
-		forceLocalFetch:            userCfg.ForceLocalFetch,
-		pullTimeout:                userCfg.PullTimeout,
-		workDir:                    strings.TrimSpace(userCfg.WorkDir),
-		keepWorkDir:                userCfg.KeepWorkDir,
-		fuseTempDir:                strings.TrimSpace(userCfg.FUSETempDir),
-		sharedSpillCacheEnabled:    userCfg.SharedSpillCacheEnabled,
-		sharedSpillCacheDir:        strings.TrimSpace(userCfg.SharedSpillCacheDir),
-		sharedSpillCacheSock:       strings.TrimSpace(userCfg.SharedSpillCacheSock),
-		sharedSpillCacheMaxBytes:   userCfg.SharedSpillCacheMaxBytes,
-		sharedSpillCacheBinaryPath: strings.TrimSpace(userCfg.SharedSpillCacheBinaryPath),
-		layerMountConcurrency:      userCfg.LayerMountConcurrency,
-		onReady:                    userCfg.OnReady,
+		mountpoint:                  strings.TrimSpace(userCfg.Mountpoint),
+		debug:                       userCfg.Debug,
+		mountProcDev:                userCfg.MountProcDev,
+		noSpillCache:                userCfg.NoSpillCache,
+		extraDir:                    strings.TrimSpace(userCfg.ExtraDir),
+		discoveryAddr:               strings.TrimSpace(userCfg.DiscoveryAddr),
+		grpcTimeout:                 userCfg.GRPCTimeout,
+		grpcMaxChunk:                userCfg.GRPCMaxChunk,
+		grpcInsecure:                userCfg.GRPCInsecure,
+		nodeID:                      strings.TrimSpace(userCfg.NodeID),
+		image:                       strings.TrimSpace(userCfg.Image),
+		tag:                         strings.TrimSpace(userCfg.Tag),
+		platformOS:                  strings.TrimSpace(userCfg.PlatformOS),
+		platformArch:                strings.TrimSpace(userCfg.PlatformArch),
+		platformVariant:             strings.TrimSpace(userCfg.PlatformVariant),
+		forceLocalFetch:             userCfg.ForceLocalFetch,
+		pullTimeout:                 userCfg.PullTimeout,
+		workDir:                     strings.TrimSpace(userCfg.WorkDir),
+		keepWorkDir:                 userCfg.KeepWorkDir,
+		fuseTempDir:                 strings.TrimSpace(userCfg.FUSETempDir),
+		sharedSpillCacheEnabled:     userCfg.SharedSpillCacheEnabled,
+		sharedSpillCacheDir:         strings.TrimSpace(userCfg.SharedSpillCacheDir),
+		sharedSpillCacheSock:        strings.TrimSpace(userCfg.SharedSpillCacheSock),
+		sharedSpillCacheMaxBytes:    userCfg.SharedSpillCacheMaxBytes,
+		sharedSpillCacheBinaryPath:  strings.TrimSpace(userCfg.SharedSpillCacheBinaryPath),
+		sharedSpillCachePprofListen: strings.TrimSpace(userCfg.SharedSpillCachePprofListen),
+		layerMountConcurrency:       userCfg.LayerMountConcurrency,
+		onReady:                     userCfg.OnReady,
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -386,10 +389,11 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	if cfg.sharedSpillCacheEnabled {
 		sharedSpillCacheStarted := time.Now()
 		launcher, err := spillcache.NewLauncher(spillcache.LauncherConfig{
-			CacheDir:   cfg.sharedSpillCacheDir,
-			SockPath:   cfg.sharedSpillCacheSock,
-			MaxBytes:   cfg.sharedSpillCacheMaxBytes,
-			BinaryPath: cfg.sharedSpillCacheBinaryPath,
+			CacheDir:    cfg.sharedSpillCacheDir,
+			SockPath:    cfg.sharedSpillCacheSock,
+			MaxBytes:    cfg.sharedSpillCacheMaxBytes,
+			BinaryPath:  cfg.sharedSpillCacheBinaryPath,
+			PprofListen: cfg.sharedSpillCachePprofListen,
 		})
 		if err != nil {
 			return fmt.Errorf("configure shared spill cache: %w", err)

@@ -1,9 +1,10 @@
 package spillcache
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/gob"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -13,12 +14,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 const (
 	defaultSampleSize = 5
-	indexFileName     = "index.json"
+	indexDBFileName   = "index.db"
 )
+
+var metadataBucket = []byte("entries")
 
 type cacheKey struct {
 	Digest   string `json:"digest"`
@@ -52,10 +57,6 @@ type entry struct {
 	LastAccessUnix int64  `json:"last_access_unix"`
 }
 
-type indexState struct {
-	Entries []*entry `json:"entries"`
-}
-
 type lease struct {
 	Token    string
 	Key      cacheKey
@@ -68,12 +69,13 @@ type cacheStore struct {
 	cacheDir   string
 	dataDir    string
 	tmpDir     string
-	indexPath  string
+	dbPath     string
 	maxBytes   int64
 	totalBytes int64
 	entries    map[string]*entry
 	leases     map[string]*lease
 	rnd        *rand.Rand
+	db         *bolt.DB
 }
 
 func newCacheStore(cacheDir string, maxBytes int64) (*cacheStore, error) {
@@ -85,14 +87,14 @@ func newCacheStore(cacheDir string, maxBytes int64) (*cacheStore, error) {
 		return nil, fmt.Errorf("max bytes must be > 0")
 	}
 	cs := &cacheStore{
-		cacheDir:  cacheDir,
-		dataDir:   filepath.Join(cacheDir, "data"),
-		tmpDir:    filepath.Join(cacheDir, "tmp"),
-		indexPath: filepath.Join(cacheDir, indexFileName),
-		maxBytes:  maxBytes,
-		entries:   make(map[string]*entry),
-		leases:    make(map[string]*lease),
-		rnd:       rand.New(rand.NewSource(time.Now().UnixNano())),
+		cacheDir: cacheDir,
+		dataDir:  filepath.Join(cacheDir, "data"),
+		tmpDir:   filepath.Join(cacheDir, "tmp"),
+		dbPath:   filepath.Join(cacheDir, indexDBFileName),
+		maxBytes: maxBytes,
+		entries:  make(map[string]*entry),
+		leases:   make(map[string]*lease),
+		rnd:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	if err := os.MkdirAll(cs.dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -100,7 +102,17 @@ func newCacheStore(cacheDir string, maxBytes int64) (*cacheStore, error) {
 	if err := os.MkdirAll(cs.tmpDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create tmp dir: %w", err)
 	}
-	if err := cs.loadIndex(); err != nil {
+	db, err := bolt.Open(cs.dbPath, 0o600, &bolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("open index db: %w", err)
+	}
+	cs.db = db
+	if err := cs.initDB(); err != nil {
+		_ = cs.db.Close()
+		return nil, err
+	}
+	if err := cs.loadEntries(); err != nil {
+		_ = cs.db.Close()
 		return nil, err
 	}
 	return cs, nil
@@ -118,16 +130,8 @@ func (c *cacheStore) acquire(key cacheKey) (hitPath string, hitSize int64, outLe
 	defer c.mu.Unlock()
 
 	if e, ok := c.entries[keyStr]; ok {
-		if st, statErr := os.Stat(e.DataFile); statErr == nil {
-			e.Size = st.Size()
-			e.LastAccessUnix = time.Now().Unix()
-			c.totalBytes = c.recomputeTotalBytesLocked()
-			_ = c.persistIndexLocked()
-			return e.DataFile, e.Size, nil, nil
-		}
-		delete(c.entries, keyStr)
-		c.totalBytes = c.recomputeTotalBytesLocked()
-		_ = c.persistIndexLocked()
+		e.LastAccessUnix = time.Now().Unix()
+		return e.DataFile, e.Size, nil, nil
 	}
 
 	token := randomToken(c.rnd)
@@ -167,7 +171,9 @@ func (c *cacheStore) commit(token string) (cachePath string, size int64, err err
 	if existing, ok := c.entries[keyStr]; ok {
 		existing.LastAccessUnix = time.Now().Unix()
 		_ = os.Remove(l.TempPath)
-		_ = c.persistIndexLocked()
+		if err := c.persistEntryLocked(keyStr, existing); err != nil {
+			return "", 0, err
+		}
 		return existing.DataFile, existing.Size, nil
 	}
 
@@ -187,7 +193,7 @@ func (c *cacheStore) commit(token string) (cachePath string, size int64, err err
 	if err := c.evictIfNeededLocked(keyStr); err != nil {
 		return "", 0, err
 	}
-	if err := c.persistIndexLocked(); err != nil {
+	if err := c.persistEntryLocked(keyStr, c.entries[keyStr]); err != nil {
 		return "", 0, err
 	}
 	if e, ok := c.entries[keyStr]; ok {
@@ -234,6 +240,9 @@ func (c *cacheStore) evictIfNeededLocked(protectedKey string) error {
 		c.totalBytes -= e.Size
 		if c.totalBytes < 0 {
 			c.totalBytes = 0
+		}
+		if err := c.deleteEntryLocked(victimKey); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -299,70 +308,6 @@ func (c *cacheStore) pickApproxLRUVictimLocked(sampleSize int, protectedKey stri
 	return victim
 }
 
-func (c *cacheStore) loadIndex() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	data, err := os.ReadFile(c.indexPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read index: %w", err)
-	}
-	var st indexState
-	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("parse index: %w", err)
-	}
-	for _, e := range st.Entries {
-		if e == nil {
-			continue
-		}
-		k, normErr := (cacheKey{Digest: e.Digest, FilePath: e.FilePath}).normalize()
-		if normErr != nil {
-			continue
-		}
-		if strings.TrimSpace(e.DataFile) == "" {
-			continue
-		}
-		if st, statErr := os.Stat(e.DataFile); statErr == nil {
-			e.Size = st.Size()
-			if e.LastAccessUnix <= 0 {
-				e.LastAccessUnix = st.ModTime().Unix()
-			}
-			c.entries[k.keyString()] = e
-		}
-	}
-	c.totalBytes = c.recomputeTotalBytesLocked()
-	return c.persistIndexLocked()
-}
-
-func (c *cacheStore) persistIndexLocked() error {
-	state := indexState{Entries: make([]*entry, 0, len(c.entries))}
-	for _, e := range c.entries {
-		state.Entries = append(state.Entries, e)
-	}
-	sort.Slice(state.Entries, func(i, j int) bool {
-		if state.Entries[i].Digest == state.Entries[j].Digest {
-			return state.Entries[i].FilePath < state.Entries[j].FilePath
-		}
-		return state.Entries[i].Digest < state.Entries[j].Digest
-	})
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal index: %w", err)
-	}
-	tmp := c.indexPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write index temp: %w", err)
-	}
-	if err := os.Rename(tmp, c.indexPath); err != nil {
-		return fmt.Errorf("commit index: %w", err)
-	}
-	return nil
-}
-
 func (c *cacheStore) recomputeTotalBytesLocked() int64 {
 	var total int64
 	for _, e := range c.entries {
@@ -378,4 +323,127 @@ func randomToken(r *rand.Rand) string {
 		buf[i] = letters[r.Intn(len(letters))]
 	}
 	return string(buf)
+}
+
+func (c *cacheStore) initDB() error {
+	return c.db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(metadataBucket)
+		if err != nil {
+			return fmt.Errorf("create metadata bucket: %w", err)
+		}
+		return nil
+	})
+}
+
+func (c *cacheStore) loadEntries() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			e, err := decodeEntry(v)
+			if err != nil {
+				return fmt.Errorf("decode entry %q: %w", string(k), err)
+			}
+			key, normErr := (cacheKey{Digest: e.Digest, FilePath: e.FilePath}).normalize()
+			if normErr != nil {
+				return nil
+			}
+			if strings.TrimSpace(e.DataFile) == "" {
+				return nil
+			}
+			st, statErr := os.Stat(e.DataFile)
+			if statErr != nil {
+				return nil
+			}
+			e.Size = st.Size()
+			if e.LastAccessUnix <= 0 {
+				e.LastAccessUnix = st.ModTime().Unix()
+			}
+			c.entries[key.keyString()] = e
+			return nil
+		})
+	}); err != nil {
+		return fmt.Errorf("load index db: %w", err)
+	}
+	c.totalBytes = c.recomputeTotalBytesLocked()
+	return c.reconcileDBLocked()
+}
+
+func (c *cacheStore) reconcileDBLocked() error {
+	expected := make(map[string]struct{}, len(c.entries))
+	for key, e := range c.entries {
+		expected[key] = struct{}{}
+		if err := c.persistEntryLocked(key, e); err != nil {
+			return err
+		}
+	}
+	return c.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return nil
+		}
+		var stale [][]byte
+		if err := b.ForEach(func(k, _ []byte) error {
+			if _, ok := expected[string(k)]; !ok {
+				stale = append(stale, append([]byte(nil), k...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, k := range stale {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (c *cacheStore) persistEntryLocked(key string, e *entry) error {
+	if e == nil {
+		return nil
+	}
+	data, err := encodeEntry(e)
+	if err != nil {
+		return fmt.Errorf("encode entry: %w", err)
+	}
+	return c.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return fmt.Errorf("metadata bucket missing")
+		}
+		return b.Put([]byte(key), data)
+	})
+}
+
+func (c *cacheStore) deleteEntryLocked(key string) error {
+	return c.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return fmt.Errorf("metadata bucket missing")
+		}
+		return b.Delete([]byte(key))
+	})
+}
+
+func encodeEntry(e *entry) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(e); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeEntry(data []byte) (*entry, error) {
+	var e entry
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&e); err != nil {
+		return nil, err
+	}
+	return &e, nil
 }

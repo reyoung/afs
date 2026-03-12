@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -9,10 +10,12 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discovery"
 	"github.com/reyoung/afs/pkg/discoverypb"
 )
@@ -27,6 +30,7 @@ func main() {
 		authPairs   multiStringFlag
 		basicPairs  multiStringFlag
 		mirrorPairs multiStringFlag
+		pprofListen string
 	)
 	flag.StringVar(&listenAddr, "listen", ":60051", "gRPC listen address")
 	flag.StringVar(&authHost, "auth-registry", "", "registry host for startup auth, e.g. registry-1.docker.io")
@@ -36,6 +40,7 @@ func main() {
 	flag.Var(&authPairs, "auth-registry-token", "repeatable registry token pair, format <registry>=<token>")
 	flag.Var(&basicPairs, "auth-registry-basic", "repeatable registry basic auth, format <registry>=<username>[:<password>]")
 	flag.Var(&mirrorPairs, "registry-mirror", "repeatable registry mirror mapping, format <registry>=<mirror>[,<mirror>...]")
+	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6064")
 	flag.Parse()
 
 	var authConfigs []discovery.RegistryAuthConfig
@@ -92,6 +97,7 @@ func main() {
 	server := grpc.NewServer()
 	discoverypb.RegisterServiceDiscoveryServer(server, svc)
 	reflection.Register(server)
+	shutdownPprof := debughttp.StartPprofServer("afs_discovery_grpcd", pprofListen)
 
 	go func() {
 		log.Printf("discovery gRPC listening on %s", listenAddr)
@@ -106,6 +112,11 @@ func main() {
 
 	log.Printf("shutting down discovery gRPC server")
 	server.GracefulStop()
+	if shutdownPprof != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownPprof(ctx)
+	}
 }
 
 type multiStringFlag []string

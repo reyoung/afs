@@ -20,6 +20,7 @@ type LauncherConfig struct {
 	PIDFilePath       string
 	MaxBytes          int64
 	BinaryPath        string
+	PprofListen       string
 	StartupWait       time.Duration
 	ClientTimeout     time.Duration
 	PingAttempts      int
@@ -169,6 +170,9 @@ func (l *Launcher) spawnDaemon() error {
 		"-pid-file", l.cfg.PIDFilePath,
 		"-cache-max-bytes", strconv.FormatInt(l.cfg.MaxBytes, 10),
 	)
+	if strings.TrimSpace(l.cfg.PprofListen) != "" {
+		cmd.Args = append(cmd.Args, "-pprof-listen", l.cfg.PprofListen)
+	}
 	// Detach daemon stdio from the caller process, so it does not keep
 	// inherited pipe FDs open (for example afslet -> afs_mount log pipes).
 	cmd.Stdin = devNull

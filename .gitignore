@@ -11,3 +11,5 @@ helm/.env
 __pycache__/
 *.pyc
 python/.venv/
+task.md
+docker-compose.ioi-test.yaml
