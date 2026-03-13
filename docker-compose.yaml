@@ -9,10 +9,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env.layerstore
-    environment:
-      - LAYERSTORE_AUTH_BASIC_1=${LAYERSTORE_AUTH_BASIC_1:-}
-      - LAYERSTORE_AUTH_BASIC_2=${LAYERSTORE_AUTH_BASIC_2:-}
-      - LAYERSTORE_AUTH_BASIC_3=${LAYERSTORE_AUTH_BASIC_3:-}
     # Optional: mount custom root CAs when using private/self-signed registry certs.
     # volumes:
     #   - ./certs:/usr/local/share/ca-certificates/custom:ro

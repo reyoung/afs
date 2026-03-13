@@ -61,6 +61,7 @@ type Service struct {
 	metadataDir   string
 	locker        *digestLocker
 	newFetcher    func() fetcher
+	sharedFetcher fetcher
 	maxReadSize   int
 	authByHost    map[string]RegistryAuthConfig
 	mirrorsByHost map[string][]string
@@ -168,6 +169,9 @@ func (s *Service) SetRegistryMirrors(m map[string][]string) {
 		}
 	}
 	s.mirrorsByHost = out
+	s.metadataMu.Lock()
+	s.sharedFetcher = nil
+	s.metadataMu.Unlock()
 }
 
 func (s *Service) SetPeerFetchConfig(localEndpoint string, discoveryEndpoints []string) {
@@ -198,7 +202,7 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
 	}
 
-	f := s.newFetcher()
+	f := s.getFetcher()
 	if err := s.applyConfiguredAuth(f, ref.Registry); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "registry auth config: %v", err)
 	}
@@ -311,7 +315,7 @@ func (s *Service) EnsureLayers(ctx context.Context, req *layerstorepb.EnsureLaye
 		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
 	}
 
-	f := s.newFetcher()
+	f := s.getFetcher()
 	if err := s.applyConfiguredAuth(f, ref.Registry); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "registry auth config: %v", err)
 	}
@@ -397,6 +401,15 @@ func (s *Service) EnsureLayers(ctx context.Context, req *layerstorepb.EnsureLaye
 
 func (s *Service) SetPullImageReporter(fn func(imageKey string, pulling bool)) {
 	s.pullReport = fn
+}
+
+func (s *Service) getFetcher() fetcher {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	if s.sharedFetcher == nil {
+		s.sharedFetcher = s.newFetcher()
+	}
+	return s.sharedFetcher
 }
 
 func (s *Service) SetEvictionReporter(fn func()) {

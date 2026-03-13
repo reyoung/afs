@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -200,9 +201,57 @@ func TestFindImageProviderRequiresImageKey(t *testing.T) {
 	}
 }
 
+func TestResolveImageCachesMetadataUntilForceRefresh(t *testing.T) {
+	t.Parallel()
+
+	var calls int32
+	s := NewService()
+	s.SetResolverFactory(func() Resolver {
+		return &countingResolver{
+			calls: &calls,
+			fakeResolver: fakeResolver{
+				layers: []registry.Layer{{Digest: "sha256:aaa", MediaType: "layer/a", Size: 111}},
+				runtimeConfig: registry.ImageRuntimeConfig{
+					Entrypoint: []string{"/bin/sh"},
+				},
+			},
+		}
+	})
+
+	req := &discoverypb.ResolveImageRequest{
+		Image:        "nginx",
+		Tag:          "latest",
+		PlatformOs:   "linux",
+		PlatformArch: "amd64",
+	}
+	if _, err := s.ResolveImage(context.Background(), req); err != nil {
+		t.Fatalf("ResolveImage #1: %v", err)
+	}
+	if _, err := s.ResolveImage(context.Background(), req); err != nil {
+		t.Fatalf("ResolveImage #2: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("resolver calls=%d, want 1 after cache hit", got)
+	}
+
+	forceReq := protoCloneResolveImageRequest(req)
+	forceReq.ForceRefresh = true
+	if _, err := s.ResolveImage(context.Background(), forceReq); err != nil {
+		t.Fatalf("ResolveImage force refresh: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("resolver calls=%d, want 2 after force refresh", got)
+	}
+}
+
 type fakeResolver struct {
 	layers        []registry.Layer
 	runtimeConfig registry.ImageRuntimeConfig
+}
+
+type countingResolver struct {
+	fakeResolver
+	calls *int32
 }
 
 func (f *fakeResolver) GetLayersForPlatform(ctx context.Context, image, tag, os, arch, variant string) ([]registry.Layer, error) {
@@ -245,4 +294,17 @@ func (f *fakeResolver) LoginWithToken(registry, token string) error {
 	_ = registry
 	_ = token
 	return nil
+}
+
+func (c *countingResolver) GetImageMetadataForPlatform(ctx context.Context, image, tag, os, arch, variant string) (registry.ImageMetadata, error) {
+	atomic.AddInt32(c.calls, 1)
+	return c.fakeResolver.GetImageMetadataForPlatform(ctx, image, tag, os, arch, variant)
+}
+
+func protoCloneResolveImageRequest(in *discoverypb.ResolveImageRequest) *discoverypb.ResolveImageRequest {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }

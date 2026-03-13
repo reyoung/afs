@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -31,12 +33,27 @@ type Client struct {
 	mu             sync.RWMutex
 	authByRegistry map[string]authConfig
 	mirrorsByHost  map[string][]string
+
+	tokenMu       sync.Mutex
+	tokenCache    map[string]cachedToken
+	tokenInflight map[string]*tokenCall
 }
 
 type authConfig struct {
 	username    string
 	password    string
 	bearerToken string
+}
+
+type cachedToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+type tokenCall struct {
+	done  chan struct{}
+	token string
+	err   error
 }
 
 // NewClient creates a registry client. If httpClient is nil, http.DefaultClient is used.
@@ -49,6 +66,8 @@ func NewClient(httpClient *http.Client) *Client {
 		userAgent:      "afs-registry-client/1.0",
 		authByRegistry: make(map[string]authConfig),
 		mirrorsByHost:  make(map[string][]string),
+		tokenCache:     make(map[string]cachedToken),
+		tokenInflight:  make(map[string]*tokenCall),
 	}
 }
 
@@ -406,7 +425,7 @@ func (c *Client) doWithAuth(ctx context.Context, req *http.Request, registry, re
 		scope = "repository:" + repository + ":pull"
 	}
 
-	token, err := c.fetchToken(ctx, realm, service, scope, cfg.username, cfg.password)
+	token, err := c.getOrFetchToken(ctx, registry, realm, service, scope, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -468,6 +487,93 @@ func (c *Client) fetchToken(ctx context.Context, realm, service, scope, username
 		return "", fmt.Errorf("token response missing token field")
 	}
 	return token, nil
+}
+
+func (c *Client) getOrFetchToken(ctx context.Context, registry, realm, service, scope string, cfg authConfig) (string, error) {
+	key := tokenCacheKey(registry, realm, service, scope, cfg)
+	now := time.Now()
+
+	c.tokenMu.Lock()
+	if entry, ok := c.tokenCache[key]; ok && entry.token != "" && tokenStillValid(entry, now) {
+		c.tokenMu.Unlock()
+		return entry.token, nil
+	}
+	if call, ok := c.tokenInflight[key]; ok {
+		c.tokenMu.Unlock()
+		select {
+		case <-call.done:
+			return call.token, call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &tokenCall{done: make(chan struct{})}
+	c.tokenInflight[key] = call
+	c.tokenMu.Unlock()
+
+	token, err := c.fetchToken(ctx, realm, service, scope, cfg.username, cfg.password)
+
+	c.tokenMu.Lock()
+	if err == nil {
+		c.tokenCache[key] = cachedToken{
+			token:     token,
+			expiresAt: tokenExpiry(token, time.Now()),
+		}
+	}
+	delete(c.tokenInflight, key)
+	call.token = token
+	call.err = err
+	close(call.done)
+	c.tokenMu.Unlock()
+
+	return token, err
+}
+
+func tokenCacheKey(registry, realm, service, scope string, cfg authConfig) string {
+	authKind := "anon"
+	authValue := ""
+	switch {
+	case strings.TrimSpace(cfg.bearerToken) != "":
+		authKind = "bearer"
+		authValue = cfg.bearerToken
+	case strings.TrimSpace(cfg.username) != "" || cfg.password != "":
+		authKind = "basic"
+		authValue = cfg.username + ":" + cfg.password
+	}
+	return strings.Join([]string{registry, realm, service, scope, authKind, authValue}, "\x00")
+}
+
+func tokenStillValid(entry cachedToken, now time.Time) bool {
+	if entry.token == "" {
+		return false
+	}
+	if entry.expiresAt.IsZero() {
+		return true
+	}
+	return now.Before(entry.expiresAt)
+}
+
+func tokenExpiry(token string, now time.Time) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return now.Add(5 * time.Minute)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return now.Add(5 * time.Minute)
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return now.Add(5 * time.Minute)
+	}
+	exp := time.Unix(claims.Exp, 0)
+	// Refresh a bit before expiry to avoid borderline failures.
+	if exp.After(now.Add(30 * time.Second)) {
+		return exp.Add(-30 * time.Second)
+	}
+	return now
 }
 
 func parseBearerChallenge(v string) (realm, service, scope string, err error) {

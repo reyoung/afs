@@ -161,6 +161,43 @@ func TestPullImageCachesByDigest(t *testing.T) {
 	}
 }
 
+func TestPullImageReusesSharedFetcher(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerDigest := "sha256:abab1111abab1111abab1111abab1111abab1111abab1111abab1111abab1111"
+	layerBytes := buildTarGzip(t, map[string]string{"hello.txt": "hello from layer"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	fetcherCreations := 0
+	svc.newFetcher = func() fetcher {
+		fetcherCreations++
+		return fake
+	}
+
+	req := &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"}
+	if _, err := svc.PullImage(context.Background(), req); err != nil {
+		t.Fatalf("first PullImage: %v", err)
+	}
+	if _, err := svc.PullImage(context.Background(), req); err != nil {
+		t.Fatalf("second PullImage: %v", err)
+	}
+	if fetcherCreations != 1 {
+		t.Fatalf("fetcher creations=%d, want 1", fetcherCreations)
+	}
+}
+
 func TestPullImageSupportsDockerLayerMediaType(t *testing.T) {
 	t.Parallel()
 

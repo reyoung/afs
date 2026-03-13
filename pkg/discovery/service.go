@@ -17,7 +17,7 @@ import (
 const (
 	defaultTTL             = 30 * time.Second
 	defaultCleanupInterval = 5 * time.Second
-	defaultImageCacheTTL   = 45 * time.Second
+	defaultImageCacheTTL   = 0
 	defaultPlatformOS      = "linux"
 	defaultPlatformArch    = "amd64"
 )
@@ -60,6 +60,7 @@ type Service struct {
 	newResolver   func() Resolver
 	authByHost    map[string]RegistryAuthConfig
 	mirrorsByHost map[string][]string
+	resolver      Resolver
 
 	mu         sync.RWMutex
 	instances  map[string]serviceEntry
@@ -102,7 +103,10 @@ func (s *Service) SetResolverFactory(fn func() Resolver) {
 	if fn == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.newResolver = fn
+	s.resolver = nil
 }
 
 func (s *Service) SetRegistryAuthConfigs(authConfigs []RegistryAuthConfig) error {
@@ -124,6 +128,9 @@ func (s *Service) SetRegistryAuthConfigs(authConfigs []RegistryAuthConfig) error
 		authByHost[host] = cfg
 	}
 	s.authByHost = authByHost
+	s.mu.Lock()
+	s.resolver = nil
+	s.mu.Unlock()
 	return nil
 }
 
@@ -152,6 +159,9 @@ func (s *Service) SetRegistryMirrors(m map[string][]string) {
 		}
 	}
 	s.mirrorsByHost = out
+	s.mu.Lock()
+	s.resolver = nil
+	s.mu.Unlock()
 }
 
 func (s *Service) Heartbeat(ctx context.Context, req *discoverypb.HeartbeatRequest) (*discoverypb.HeartbeatResponse, error) {
@@ -210,7 +220,7 @@ func (s *Service) ResolveImage(ctx context.Context, req *discoverypb.ResolveImag
 		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
 	}
 
-	r := s.newResolver()
+	r := s.getResolver()
 	if err := s.applyConfiguredAuth(r, ref.Registry); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "registry auth config: %v", err)
 	}
@@ -243,13 +253,24 @@ func (s *Service) ResolveImage(ctx context.Context, req *discoverypb.ResolveImag
 		resolvedReference:  ref.Reference,
 		layers:             append([]registry.Layer(nil), layers...),
 		runtimeConfig:      runtimeConfig,
-		expireAt:           s.now().Add(s.imageCacheTTL),
+	}
+	if s.imageCacheTTL > 0 {
+		record.expireAt = s.now().Add(s.imageCacheTTL)
 	}
 
 	s.mu.Lock()
 	s.images[key] = record
 	s.mu.Unlock()
 	return imageRecordToProto(record), nil
+}
+
+func (s *Service) getResolver() Resolver {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.resolver == nil {
+		s.resolver = s.newResolver()
+	}
+	return s.resolver
 }
 
 func (s *Service) FindProvider(ctx context.Context, req *discoverypb.FindProviderRequest) (*discoverypb.FindProviderResponse, error) {
@@ -378,7 +399,7 @@ func (s *Service) pruneExpired() {
 		}
 	}
 	for key, img := range s.images {
-		if !now.Before(img.expireAt) {
+		if !img.expireAt.IsZero() && !now.Before(img.expireAt) {
 			delete(s.images, key)
 		}
 	}
@@ -390,7 +411,7 @@ func (s *Service) loadCachedImage(imageKey string) (imageRecord, bool) {
 	s.mu.RLock()
 	record, ok := s.images[imageKey]
 	s.mu.RUnlock()
-	if !ok || !now.Before(record.expireAt) {
+	if !ok || (!record.expireAt.IsZero() && !now.Before(record.expireAt)) {
 		if ok {
 			s.mu.Lock()
 			delete(s.images, imageKey)
@@ -544,7 +565,7 @@ func (s *Service) imageProvidersLocked(imageKey string) map[string]struct{} {
 
 func (s *Service) completeImageProvidersLocked(imageKey string) map[string]struct{} {
 	record, ok := s.images[imageKey]
-	if !ok || !s.now().Before(record.expireAt) {
+	if !ok || (!record.expireAt.IsZero() && !s.now().Before(record.expireAt)) {
 		return map[string]struct{}{}
 	}
 	if len(record.layers) == 0 {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -208,6 +209,153 @@ func TestClient_LoginUsesBasicAuthForTokenEndpoint(t *testing.T) {
 	}
 	if len(layers) != 1 || layers[0].Digest != digest {
 		t.Fatalf("unexpected layers: %+v", layers)
+	}
+}
+
+func TestClient_TokenEndpointIsCachedAcrossManifestAndConfig(t *testing.T) {
+	const (
+		repo         = "team/runtime"
+		tag          = "v1"
+		user         = "alice"
+		pass         = "secret"
+		token        = "header.eyJleHAiOjQxMDAwMDAwMDB9.sig"
+		layerDigest  = "sha256:layer-runtime"
+		configDigest = "sha256:cfg-runtime"
+	)
+
+	var (
+		baseURL    string
+		tokenHits  int
+		tokenHitsM sync.Mutex
+	)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/token":
+			u, p, ok := r.BasicAuth()
+			if !ok || u != user || p != pass {
+				t.Fatalf("expected basic auth on token endpoint, got user=%q ok=%v", u, ok)
+			}
+			tokenHitsM.Lock()
+			tokenHits++
+			tokenHitsM.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"` + token + `"}`))
+			return
+		case r.URL.Path == "/v2/"+repo+"/manifests/"+tag:
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.Header().Set("Www-Authenticate", `Bearer realm="`+baseURL+`/token",service="fake-registry"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", manifestV2)
+			_, _ = w.Write([]byte(`{"schemaVersion":2,"mediaType":"` + manifestV2 + `","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":100,"digest":"` + configDigest + `"},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":100,"digest":"` + layerDigest + `"}]}`))
+			return
+		case r.URL.Path == "/v2/"+repo+"/blobs/"+configDigest:
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.Header().Set("Www-Authenticate", `Bearer realm="`+baseURL+`/token",service="fake-registry",scope="repository:`+repo+`:pull"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(`{"config":{"Cmd":["echo","ok"]}}`))
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	baseURL = server.URL
+
+	client := NewClient(server.Client())
+	host := strings.TrimPrefix(server.URL, "https://")
+	if err := client.Login(host, user, pass); err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+
+	image := host + "/" + repo
+	if _, err := client.GetImageMetadataForPlatform(context.Background(), image, tag, "linux", "amd64", ""); err != nil {
+		t.Fatalf("GetImageMetadataForPlatform() error = %v", err)
+	}
+
+	tokenHitsM.Lock()
+	defer tokenHitsM.Unlock()
+	if tokenHits != 1 {
+		t.Fatalf("expected token endpoint to be called once, got %d", tokenHits)
+	}
+}
+
+func TestClient_TokenEndpointSingleflightUnderConcurrency(t *testing.T) {
+	const (
+		repo   = "team/private"
+		tag    = "v1"
+		user   = "alice"
+		pass   = "secret"
+		token  = "header.eyJleHAiOjQxMDAwMDAwMDB9.sig"
+		digest = "sha256:layer2"
+	)
+
+	var (
+		baseURL    string
+		tokenHits  int
+		tokenHitsM sync.Mutex
+	)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/token":
+			u, p, ok := r.BasicAuth()
+			if !ok || u != user || p != pass {
+				t.Fatalf("expected basic auth on token endpoint, got user=%q ok=%v", u, ok)
+			}
+			tokenHitsM.Lock()
+			tokenHits++
+			tokenHitsM.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"` + token + `"}`))
+			return
+		case r.URL.Path == "/v2/"+repo+"/manifests/"+tag:
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.Header().Set("Www-Authenticate", `Bearer realm="`+baseURL+`/token",service="fake-registry"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(`{"schemaVersion":2,"mediaType":"` + manifestV2 + `","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":10,"digest":"sha256:cfg"},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":100,"digest":"` + digest + `"}]}`))
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	baseURL = server.URL
+
+	client := NewClient(server.Client())
+	host := strings.TrimPrefix(server.URL, "https://")
+	if err := client.Login(host, user, pass); err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	image := host + "/" + repo
+
+	const workers = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.GetLayers(context.Background(), image, tag)
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("GetLayers() error = %v", err)
+		}
+	}
+
+	tokenHitsM.Lock()
+	defer tokenHitsM.Unlock()
+	if tokenHits != 1 {
+		t.Fatalf("expected token endpoint to be called once under concurrency, got %d", tokenHits)
 	}
 }
 
