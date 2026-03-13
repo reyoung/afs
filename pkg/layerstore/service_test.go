@@ -238,8 +238,8 @@ func TestPullImageSupportsDockerLayerMediaType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read converted layer: %v", err)
 	}
-	if len(data) < 8 || string(data[:8]) != "AFSLYR01" {
-		t.Fatalf("converted layer missing AFSLYR01 magic")
+	if len(data) < 8 || string(data[:8]) != "AFSLYR02" {
+		t.Fatalf("converted layer missing AFSLYR02 magic, got %q", string(data[:8]))
 	}
 }
 
@@ -277,8 +277,8 @@ func TestReadLayerReturnsMagicBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadLayer: %v", err)
 	}
-	if string(readResp.GetData()) != "AFSLYR01" {
-		t.Fatalf("ReadLayer data=%q, want AFSLYR01", string(readResp.GetData()))
+	if string(readResp.GetData()) != "AFSLYR02" {
+		t.Fatalf("ReadLayer data=%q, want AFSLYR02", string(readResp.GetData()))
 	}
 }
 
@@ -487,7 +487,7 @@ func TestPullImageRespectsCacheLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	svc.SetCacheLimitBytes(3500)
+	svc.SetCacheLimitBytes(50000)
 
 	layerA := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	layerB := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -555,7 +555,7 @@ func TestReservePullSpaceConcurrentAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	svc.SetCacheLimitBytes(100)
+	svc.SetCacheLimitBytes(500)
 	layers := []registry.Layer{{Digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444", Size: 80}}
 
 	releaseA, err := svc.reservePullSpace(layers)
@@ -573,6 +573,179 @@ func TestReservePullSpaceConcurrentAccounting(t *testing.T) {
 		t.Fatalf("expected reservation to succeed after release: %v", err)
 	}
 	releaseB()
+}
+
+func TestDefaultFormatIsV2(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerDigest := "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+	layerBytes := buildTarGzip(t, map[string]string{"default.txt": "default v2 content"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	resp, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+	if len(resp.GetLayers()) != 1 {
+		t.Fatalf("layers=%d, want 1", len(resp.GetLayers()))
+	}
+
+	cachePath := resp.GetLayers()[0].GetCachePath()
+	if cachePath == "" {
+		t.Fatal("cache path is empty")
+	}
+	// Verify it's stored with .v2.afslyr suffix
+	if !strings.HasSuffix(cachePath, ".v2.afslyr") {
+		t.Fatalf("cache path %q should end with .v2.afslyr", cachePath)
+	}
+	// Verify the file has AFSLYR02 magic
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	if len(data) < 8 || string(data[:8]) != "AFSLYR02" {
+		t.Fatalf("expected AFSLYR02 magic, got %q", string(data[:8]))
+	}
+	// Verify the archive can be read and contains plain payload
+	r, err := layerformat.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if r.FormatVersion() != layerformat.FormatV2 {
+		t.Fatalf("expected FormatV2, got %d", r.FormatVersion())
+	}
+	content, err := r.ReadFile("default.txt")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != "default v2 content" {
+		t.Fatalf("content=%q, want %q", string(content), "default v2 content")
+	}
+}
+
+func TestExplicitV1Override(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	svc.SetFormatVersion(layerformat.FormatV1)
+
+	layerDigest := "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+	layerBytes := buildTarGzip(t, map[string]string{"v1.txt": "v1 explicit content"})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	resp, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+
+	cachePath := resp.GetLayers()[0].GetCachePath()
+	// V1 should use .afslyr (not .v2.afslyr)
+	if strings.HasSuffix(cachePath, ".v2.afslyr") {
+		t.Fatalf("V1 cache path %q should NOT end with .v2.afslyr", cachePath)
+	}
+	if !strings.HasSuffix(cachePath, ".afslyr") {
+		t.Fatalf("V1 cache path %q should end with .afslyr", cachePath)
+	}
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	if len(data) < 8 || string(data[:8]) != "AFSLYR01" {
+		t.Fatalf("expected AFSLYR01 magic, got %q", string(data[:8]))
+	}
+}
+
+func TestV2CacheEstimationUsesMultiplier(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	// Default is V2
+
+	layers := []registry.Layer{
+		{Digest: "sha256:7777777777777777777777777777777777777777777777777777777777777777", Size: 100},
+	}
+	required, _, err := svc.estimateRequiredBytesLocked(layers)
+	if err != nil {
+		t.Fatalf("estimateRequiredBytesLocked: %v", err)
+	}
+	// V2 should apply the multiplier (4x)
+	expected := int64(100 * v2EstimateMultiplier)
+	if required != expected {
+		t.Fatalf("V2 estimate=%d, want %d (100 * %d)", required, expected, v2EstimateMultiplier)
+	}
+
+	// Switch to V1 and verify no multiplier
+	svc.SetFormatVersion(layerformat.FormatV1)
+	requiredV1, _, err := svc.estimateRequiredBytesLocked(layers)
+	if err != nil {
+		t.Fatalf("estimateRequiredBytesLocked V1: %v", err)
+	}
+	if requiredV1 != 100 {
+		t.Fatalf("V1 estimate=%d, want 100", requiredV1)
+	}
+}
+
+func TestV1V2CachePathsDoNotCollide(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	digest := "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+
+	// V2 path
+	v2Path, err := layerPathForVersion(svc.layersDir, digest, layerformat.FormatV2)
+	if err != nil {
+		t.Fatalf("V2 layerPath: %v", err)
+	}
+	// V1 path
+	v1Path, err := layerPathForVersion(svc.layersDir, digest, layerformat.FormatV1)
+	if err != nil {
+		t.Fatalf("V1 layerPath: %v", err)
+	}
+
+	if v1Path == v2Path {
+		t.Fatalf("V1 and V2 paths should differ for same digest, both=%q", v1Path)
+	}
+	if !strings.HasSuffix(v2Path, ".v2.afslyr") {
+		t.Fatalf("V2 path should end with .v2.afslyr: %q", v2Path)
+	}
+	if strings.HasSuffix(v1Path, ".v2.afslyr") {
+		t.Fatalf("V1 path should NOT end with .v2.afslyr: %q", v1Path)
+	}
 }
 
 type fakeFetcher struct {
@@ -655,4 +828,222 @@ func buildTarGzip(t *testing.T, files map[string]string) []byte {
 		t.Fatalf("gzip close: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func TestMixedCacheScenarios(t *testing.T) {
+	t.Parallel()
+
+	t.Run("DefaultV2ServiceIgnoresV1Files", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		svc, err := NewService(tmp, nil)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		// Default is V2
+
+		digest := "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+
+		// Create only V1 file in cache
+		v1Path, err := layerPathForVersion(svc.layersDir, digest, layerformat.FormatV1)
+		if err != nil {
+			t.Fatalf("V1 layerPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(v1Path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(v1Path, []byte("v1 content"), 0o644); err != nil {
+			t.Fatalf("WriteFile V1: %v", err)
+		}
+
+		// V2 service should not find V1 file
+		hasLayerResp, err := svc.HasLayer(context.Background(), &layerstorepb.HasLayerRequest{Digest: digest})
+		if err != nil {
+			t.Fatalf("HasLayer: %v", err)
+		}
+		if hasLayerResp.GetFound() {
+			t.Fatalf("V2 service should not find V1 layer in cache")
+		}
+	})
+
+	t.Run("ExplicitV1ServiceUsesV1Files", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		svc, err := NewService(tmp, nil)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		svc.SetFormatVersion(layerformat.FormatV1)
+
+		digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+		// Create V1 file in cache
+		v1Path, err := layerPathForVersion(svc.layersDir, digest, layerformat.FormatV1)
+		if err != nil {
+			t.Fatalf("V1 layerPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(v1Path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(v1Path, []byte("v1 content"), 0o644); err != nil {
+			t.Fatalf("WriteFile V1: %v", err)
+		}
+
+		// V1 service should find V1 file
+		hasLayerResp, err := svc.HasLayer(context.Background(), &layerstorepb.HasLayerRequest{Digest: digest})
+		if err != nil {
+			t.Fatalf("HasLayer: %v", err)
+		}
+		if !hasLayerResp.GetFound() {
+			t.Fatalf("V1 service should find V1 layer in cache")
+		}
+	})
+
+	t.Run("V1V2CoexistWithoutConflict", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+
+		digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+		// Create both V1 and V2 files for same digest
+		v1Path, err := layerPathForVersion(filepath.Join(tmp, "layers"), digest, layerformat.FormatV1)
+		if err != nil {
+			t.Fatalf("V1 layerPath: %v", err)
+		}
+		v2Path, err := layerPathForVersion(filepath.Join(tmp, "layers"), digest, layerformat.FormatV2)
+		if err != nil {
+			t.Fatalf("V2 layerPath: %v", err)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(v1Path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(v1Path, []byte("v1 content"), 0o644); err != nil {
+			t.Fatalf("WriteFile V1: %v", err)
+		}
+		if err := os.WriteFile(v2Path, []byte("v2 content"), 0o644); err != nil {
+			t.Fatalf("WriteFile V2: %v", err)
+		}
+
+		// Test V1 service
+		svcV1, err := NewService(tmp, nil)
+		if err != nil {
+			t.Fatalf("NewService V1: %v", err)
+		}
+		svcV1.SetFormatVersion(layerformat.FormatV1)
+		hasLayerV1, err := svcV1.HasLayer(context.Background(), &layerstorepb.HasLayerRequest{Digest: digest})
+		if err != nil {
+			t.Fatalf("HasLayer V1: %v", err)
+		}
+		if !hasLayerV1.GetFound() {
+			t.Fatalf("V1 service should find V1 layer")
+		}
+
+		// Test V2 service
+		svcV2, err := NewService(tmp, nil)
+		if err != nil {
+			t.Fatalf("NewService V2: %v", err)
+		}
+		// Default is V2
+		hasLayerV2, err := svcV2.HasLayer(context.Background(), &layerstorepb.HasLayerRequest{Digest: digest})
+		if err != nil {
+			t.Fatalf("HasLayer V2: %v", err)
+		}
+		if !hasLayerV2.GetFound() {
+			t.Fatalf("V2 service should find V2 layer")
+		}
+	})
+}
+
+func TestHasLayer_V2ServiceDoesNotFindV1Only(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001"
+	// Only place a V1 .afslyr file
+	v1Path := filepath.Join(tmp, "layers", "sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001.afslyr")
+	if err := os.MkdirAll(filepath.Dir(v1Path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(v1Path, []byte("v1data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	// Default is V2
+	resp, err := svc.HasLayer(context.Background(), &layerstorepb.HasLayerRequest{Digest: digest})
+	if err != nil {
+		t.Fatalf("HasLayer: %v", err)
+	}
+	if resp.GetFound() {
+		t.Fatalf("V2 service should NOT find V1-only layer")
+	}
+}
+
+func TestHasLayer_V1ServiceDoesNotFindV2Only(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0002"
+	// Only place a V2 .v2.afslyr file
+	v2Path := filepath.Join(tmp, "layers", "sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0002.v2.afslyr")
+	if err := os.MkdirAll(filepath.Dir(v2Path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(v2Path, []byte("v2data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	svc.SetFormatVersion(layerformat.FormatV1)
+	resp, err := svc.HasLayer(context.Background(), &layerstorepb.HasLayerRequest{Digest: digest})
+	if err != nil {
+		t.Fatalf("HasLayer: %v", err)
+	}
+	if resp.GetFound() {
+		t.Fatalf("V1 service should NOT find V2-only layer")
+	}
+}
+
+func TestStatLayer_V2ServiceDoesNotFindV1Only(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0003"
+	v1Path := filepath.Join(tmp, "layers", "sha256", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0003.afslyr")
+	if err := os.MkdirAll(filepath.Dir(v1Path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(v1Path, []byte("v1data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	_, statErr := svc.StatLayer(context.Background(), &layerstorepb.StatLayerRequest{Digest: digest})
+	if statErr == nil {
+		t.Fatalf("V2 StatLayer should fail for V1-only layer")
+	}
+	st, ok := status.FromError(statErr)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected NotFound, got %v", statErr)
+	}
+}
+
+func TestMetadataCacheKeyIncludesFormatVersion(t *testing.T) {
+	t.Parallel()
+
+	v1Key := metadataCacheKey("docker.io", "library/nginx", "latest", "linux", "amd64", "", layerformat.FormatV1)
+	v2Key := metadataCacheKey("docker.io", "library/nginx", "latest", "linux", "amd64", "", layerformat.FormatV2)
+	if v1Key == v2Key {
+		t.Fatalf("V1 and V2 metadata cache keys should differ, both=%q", v1Key)
+	}
 }

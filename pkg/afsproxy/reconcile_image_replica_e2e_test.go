@@ -553,7 +553,7 @@ func resolvedLayersForImage(image string) []registry.Layer {
 }
 
 func imageKeyFor(image string) string {
-	return strings.Join([]string{strings.TrimSpace(image), "latest", "linux", "amd64", ""}, "|")
+	return strings.Join([]string{strings.TrimSpace(image), "latest", "linux", "amd64", "", "v2"}, "|")
 }
 
 func afsSizeForTest(size int64) int64 {

@@ -44,6 +44,7 @@ func main() {
 	var sharedSpillCachePprofListen string
 	var layerMountConcurrency int
 	var pprofListen string
+	var formatVersion int
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -70,6 +71,7 @@ func main() {
 	flag.StringVar(&sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
+	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
 	flag.Parse()
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -100,6 +102,7 @@ func main() {
 		SharedSpillCacheBinaryPath:  sharedSpillCacheBinary,
 		SharedSpillCachePprofListen: sharedSpillCachePprofListen,
 		LayerMountConcurrency:       layerMountConcurrency,
+		FormatVersion:               formatVersion,
 	})
 
 	grpcServer := grpc.NewServer()

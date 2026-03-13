@@ -61,6 +61,7 @@ type config struct {
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
 	pprofListen                 string
+	formatVersion               int
 }
 
 type serviceInfo struct {
@@ -127,6 +128,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.StringVar(&cfg.pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6065")
+	flag.IntVar(&cfg.formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -134,6 +136,9 @@ func parseFlags() config {
 	}
 	if strings.TrimSpace(cfg.image) == "" {
 		log.Fatal("-image is required")
+	}
+	if cfg.formatVersion != 1 && cfg.formatVersion != 2 {
+		log.Fatalf("-format-version must be 1 or 2, got %d", cfg.formatVersion)
 	}
 	if cfg.layerMountConcurrency <= 0 {
 		log.Fatal("-layer-mount-concurrency must be > 0")
@@ -153,7 +158,7 @@ func parseFlags() config {
 }
 
 func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config) error {
-	imageProviders, err := findImageServices(discoveryClient, imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant), cfg.grpcTimeout)
+	imageProviders, err := findImageServices(discoveryClient, imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant, layerformat.FormatVersion(cfg.formatVersion)), cfg.grpcTimeout)
 	if err != nil {
 		return err
 	}
@@ -767,12 +772,17 @@ func shortDigest(digest string) string {
 	return digest[:18]
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }

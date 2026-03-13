@@ -34,6 +34,7 @@ func main() {
 		gracefulTimeout time.Duration
 		discoveryTarget string
 		pprofListen     string
+		formatVersion   int
 	)
 
 	flag.StringVar(&grpcListen, "listen", ":62051", "gRPC listen address")
@@ -48,12 +49,14 @@ func main() {
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "graceful shutdown timeout")
 	flag.StringVar(&discoveryTarget, "discovery-target", "", "discovery DNS target host:port for layerstore status query")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof; use the same value as -http-listen to expose pprof on the main HTTP server")
+	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
 	flag.Parse()
 
 	svc := afsproxy.NewService(afsproxy.Config{
 		AfsletTarget:      afsletTarget,
 		ProxyPeersTarget:  proxyPeers,
 		NodeID:            nodeID,
+		FormatVersion:     formatVersion,
 		DialTimeout:       dialTimeout,
 		StatusTimeout:     statusTimeout,
 		DefaultBackoff:    defaultBackoff,

@@ -1,6 +1,8 @@
 x-afs-runtime: &afs-runtime
   image: afs-local:compose
   pull_policy: never
+  environment:
+    - AFS_FORMAT_VERSION=${AFS_FORMAT_VERSION:-2}
 
 services:
   discovery:
@@ -36,7 +38,7 @@ services:
         if [[ -n "$${LAYERSTORE_AUTH_BASIC_3:-}" ]]; then
           AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_3}")
         fi
-        exec /usr/local/bin/afs_discovery_grpcd -listen=:60051 "$${AUTH_ARGS[@]}"
+        exec /usr/local/bin/afs_discovery_grpcd -listen=:60051 -format-version=$${AFS_FORMAT_VERSION:-2} "$${AUTH_ARGS[@]}"
     ports:
       - "60051:60051"
     networks:
@@ -76,6 +78,7 @@ services:
           -cache-dir=/var/lib/afs/cache \
           -node-id=layerstore-1 \
           -discovery-endpoint=discovery:60051 \
+          -format-version=$${AFS_FORMAT_VERSION:-2} \
           "$${AUTH_ARGS[@]}"
     networks:
       - afsnet
@@ -123,6 +126,7 @@ services:
           -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
           -shared-spill-cache-max-bytes=10737418240 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
+          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -graceful-timeout=15s
     networks:
       - afsnet
@@ -142,6 +146,7 @@ services:
           -afslet-target=afslet:61051 \
           -discovery-target=discovery:60051 \
           -proxy-peers-target=afs_proxy:62052 \
+          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -dispatch-backoff=50ms
     ports:
       - "62051:62051"

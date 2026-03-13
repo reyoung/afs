@@ -27,6 +27,7 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsproxypb"
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 )
 
@@ -51,6 +52,7 @@ type Config struct {
 	ProxyPeersTarget  string
 	DiscoveryTarget   string
 	NodeID            string
+	FormatVersion     int
 	DialTimeout       time.Duration
 	StatusTimeout     time.Duration
 	DefaultBackoff    time.Duration
@@ -65,6 +67,7 @@ type Service struct {
 	proxyPeersTarget  string
 	discoveryTarget   string
 	nodeID            string
+	formatVersion     layerformat.FormatVersion
 	dialTimeout       time.Duration
 	statusTimeout     time.Duration
 	defaultBackoff    time.Duration
@@ -130,11 +133,15 @@ func NewService(cfg Config) *Service {
 		proxyPeersTarget:  strings.TrimSpace(cfg.ProxyPeersTarget),
 		discoveryTarget:   strings.TrimSpace(cfg.DiscoveryTarget),
 		nodeID:            strings.TrimSpace(cfg.NodeID),
+		formatVersion:     layerformat.FormatVersion(cfg.FormatVersion),
 		dialTimeout:       cfg.DialTimeout,
 		statusTimeout:     cfg.StatusTimeout,
 		defaultBackoff:    cfg.DefaultBackoff,
 		httpClientTimeout: cfg.HTTPClientTimeout,
 		rand:              rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+	if s.formatVersion != layerformat.FormatV1 && s.formatVersion != layerformat.FormatV2 {
+		s.formatVersion = layerformat.FormatV2
 	}
 	if s.afsletTarget == "" {
 		s.afsletTarget = "127.0.0.1:61051"
@@ -402,6 +409,7 @@ func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.Rec
 		valueOrDefault(req.GetPlatformOs(), defaultPlatformOS),
 		valueOrDefault(req.GetPlatformArch(), defaultPlatformArch),
 		req.GetPlatformVariant(),
+		s.formatVersion,
 	)
 	resolved, err := s.resolveImage(ctx, req)
 	if err != nil {
@@ -1126,13 +1134,18 @@ func valueOrDefault(v, d string) string {
 	return d
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }
 

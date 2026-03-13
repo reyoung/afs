@@ -72,6 +72,7 @@ type Config struct {
 	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
 	OnReady                     func()
+	FormatVersion               int
 }
 
 type config struct {
@@ -103,6 +104,7 @@ type config struct {
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
 	onReady                     func()
+	formatVersion               int
 }
 
 type serviceInfo struct {
@@ -214,6 +216,11 @@ func normalizeConfig(userCfg Config) (config, error) {
 		sharedSpillCachePprofListen: strings.TrimSpace(userCfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       userCfg.LayerMountConcurrency,
 		onReady:                     userCfg.OnReady,
+		formatVersion:               userCfg.FormatVersion,
+	}
+
+	if cfg.formatVersion != 1 && cfg.formatVersion != 2 {
+		cfg.formatVersion = 2
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -280,7 +287,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		providers []serviceInfo
 		err       error
 	)
-	imageKeyStr := imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant)
+	imageKeyStr := imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant, layerformat.FormatVersion(cfg.formatVersion))
 	cacheKey := imageResolveCacheKey(cfg, imageKeyStr)
 	cacheLookupStarted := time.Now()
 	if cached, ok := sharedImageCache.get(cacheKey); ok {
@@ -1290,12 +1297,17 @@ func shortDigest(digest string) string {
 	return digest[:18]
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }

@@ -24,6 +24,7 @@ import (
 
 	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerstore"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 )
@@ -45,6 +46,7 @@ func main() {
 		discoveryEndpoints multiStringFlag
 		cacheMaxBytes      int64
 		pprofListen        string
+		formatVersion      int
 	)
 
 	flag.StringVar(&listenAddr, "listen", "", "gRPC listen endpoint with IP, e.g. 10.0.0.12:50051")
@@ -60,6 +62,7 @@ func main() {
 	flag.Var(&discoveryEndpoints, "discovery-endpoint", "repeatable discovery gRPC endpoint, e.g. 10.0.0.2:60051")
 	flag.Int64Var(&cacheMaxBytes, "cache-max-bytes", 0, "max layer cache bytes (0 means default: min(1TB, 60% of free space))")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6063")
+	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01 gzip, 2=AFSLYR02 identity/plain); default is 2")
 	flag.Parse()
 
 	if err := validateListenEndpoint(listenAddr); err != nil {
@@ -67,6 +70,9 @@ func main() {
 	}
 	if strings.TrimSpace(nodeID) == "" {
 		log.Fatal("-node-id is required")
+	}
+	if formatVersion != 1 && formatVersion != 2 {
+		log.Fatalf("-format-version must be 1 or 2, got %d", formatVersion)
 	}
 
 	var authConfigs []layerstore.RegistryAuthConfig
@@ -107,12 +113,13 @@ func main() {
 		}
 		registryMirrors[host] = append(registryMirrors[host], mirrors...)
 	}
-	log.Printf("starting layerstore: node-id=%s listen=%s cache-dir=%s auth-configs=%d discovery-endpoints=%d", nodeID, listenAddr, cacheDir, len(authConfigs), len(discoveryEndpoints))
+	log.Printf("starting layerstore: node-id=%s listen=%s cache-dir=%s auth-configs=%d discovery-endpoints=%d format-version=%d", nodeID, listenAddr, cacheDir, len(authConfigs), len(discoveryEndpoints), formatVersion)
 
 	svc, err := layerstore.NewService(cacheDir, authConfigs)
 	if err != nil {
 		log.Fatalf("init service: %v", err)
 	}
+	svc.SetFormatVersion(layerformat.FormatVersion(formatVersion))
 	if cacheMaxBytes > 0 {
 		svc.SetCacheLimitBytes(cacheMaxBytes)
 	}
@@ -156,12 +163,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	fv := layerformat.FormatVersion(formatVersion)
+
 	for _, endpoint := range discoveryEndpoints {
 		endpoint = strings.TrimSpace(endpoint)
 		if endpoint == "" {
 			continue
 		}
-		go registerHeartbeatLoop(ctx, endpoint, nodeID, listenAddr, cacheDir, svc.CacheLimitBytes(), func() []string {
+		go registerHeartbeatLoop(ctx, endpoint, nodeID, listenAddr, cacheDir, svc.CacheLimitBytes(), fv, func() []string {
 			pendingMu.RLock()
 			defer pendingMu.RUnlock()
 			out := make([]string, 0, len(pending))
@@ -193,17 +202,17 @@ func main() {
 	}
 }
 
-func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, cacheMaxBytes int64, pendingImages func() []string, trigger <-chan struct{}) {
+func registerHeartbeatLoop(ctx context.Context, discoveryAddr, nodeID, endpoint, cacheDir string, cacheMaxBytes int64, formatVersion layerformat.FormatVersion, pendingImages func() []string, trigger <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
 	send := func() {
-		layerStats, err := scanCachedLayerStats(cacheDir)
+		layerStats, err := scanCachedLayerStats(cacheDir, formatVersion)
 		if err != nil {
 			log.Printf("heartbeat scan cache failed: discovery=%s err=%v", discoveryAddr, err)
 			layerStats = nil
 		}
-		images, err := scanCachedImageKeys(cacheDir)
+		images, err := scanCachedImageKeys(cacheDir, formatVersion)
 		if err != nil {
 			log.Printf("heartbeat scan image metadata failed: discovery=%s err=%v", discoveryAddr, err)
 			images = nil
@@ -302,7 +311,7 @@ func expandHeartbeatTargets(ctx context.Context, discoveryAddr string) ([]string
 	return out, nil
 }
 
-func scanCachedLayerStats(cacheDir string) ([]*discoverypb.LayerStat, error) {
+func scanCachedLayerStats(cacheDir string, formatVersion layerformat.FormatVersion) ([]*discoverypb.LayerStat, error) {
 	layersDir := filepath.Join(cacheDir, "layers")
 	entries, err := os.ReadDir(layersDir)
 	if err != nil {
@@ -330,10 +339,23 @@ func scanCachedLayerStats(cacheDir string) ([]*discoverypb.LayerStat, error) {
 				continue
 			}
 			name := f.Name()
-			if !strings.HasSuffix(name, ".afslyr") {
-				continue
+			// Only scan files matching current format version
+			if formatVersion == layerformat.FormatV2 {
+				if !strings.HasSuffix(name, ".v2.afslyr") {
+					continue
+				}
+			} else {
+				if !strings.HasSuffix(name, ".afslyr") || strings.HasSuffix(name, ".v2.afslyr") {
+					continue
+				}
 			}
-			hex := strings.TrimSuffix(name, ".afslyr")
+			// Strip suffix based on format version
+			var hex string
+			if formatVersion == layerformat.FormatV2 {
+				hex = strings.TrimSuffix(name, ".v2.afslyr")
+			} else {
+				hex = strings.TrimSuffix(name, ".afslyr")
+			}
 			if hex == "" {
 				continue
 			}
@@ -363,7 +385,7 @@ type cachedMetaLayer struct {
 	Digest string `json:"Digest"`
 }
 
-func layerFileExists(cacheDir, digest string) bool {
+func layerFileExistsForVersion(cacheDir, digest string, formatVersion layerformat.FormatVersion) bool {
 	digest = strings.TrimSpace(digest)
 	idx := strings.Index(digest, ":")
 	if idx <= 0 || idx == len(digest)-1 {
@@ -371,12 +393,16 @@ func layerFileExists(cacheDir, digest string) bool {
 	}
 	algo := strings.ToLower(digest[:idx])
 	hex := strings.ToLower(digest[idx+1:])
-	path := filepath.Join(cacheDir, "layers", algo, hex+".afslyr")
+	suffix := ".afslyr"
+	if formatVersion == layerformat.FormatV2 {
+		suffix = ".v2.afslyr"
+	}
+	path := filepath.Join(cacheDir, "layers", algo, hex+suffix)
 	_, err := os.Stat(path)
 	return err == nil
 }
 
-func scanCachedImageKeys(cacheDir string) ([]string, error) {
+func scanCachedImageKeys(cacheDir string, formatVersion layerformat.FormatVersion) ([]string, error) {
 	metadataDir := filepath.Join(cacheDir, "metadata")
 	entries, err := os.ReadDir(metadataDir)
 	if err != nil {
@@ -405,7 +431,7 @@ func scanCachedImageKeys(cacheDir string) ([]string, error) {
 		}
 		allLayersPresent := len(m.Layers) > 0
 		for _, layer := range m.Layers {
-			if !layerFileExists(cacheDir, layer.Digest) {
+			if !layerFileExistsForVersion(cacheDir, layer.Digest, formatVersion) {
 				allLayersPresent = false
 				break
 			}
@@ -413,7 +439,7 @@ func scanCachedImageKeys(cacheDir string) ([]string, error) {
 		if !allLayersPresent {
 			continue
 		}
-		key := imageKey(m.Image, m.Tag, m.PlatformOS, m.PlatformArch, m.PlatformVariant)
+		key := imageKey(m.Image, m.Tag, m.PlatformOS, m.PlatformArch, m.PlatformVariant, formatVersion)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -423,13 +449,18 @@ func scanCachedImageKeys(cacheDir string) ([]string, error) {
 	return out, nil
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }
 

@@ -107,7 +107,7 @@ func TestFindImageCompatibilityUsesCachedImageIndex(t *testing.T) {
 	_, err := s.Heartbeat(context.Background(), &discoverypb.HeartbeatRequest{
 		NodeId:        "node-a",
 		Endpoint:      "10.0.0.1:50051",
-		CachedImages:  []string{"nginx|latest|linux|amd64|"},
+		CachedImages:  []string{"nginx|latest|linux|amd64||v2"},
 		CacheMaxBytes: 1 << 30,
 	})
 	if err != nil {
@@ -115,7 +115,7 @@ func TestFindImageCompatibilityUsesCachedImageIndex(t *testing.T) {
 	}
 
 	resp, err := s.FindImage(context.Background(), &discoverypb.FindImageRequest{
-		ImageKey: "nginx|latest|linux|amd64|",
+		ImageKey: "nginx|latest|linux|amd64||v2",
 	})
 	if err != nil {
 		t.Fatalf("FindImage: %v", err)
@@ -307,4 +307,94 @@ func protoCloneResolveImageRequest(in *discoverypb.ResolveImageRequest) *discove
 	}
 	out := *in
 	return &out
+}
+
+func TestV2HeartbeatImageKeyMatchesResolveImage(t *testing.T) {
+	t.Parallel()
+
+	s := NewService()
+	s.SetResolverFactory(func() Resolver {
+		return &fakeResolver{
+			layers: []registry.Layer{
+				{Digest: "sha256:aaa", MediaType: "layer/a", Size: 100},
+			},
+		}
+	})
+
+	// Simulate a V2 layerstore heartbeat with 6-segment cached_images key
+	_, err := s.Heartbeat(context.Background(), &discoverypb.HeartbeatRequest{
+		NodeId:       "node-v2",
+		Endpoint:     "10.0.0.1:50051",
+		LayerDigests: []string{"sha256:aaa"},
+		CachedImages: []string{"nginx|latest|linux|amd64||v2"},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	// ResolveImage should produce a key with |v2 suffix (default format is V2)
+	resolved, err := s.ResolveImage(context.Background(), &discoverypb.ResolveImageRequest{
+		Image:        "nginx",
+		Tag:          "latest",
+		PlatformOs:   "linux",
+		PlatformArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("ResolveImage: %v", err)
+	}
+	if resolved.GetImageKey() != "nginx|latest|linux|amd64||v2" {
+		t.Fatalf("image_key=%q, want nginx|latest|linux|amd64||v2", resolved.GetImageKey())
+	}
+
+	// FindImageProvider using the resolved key should find the heartbeated node
+	resp, err := s.FindImageProvider(context.Background(), &discoverypb.FindImageProviderRequest{
+		ImageKey: resolved.GetImageKey(),
+	})
+	if err != nil {
+		t.Fatalf("FindImageProvider: %v", err)
+	}
+	if len(resp.GetServices()) != 1 {
+		t.Fatalf("FindImageProvider services=%d, want 1", len(resp.GetServices()))
+	}
+	if got := resp.GetServices()[0].GetNodeId(); got != "node-v2" {
+		t.Fatalf("node_id=%q, want node-v2", got)
+	}
+}
+
+func TestV1HeartbeatNotVisibleToV2Query(t *testing.T) {
+	t.Parallel()
+
+	s := NewService()
+
+	// V1 layerstore heartbeats with |v1 key
+	_, err := s.Heartbeat(context.Background(), &discoverypb.HeartbeatRequest{
+		NodeId:       "node-v1",
+		Endpoint:     "10.0.0.1:50051",
+		CachedImages: []string{"nginx|latest|linux|amd64||v1"},
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	// V2 query should NOT find V1 provider
+	resp, err := s.FindImageProvider(context.Background(), &discoverypb.FindImageProviderRequest{
+		ImageKey: "nginx|latest|linux|amd64||v2",
+	})
+	if err != nil {
+		t.Fatalf("FindImageProvider: %v", err)
+	}
+	if len(resp.GetServices()) != 0 {
+		t.Fatalf("V2 query should not find V1 provider, got %d services", len(resp.GetServices()))
+	}
+
+	// V1 query should find V1 provider
+	resp, err = s.FindImageProvider(context.Background(), &discoverypb.FindImageProviderRequest{
+		ImageKey: "nginx|latest|linux|amd64||v1",
+	})
+	if err != nil {
+		t.Fatalf("FindImageProvider V1: %v", err)
+	}
+	if len(resp.GetServices()) != 1 {
+		t.Fatalf("V1 query should find V1 provider, got %d services", len(resp.GetServices()))
+	}
 }

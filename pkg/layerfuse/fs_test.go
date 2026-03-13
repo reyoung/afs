@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -156,7 +157,7 @@ func TestFileNodePrepareTempFileFallsBackWhenSharedCacheOpenFails(t *testing.T) 
 	}
 }
 
-func newReaderWithSingleFile(t *testing.T, name string, data []byte) *layerformat.Reader {
+func newReaderWithSingleFile(t testing.TB, name string, data []byte) *layerformat.Reader {
 	t.Helper()
 
 	var tarBuf bytes.Buffer
@@ -193,4 +194,179 @@ func newReaderWithSingleFile(t *testing.T, name string, data []byte) *layerforma
 		t.Fatalf("open layer archive reader: %v", err)
 	}
 	return reader
+}
+
+func newV2ReaderWithSingleFile(t testing.TB, name string, data []byte) *layerformat.Reader {
+	t.Helper()
+
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: name,
+		Mode: 0o644,
+		Size: int64(len(data)),
+	}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		t.Fatalf("write tar payload: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	if _, err := gw.Write(tarBuf.Bytes()); err != nil {
+		t.Fatalf("write gzip payload: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+
+	var archive bytes.Buffer
+	if err := layerformat.ConvertTarGzipToArchiveV2(bytes.NewReader(gzBuf.Bytes()), &archive); err != nil {
+		t.Fatalf("convert layer archive v2: %v", err)
+	}
+	reader, err := layerformat.NewReader(bytes.NewReader(archive.Bytes()))
+	if err != nil {
+		t.Fatalf("open layer archive reader: %v", err)
+	}
+	return reader
+}
+
+func TestV2FileNodeDirectRead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		filePath = "test.txt"
+		content  = "hello-direct-read-from-archive"
+	)
+	reader := newV2ReaderWithSingleFile(t, filePath, []byte(content))
+
+	if reader.FormatVersion() != layerformat.FormatV2 {
+		t.Fatalf("expected FormatV2, got %d", reader.FormatVersion())
+	}
+
+	section, err := reader.OpenFileSection(filePath)
+	if err != nil {
+		t.Fatalf("OpenFileSection() error = %v", err)
+	}
+
+	node := &FileNode{
+		entry:         layerformat.Entry{Path: filePath, Type: layerformat.EntryTypeFile, Mode: 0o644},
+		reader:        reader,
+		directSection: &section,
+	}
+
+	// Test sequential read
+	dest := make([]byte, len(content))
+	ctx := context.TODO()
+	result, errno := node.Read(ctx, nil, dest, 0)
+	if errno != 0 {
+		t.Fatalf("Read() errno = %d", errno)
+	}
+	buf, status := result.Bytes(dest)
+	if status != fuse.OK {
+		t.Fatalf("ReadResult.Bytes() status = %v", status)
+	}
+	if string(buf) != content {
+		t.Fatalf("Read() = %q, want %q", string(buf), content)
+	}
+
+	// Test offset read
+	dest2 := make([]byte, 10)
+	result2, errno2 := node.Read(ctx, nil, dest2, 6)
+	if errno2 != 0 {
+		t.Fatalf("Read(off=6) errno = %d", errno2)
+	}
+	buf2, status2 := result2.Bytes(dest2)
+	if status2 != fuse.OK {
+		t.Fatalf("ReadResult.Bytes() status = %v", status2)
+	}
+	if string(buf2) != "direct-rea" {
+		t.Fatalf("Read(off=6) = %q, want %q", string(buf2), "direct-rea")
+	}
+
+	// Test read past end
+	dest3 := make([]byte, 10)
+	result3, errno3 := node.Read(ctx, nil, dest3, int64(len(content)+10))
+	if errno3 != 0 {
+		t.Fatalf("Read(past end) errno = %d", errno3)
+	}
+	buf3, _ := result3.Bytes(dest3)
+	if len(buf3) != 0 {
+		t.Fatalf("Read(past end) should return empty, got %d bytes", len(buf3))
+	}
+}
+
+func TestV2FileNodeNoSpillFileCreated(t *testing.T) {
+	t.Parallel()
+
+	const (
+		filePath = "nospill.txt"
+		content  = "no-spill-file-should-be-created"
+	)
+	reader := newV2ReaderWithSingleFile(t, filePath, []byte(content))
+
+	section, err := reader.OpenFileSection(filePath)
+	if err != nil {
+		t.Fatalf("OpenFileSection() error = %v", err)
+	}
+
+	dir := t.TempDir()
+	node := &FileNode{
+		entry:         layerformat.Entry{Path: filePath, Type: layerformat.EntryTypeFile, Mode: 0o644, UncompressedSize: int64(len(content))},
+		reader:        reader,
+		tempDir:       dir,
+		directSection: &section,
+	}
+
+	// Perform a read
+	dest := make([]byte, len(content))
+	_, errno := node.Read(context.TODO(), nil, dest, 0)
+	if errno != 0 {
+		t.Fatalf("Read() errno = %d", errno)
+	}
+
+	// Verify no spill files were created
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			t.Fatalf("unexpected spill file created: %s", e.Name())
+		}
+	}
+}
+
+func TestV2FileNodeGetattr(t *testing.T) {
+	t.Parallel()
+
+	const (
+		filePath = "attr.txt"
+		content  = "file-content-for-getattr"
+	)
+	reader := newV2ReaderWithSingleFile(t, filePath, []byte(content))
+
+	section, err := reader.OpenFileSection(filePath)
+	if err != nil {
+		t.Fatalf("OpenFileSection() error = %v", err)
+	}
+
+	node := &FileNode{
+		entry:         layerformat.Entry{Path: filePath, Type: layerformat.EntryTypeFile, Mode: 0o644, UncompressedSize: int64(len(content))},
+		reader:        reader,
+		directSection: &section,
+	}
+
+	out := &fuse.AttrOut{}
+	errno := node.Getattr(context.TODO(), nil, out)
+	if errno != 0 {
+		t.Fatalf("Getattr() errno = %d", errno)
+	}
+	if out.Size != uint64(len(content)) {
+		t.Fatalf("Getattr() Size=%d, want %d", out.Size, len(content))
+	}
 }

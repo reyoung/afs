@@ -13,18 +13,23 @@ import (
 
 func main() {
 	var (
-		inPath    string
-		outPath   string
-		mediaType string
+		inPath        string
+		outPath       string
+		mediaType     string
+		formatVersion int
 	)
 
 	flag.StringVar(&inPath, "in", "", "input layer file path (OCI layer tar+gzip)")
-	flag.StringVar(&outPath, "out", "", "output AFSLYR01 file path (default: <in>.afslyr)")
+	flag.StringVar(&outPath, "out", "", "output AFS layer file path (default: <in>.afslyr)")
 	flag.StringVar(&mediaType, "media-type", layerformat.OCILayerTarGzipMediaType, "input layer media type")
+	flag.IntVar(&formatVersion, "format-version", 2, "output format version (1=AFSLYR01 gzip, 2=AFSLYR02 identity)")
 	flag.Parse()
 
 	if strings.TrimSpace(inPath) == "" {
 		log.Fatal("-in is required")
+	}
+	if formatVersion != 1 && formatVersion != 2 {
+		log.Fatalf("-format-version must be 1 or 2, got %d", formatVersion)
 	}
 	if strings.TrimSpace(outPath) == "" {
 		outPath = defaultOutPath(inPath)
@@ -50,7 +55,8 @@ func main() {
 		}
 	}()
 
-	if err := layerformat.ConvertOCILayer(mediaType, inFile, outFile); err != nil {
+	fv := layerformat.FormatVersion(formatVersion)
+	if err := layerformat.ConvertOCILayerWithVersion(mediaType, inFile, outFile, fv); err != nil {
 		log.Fatalf("convert layer: %v", err)
 	}
 
@@ -58,7 +64,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("stat output file: %v", err)
 	}
-	fmt.Printf("converted %s -> %s (%d bytes)\n", inPath, outPath, st.Size())
+	fmt.Printf("converted %s -> %s (AFSLYR%02d, %d bytes)\n", inPath, outPath, formatVersion, st.Size())
 }
 
 func defaultOutPath(inPath string) string {

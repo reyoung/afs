@@ -80,7 +80,7 @@ func TestIntegrationDiscoveryBackedReaderAtConcurrentReadPerfAndMD5(t *testing.T
 	target := pickLargestLayer(pullResp)
 	t.Logf("selected layer for read perf: digest=%s afs_size=%d", target.GetDigest(), target.GetAfsSize())
 
-	imageKeyVal := imageKey(image, tag, "linux", "amd64", "")
+	imageKeyVal := imageKey(image, tag, "linux", "amd64", "", layerformat.FormatV2)
 	heartbeat(t, ctx, discAddr, "node-1", lsAddr, imageKeyVal, digestsFromPull(pullResp))
 
 	reader, err := NewDiscoveryBackedLayerReader(Config{
@@ -503,13 +503,18 @@ func layerCachePath(cacheDir, digest string) string {
 	return filepath.Join(cacheDir, "layers", parts[0], strings.ToLower(parts[1])+".afslyr")
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }
 
@@ -536,10 +541,13 @@ func envIntOrDefault(name string, defaultVal int) int {
 type timedReaderAt struct {
 	ra io.ReaderAt
 
-	calls    atomic.Int64
-	reqBytes atomic.Int64
-	gotBytes atomic.Int64
-	durNanos atomic.Int64
+	calls        atomic.Int64
+	reqBytes     atomic.Int64
+	gotBytes     atomic.Int64
+	durNanos     atomic.Int64
+	overlapCalls atomic.Int64
+	inflight     atomic.Int64
+	maxInflight  atomic.Int64
 }
 
 type readAtStats struct {
@@ -547,12 +555,20 @@ type readAtStats struct {
 	requestedBytes int64
 	gotBytes       int64
 	durationNanos  int64
+	overlapCalls   int64
+	maxInflight    int64
 }
 
 func (t *timedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	current := t.inflight.Add(1)
+	updateReadAtMax(&t.maxInflight, current)
+	if current > 1 {
+		t.overlapCalls.Add(1)
+	}
 	begin := time.Now()
 	n, err := t.ra.ReadAt(p, off)
 	elapsed := time.Since(begin).Nanoseconds()
+	t.inflight.Add(-1)
 	t.calls.Add(1)
 	t.reqBytes.Add(int64(len(p)))
 	t.gotBytes.Add(int64(n))
@@ -566,6 +582,8 @@ func (t *timedReaderAt) snapshot() readAtStats {
 		requestedBytes: t.reqBytes.Load(),
 		gotBytes:       t.gotBytes.Load(),
 		durationNanos:  t.durNanos.Load(),
+		overlapCalls:   t.overlapCalls.Load(),
+		maxInflight:    t.maxInflight.Load(),
 	}
 }
 
@@ -575,18 +593,22 @@ func (s readAtStats) delta(prev readAtStats) readAtStats {
 		requestedBytes: s.requestedBytes - prev.requestedBytes,
 		gotBytes:       s.gotBytes - prev.gotBytes,
 		durationNanos:  s.durationNanos - prev.durationNanos,
+		overlapCalls:   s.overlapCalls - prev.overlapCalls,
+		maxInflight:    s.maxInflight,
 	}
 }
 
 func logReadStats(t *testing.T, phase string, s readAtStats) {
 	avgReq := 0.0
 	avgGot := 0.0
+	overlapPct := 0.0
 	if s.calls > 0 {
 		avgReq = float64(s.requestedBytes) / float64(s.calls)
 		avgGot = float64(s.gotBytes) / float64(s.calls)
+		overlapPct = float64(s.overlapCalls) / float64(s.calls) * 100
 	}
-	t.Logf("readat %s calls=%d req_bytes=%d got_bytes=%d total_readat_time=%s avg_req=%.1f avg_got=%.1f",
-		phase, s.calls, s.requestedBytes, s.gotBytes, time.Duration(s.durationNanos), avgReq, avgGot)
+	t.Logf("readat %s calls=%d req_bytes=%d got_bytes=%d total_readat_time=%s avg_req=%.1f avg_got=%.1f overlap_calls=%d overlap_pct=%.2f%% max_inflight=%d",
+		phase, s.calls, s.requestedBytes, s.gotBytes, time.Duration(s.durationNanos), avgReq, avgGot, s.overlapCalls, overlapPct, s.maxInflight)
 }
 
 func nsPerMiB(bytes, nanos int64) float64 {
@@ -598,4 +620,16 @@ func nsPerMiB(bytes, nanos int64) float64 {
 		return 0
 	}
 	return float64(nanos) / miB
+}
+
+func updateReadAtMax(dst *atomic.Int64, current int64) {
+	for {
+		old := dst.Load()
+		if current <= old {
+			return
+		}
+		if dst.CompareAndSwap(old, current) {
+			return
+		}
+	}
 }

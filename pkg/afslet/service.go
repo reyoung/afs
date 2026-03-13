@@ -58,6 +58,7 @@ type Config struct {
 	SharedSpillCacheBinaryPath  string
 	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
+	FormatVersion               int
 }
 
 type Service struct {
@@ -90,6 +91,7 @@ type Service struct {
 	sharedSpillCacheBinaryPath  string
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
+	formatVersion               int
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
@@ -118,6 +120,7 @@ func NewService(cfg Config) *Service {
 		sharedSpillCacheBinaryPath:  strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
 		sharedSpillCachePprofListen: strings.TrimSpace(cfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
+		formatVersion:               cfg.FormatVersion,
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -191,22 +194,19 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 		return status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
-	// Log execute request timing
-	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=execute_request_enter ms=%d", time.Since(executeStart).Milliseconds()))
-
 	reserveStart := time.Now()
 	release, reserveMs, reserveLockMs, reserveErr := s.reserveResourcesWithTiming(start.GetCpuCores(), start.GetMemoryMb())
 	admissionQueueWaitMs := time.Since(reserveStart).Milliseconds() - reserveMs
 	if reserveErr != nil {
-		_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=false", reserveMs, reserveLockMs, admissionQueueWaitMs))
 		return status.Errorf(codes.ResourceExhausted, "%v", reserveErr)
 	}
-	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=true", reserveMs, reserveLockMs, admissionQueueWaitMs))
 	defer release()
 
 	if err := stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Accepted{Accepted: &afsletpb.Accepted{Accepted: true}}}); err != nil {
 		return err
 	}
+	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=execute_request_enter ms=%d", time.Since(executeStart).Milliseconds()))
+	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=true", reserveMs, reserveLockMs, admissionQueueWaitMs))
 
 	for {
 		req, recvErr := stream.Recv()
@@ -420,6 +420,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
 		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
 		LayerMountConcurrency:       s.layerMountConcurrency,
+		FormatVersion:               s.formatVersion,
 	}
 	mountArgs := []string{
 		"-mountpoint", sess.mountpoint,

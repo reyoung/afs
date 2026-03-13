@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/registry"
 )
 
@@ -55,6 +56,7 @@ type Service struct {
 	ttl             time.Duration
 	cleanupInterval time.Duration
 	imageCacheTTL   time.Duration
+	formatVersion   layerformat.FormatVersion
 	now             func() time.Time
 
 	newResolver   func() Resolver
@@ -85,6 +87,7 @@ func NewService() *Service {
 		ttl:             defaultTTL,
 		cleanupInterval: defaultCleanupInterval,
 		imageCacheTTL:   defaultImageCacheTTL,
+		formatVersion:   layerformat.FormatV2,
 		now:             time.Now,
 		newResolver:     func() Resolver { return registry.NewClient(nil) },
 		authByHost:      make(map[string]RegistryAuthConfig),
@@ -107,6 +110,10 @@ func (s *Service) SetResolverFactory(fn func() Resolver) {
 	defer s.mu.Unlock()
 	s.newResolver = fn
 	s.resolver = nil
+}
+
+func (s *Service) SetFormatVersion(v layerformat.FormatVersion) {
+	s.formatVersion = v
 }
 
 func (s *Service) SetRegistryAuthConfigs(authConfigs []RegistryAuthConfig) error {
@@ -207,7 +214,7 @@ func (s *Service) ResolveImage(ctx context.Context, req *discoverypb.ResolveImag
 	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
 	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
 	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
-	key := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
+	key := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, s.formatVersion)
 
 	if !req.GetForceRefresh() {
 		if cached, ok := s.loadCachedImage(key); ok {
@@ -718,12 +725,17 @@ func valueOrDefault(v, d string) string {
 	return d
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }

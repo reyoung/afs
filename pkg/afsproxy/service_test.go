@@ -188,8 +188,8 @@ func TestReconcileImageReplica(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileImageReplica: %v", err)
 	}
-	if resp.GetImageKey() != "nginx|latest|linux|amd64|" {
-		t.Fatalf("image_key=%q, want nginx|latest|linux|amd64|", resp.GetImageKey())
+	if resp.GetImageKey() != "nginx|latest|linux|amd64||v2" {
+		t.Fatalf("image_key=%q, want nginx|latest|linux|amd64||v2", resp.GetImageKey())
 	}
 	if resp.GetCurrentReplica() != 2 {
 		t.Fatalf("current_replica=%d, want 2", resp.GetCurrentReplica())

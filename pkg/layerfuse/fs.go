@@ -227,6 +227,12 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 			layerDigest:  d.tree.layerDigest,
 			sharedCache:  d.tree.sharedCache,
 		}
+		// For AFSLYR02, set up direct section for random reads without spill files.
+		if d.tree.reader.FormatVersion() == layerformat.FormatV2 && e.Type == layerformat.EntryTypeFile {
+			if section, err := d.tree.reader.OpenFileSection(e.Path); err == nil {
+				node.directSection = &section
+			}
+		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
 }
@@ -245,6 +251,9 @@ type FileNode struct {
 	file *os.File
 	size int64
 	err  error
+
+	// directSection is set for AFSLYR02 plain payloads to enable direct archive reads.
+	directSection *layerformat.FileSection
 }
 
 var _ = (fs.NodeOpener)((*FileNode)(nil))
@@ -263,6 +272,28 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 }
 
 func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	// AFSLYR02 direct read path: read from archive without spill file.
+	if f.directSection != nil {
+		fileSize := f.directSection.Size
+		if off >= fileSize {
+			return fuse.ReadResultData(nil), 0
+		}
+		remain := fileSize - off
+		if remain > int64(len(dest)) {
+			remain = int64(len(dest))
+		}
+		if remain <= 0 {
+			return fuse.ReadResultData(nil), 0
+		}
+		buf := dest[:remain]
+		n, err := f.directSection.ReadAt(buf, off)
+		if err != nil && err != io.EOF {
+			return nil, syscall.EIO
+		}
+		return fuse.ReadResultData(buf[:n]), 0
+	}
+
+	// AFSLYR01 spill file path.
 	if errno := f.ensurePrepared(); errno != 0 {
 		return nil, errno
 	}
@@ -282,7 +313,9 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = uint32(syscall.S_IFREG | f.entry.Mode)
-	if f.entry.UncompressedSize > 0 {
+	if f.directSection != nil {
+		out.Size = uint64(f.directSection.Size)
+	} else if f.entry.UncompressedSize > 0 {
 		out.Size = uint64(f.entry.UncompressedSize)
 	} else {
 		if errno := f.ensurePrepared(); errno != 0 {

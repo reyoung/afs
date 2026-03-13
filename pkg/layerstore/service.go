@@ -71,6 +71,7 @@ type Service struct {
 	cacheMax      int64
 	reservedBytes int64
 	evictReport   func()
+	formatVersion layerformat.FormatVersion
 
 	localEndpoint      string
 	discoveryEndpoints []string
@@ -141,7 +142,14 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		mirrorsByHost:    make(map[string][]string),
 		cacheMax:         cacheMax,
 		peerFetchTimeout: 5 * time.Second,
+		formatVersion:    layerformat.FormatV2,
 	}, nil
+}
+
+// SetFormatVersion sets the AFS layer format version for new conversions.
+// Default is FormatV1. Use FormatV2 for identity (plain) payloads.
+func (s *Service) SetFormatVersion(v layerformat.FormatVersion) {
+	s.formatVersion = v
 }
 
 func (s *Service) SetRegistryMirrors(m map[string][]string) {
@@ -213,7 +221,7 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
 	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
 	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
-	imgKey := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
+	imgKey := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, s.formatVersion)
 	if s.pullReport != nil {
 		s.pullReport(imgKey, true)
 		defer s.pullReport(imgKey, false)
@@ -467,6 +475,12 @@ func (s *Service) reservePullSpace(layers []registry.Layer) (func(), error) {
 	}, nil
 }
 
+// v2EstimateMultiplier is the conservative multiplier applied to upstream
+// compressed layer size when estimating local disk usage for AFSLYR02.
+// Plain (identity) payloads are typically 2-5x the gzip-compressed size.
+// We use 4x to be safely conservative and avoid underestimation.
+const v2EstimateMultiplier = 4
+
 func (s *Service) estimateRequiredBytesLocked(layers []registry.Layer) (int64, map[string]struct{}, error) {
 	protected := make(map[string]struct{}, len(layers))
 	var required int64
@@ -484,7 +498,11 @@ func (s *Service) estimateRequiredBytesLocked(layers []registry.Layer) (int64, m
 			continue
 		}
 		if l.Size > 0 {
-			required += l.Size
+			estimate := l.Size
+			if s.formatVersion == layerformat.FormatV2 {
+				estimate *= v2EstimateMultiplier
+			}
+			required += estimate
 		} else {
 			required += 1
 		}
@@ -498,7 +516,7 @@ func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, ta
 		return imageMetadata{}, false, err
 	}
 
-	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
+	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant, s.formatVersion)
 	if !forceRefreshMetadata {
 		if cached, err := s.loadImageMetadata(cacheKey); err == nil {
 			return cached, true, nil
@@ -526,8 +544,12 @@ func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, ta
 	return meta, false, nil
 }
 
-func metadataCacheKey(registryHost, repository, reference, platformOS, platformArch, platformVariant string) string {
-	joined := strings.Join([]string{registryHost, repository, reference, platformOS, platformArch, platformVariant}, "|")
+func metadataCacheKey(registryHost, repository, reference, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
+	joined := strings.Join([]string{registryHost, repository, reference, platformOS, platformArch, platformVariant, fvStr}, "|")
 	sum := sha256.Sum256([]byte(joined))
 	return hex.EncodeToString(sum[:])
 }
@@ -745,7 +767,7 @@ func (s *Service) HasImage(ctx context.Context, req *layerstorepb.HasImageReques
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
 	}
-	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
+	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant, s.formatVersion)
 	meta, err := s.loadImageMetadata(cacheKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -863,7 +885,7 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		}
 	}()
 
-	if err = layerformat.ConvertOCILayer(layer.MediaType, rc, tmpFile); err != nil {
+	if err = layerformat.ConvertOCILayerWithVersion(layer.MediaType, rc, tmpFile, s.formatVersion); err != nil {
 		return "", 0, false, status.Errorf(codes.Internal, "convert layer %s: %v", layer.Digest, err)
 	}
 	log.Printf("converted layer digest=%s to afs temp=%s", layer.Digest, tmpPath)
@@ -879,6 +901,16 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		return "", 0, false, status.Errorf(codes.Internal, "stat cache file: %v", err)
 	}
 	_ = touchFile(fullPath)
+	// Post-conversion: log if actual size exceeds the pre-admission estimate.
+	// This helps operators detect when the V2 estimate multiplier is insufficient.
+	if s.formatVersion == layerformat.FormatV2 && layer.Size > 0 {
+		estimated := layer.Size * v2EstimateMultiplier
+		actual := st.Size()
+		if actual > estimated {
+			log.Printf("warning: V2 layer actual size (%d) exceeds estimate (%d = %d * %d) for digest=%s",
+				actual, estimated, layer.Size, v2EstimateMultiplier, layer.Digest)
+		}
+	}
 	if _, _, pruneErr := s.enforceCacheLimit(map[string]struct{}{layer.Digest: {}}); pruneErr != nil {
 		log.Printf("warning: enforce cache limit failed: %v", pruneErr)
 	}
@@ -1040,7 +1072,13 @@ func (s *Service) scanLayerFiles() ([]cachedLayerFile, int64, error) {
 			return nil
 		}
 		algo := strings.TrimSpace(parts[0])
-		hexName := strings.TrimSuffix(parts[1], ".afslyr")
+		hexName := parts[1]
+		// Strip suffix: either ".v2.afslyr" or ".afslyr"
+		if strings.HasSuffix(hexName, ".v2.afslyr") {
+			hexName = strings.TrimSuffix(hexName, ".v2.afslyr")
+		} else {
+			hexName = strings.TrimSuffix(hexName, ".afslyr")
+		}
 		if algo == "" || hexName == "" {
 			return nil
 		}
@@ -1082,11 +1120,19 @@ func touchFile(path string) error {
 }
 
 func (s *Service) layerPath(digest string) (string, error) {
+	return layerPathForVersion(s.layersDir, digest, s.formatVersion)
+}
+
+func layerPathForVersion(layersDir, digest string, version layerformat.FormatVersion) (string, error) {
 	algo, hex, err := splitDigest(digest)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(s.layersDir, algo, strings.ToLower(hex)+".afslyr"), nil
+	suffix := ".afslyr"
+	if version == layerformat.FormatV2 {
+		suffix = ".v2.afslyr"
+	}
+	return filepath.Join(layersDir, algo, strings.ToLower(hex)+suffix), nil
 }
 
 func splitDigest(digest string) (algo, hex string, err error) {
@@ -1142,13 +1188,18 @@ func valueOrDefault(v, d string) string {
 	return d
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
+func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
+	fvStr := "v1"
+	if formatVersion == layerformat.FormatV2 {
+		fvStr = "v2"
+	}
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
+		fvStr,
 	}, "|")
 }
 
