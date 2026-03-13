@@ -287,7 +287,10 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)}
 				return
 			}
-			afslReader, err := layerformat.NewReader(reader)
+			observedReader := layerreader.NewObservedReaderAt(reader, layerreader.ObserveConfig{
+				Name: "discovery:" + digest,
+			})
+			afslReader, err := layerformat.NewReader(observedReader)
 			if err != nil {
 				stop.Store(true)
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}

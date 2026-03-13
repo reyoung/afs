@@ -485,7 +485,10 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_reader_init", readerInitStarted, append(layerFields, "ok=true")...)
 
 			layerformatOpenStarted := time.Now()
-			afslReader, err := layerformat.NewReader(reader)
+			observedReader := layerreader.NewObservedReaderAt(reader, layerreader.ObserveConfig{
+				Name: "discovery:" + digest,
+			})
+			afslReader, err := layerformat.NewReader(observedReader)
 			if err != nil {
 				logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
