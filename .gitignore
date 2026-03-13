@@ -2,16 +2,6 @@ dist
 .tmp/
 .idea
 
-# Build artifacts
-afs_layerstore_grpcd
-afs_layer_converter
-afs_mount
-afs_cli
-afs_runc
-afs_proxy
-afs_discovery_grpcd
-afslet
-
 cmd/layer_mount/tmp
 cmd/layer_mount/workdir
 
