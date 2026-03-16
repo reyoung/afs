@@ -1,3 +1,4 @@
+from ._version import VersionInfo, __version__, get_version, get_version_info
 from .client import AfsClient
 from .models import (
     AcceptedEvent,
@@ -26,6 +27,7 @@ from .models import (
 )
 
 __all__ = [
+    "__version__",
     "AfsClient",
     "ExecuteInput",
     "ExtraEntry",
@@ -50,4 +52,7 @@ __all__ = [
     "TarSymlink",
     "TarFilePart",
     "DoneEvent",
+    "VersionInfo",
+    "get_version",
+    "get_version_info",
 ]

@@ -3,6 +3,24 @@
 This SDK talks to `afs_proxy` / `afslet` using `asyncio + grpclib`.
 Generated protobuf modules are inside `afs_sdk/api/...`.
 
+## Version
+
+When imported from a git checkout, `afs_sdk.__version__` is resolved from:
+
+```bash
+git describe --tags --long --always --dirty --match 'v*'
+```
+
+Example output:
+
+```python
+>>> import afs_sdk
+>>> afs_sdk.__version__
+'v0.2.0-1-gabc1234-dirty'
+>>> afs_sdk.get_version_info()
+VersionInfo(version='v0.2.0-1-gabc1234-dirty', tag='v0.2.0', commit_sha='abc1234', distance=1, dirty=True)
+```
+
 ## Setup (uv)
 
 ```bash

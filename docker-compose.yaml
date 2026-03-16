@@ -1,11 +1,79 @@
+x-afs-runtime-env: &afs-runtime-env
+  AFS_FORMAT_VERSION: ${AFS_FORMAT_VERSION:-2}
+  AFS_DISCOVERY_READER_LOG_INTERVAL: ${AFS_DISCOVERY_READER_LOG_INTERVAL:-0s}
+  AFS_DISCOVERY_READER_LOG_MIN_CALLS: ${AFS_DISCOVERY_READER_LOG_MIN_CALLS:-128}
+  AFS_DISCOVERY_READER_LOG_MIN_BYTES: ${AFS_DISCOVERY_READER_LOG_MIN_BYTES:-33554432}
+
 x-afs-runtime: &afs-runtime
   image: afs-local:compose
   pull_policy: never
+  environment: *afs-runtime-env
+
+x-layerstore-common: &layerstore-common
+  <<: *afs-runtime
+  restart: unless-stopped
+  depends_on:
+    - discovery
+  env_file:
+    - .env.layerstore
+  entrypoint: ["/bin/bash", "-lc"]
+  command:
+    - |
+      set -euo pipefail
+      update-ca-certificates >/dev/null 2>&1 || true
+      IP="$(hostname -i | awk '{print $1}')"
+      echo "layerstore listen ip=$$IP node_id=$${LAYERSTORE_NODE_ID}"
+      AUTH_ARGS=()
+      if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_1:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_1:-}" ]]; then
+        AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_1}=$${LAYERSTORE_AUTH_TOKEN_1}")
+      fi
+      if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_2:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_2:-}" ]]; then
+        AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_2}=$${LAYERSTORE_AUTH_TOKEN_2}")
+      fi
+      if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_3:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_3:-}" ]]; then
+        AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_3}=$${LAYERSTORE_AUTH_TOKEN_3}")
+      fi
+      if [[ -n "$${LAYERSTORE_AUTH_BASIC_1:-}" ]]; then
+        AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_1}")
+      fi
+      if [[ -n "$${LAYERSTORE_AUTH_BASIC_2:-}" ]]; then
+        AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_2}")
+      fi
+      if [[ -n "$${LAYERSTORE_AUTH_BASIC_3:-}" ]]; then
+        AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_3}")
+      fi
+      exec /usr/local/bin/afs_layerstore_grpcd \
+        -listen="$$IP:50051" \
+        -cache-dir=/var/lib/afs/cache \
+        -node-id="$${LAYERSTORE_NODE_ID}" \
+        -discovery-endpoint=discovery:60051 \
+        -pprof-listen="$${LAYERSTORE_PPROF_LISTEN}" \
+        -format-version=$${AFS_FORMAT_VERSION:-2} \
+        "$${AUTH_ARGS[@]}"
+  networks:
+    - afsnet
+
+x-afslet-common: &afslet-common
+  <<: *afs-runtime
+  restart: unless-stopped
+  cgroup: host
+  depends_on:
+    - discovery
+    - layerstore
+    - layerstore2
+    - layerstore3
+  privileged: true
+  cap_add:
+    - SYS_ADMIN
+  security_opt:
+    - apparmor:unconfined
+  devices:
+    - /dev/fuse:/dev/fuse
   environment:
-    - AFS_FORMAT_VERSION=${AFS_FORMAT_VERSION:-2}
-    - AFS_DISCOVERY_READER_LOG_INTERVAL=${AFS_DISCOVERY_READER_LOG_INTERVAL:-0s}
-    - AFS_DISCOVERY_READER_LOG_MIN_CALLS=${AFS_DISCOVERY_READER_LOG_MIN_CALLS:-128}
-    - AFS_DISCOVERY_READER_LOG_MIN_BYTES=${AFS_DISCOVERY_READER_LOG_MIN_BYTES:-33554432}
+    <<: *afs-runtime-env
+    AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
+    AFSLET_MOUNT_IN_PROCESS: ${AFSLET_MOUNT_IN_PROCESS:-false}
+  entrypoint: ["/bin/bash", "-lc"]
 
 services:
   discovery:
@@ -41,80 +109,67 @@ services:
         if [[ -n "$${LAYERSTORE_AUTH_BASIC_3:-}" ]]; then
           AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_3}")
         fi
-        exec /usr/local/bin/afs_discovery_grpcd -listen=:60051 -format-version=$${AFS_FORMAT_VERSION:-2} "$${AUTH_ARGS[@]}"
+        exec /usr/local/bin/afs_discovery_grpcd \
+          -listen=:60051 \
+          -pprof-listen=:6064 \
+          -format-version=$${AFS_FORMAT_VERSION:-2} \
+          "$${AUTH_ARGS[@]}"
     ports:
       - "60051:60051"
+      - "16064:6064"
     networks:
       - afsnet
 
   layerstore:
-    <<: *afs-runtime
-    container_name: afs-layerstore
-    restart: unless-stopped
-    depends_on:
-      - discovery
-    env_file:
-      - .env.layerstore
+    <<: *layerstore-common
+    container_name: afs-layerstore-1
+    environment:
+      <<: *afs-runtime-env
+      LAYERSTORE_NODE_ID: layerstore-1
+      LAYERSTORE_PPROF_LISTEN: :6063
     volumes:
       - layerstore_cache:/var/lib/afs/cache
       # Optional: mount custom root CAs when using private/self-signed registry certs.
       # - ./certs:/usr/local/share/ca-certificates/custom:ro
-    entrypoint: ["/bin/bash", "-lc"]
-    command:
-      - |
-        set -euo pipefail
-        update-ca-certificates >/dev/null 2>&1 || true
-        IP="$(hostname -i | awk '{print $1}')"
-        echo "layerstore listen ip=$$IP"
-        AUTH_ARGS=()
-        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_1:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_1:-}" ]]; then
-          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_1}=$${LAYERSTORE_AUTH_TOKEN_1}")
-        fi
-        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_2:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_2:-}" ]]; then
-          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_2}=$${LAYERSTORE_AUTH_TOKEN_2}")
-        fi
-        if [[ -n "$${LAYERSTORE_AUTH_REGISTRY_3:-}" && -n "$${LAYERSTORE_AUTH_TOKEN_3:-}" ]]; then
-          AUTH_ARGS+=(-auth-registry-token "$${LAYERSTORE_AUTH_REGISTRY_3}=$${LAYERSTORE_AUTH_TOKEN_3}")
-        fi
-        exec /usr/local/bin/afs_layerstore_grpcd \
-          -listen="$$IP:50051" \
-          -cache-dir=/var/lib/afs/cache \
-          -node-id=layerstore-1 \
-          -discovery-endpoint=discovery:60051 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
-          "$${AUTH_ARGS[@]}"
-    networks:
-      - afsnet
+    ports:
+      - "16063:6063"
+
+  layerstore2:
+    <<: *layerstore-common
+    container_name: afs-layerstore-2
+    environment:
+      <<: *afs-runtime-env
+      LAYERSTORE_NODE_ID: layerstore-2
+      LAYERSTORE_PPROF_LISTEN: :6063
+    volumes:
+      - layerstore_cache_2:/var/lib/afs/cache
+      # Optional: mount custom root CAs when using private/self-signed registry certs.
+      # - ./certs:/usr/local/share/ca-certificates/custom:ro
+    ports:
+      - "16065:6063"
+
+  layerstore3:
+    <<: *layerstore-common
+    container_name: afs-layerstore-3
+    environment:
+      <<: *afs-runtime-env
+      LAYERSTORE_NODE_ID: layerstore-3
+      LAYERSTORE_PPROF_LISTEN: :6063
+    volumes:
+      - layerstore_cache_3:/var/lib/afs/cache
+      # Optional: mount custom root CAs when using private/self-signed registry certs.
+      # - ./certs:/usr/local/share/ca-certificates/custom:ro
+    ports:
+      - "16066:6063"
 
   afslet:
-    <<: *afs-runtime
-    container_name: afs-afslet
-    restart: unless-stopped
-    cgroup: host
-    depends_on:
-      - discovery
-      - layerstore
-    privileged: true
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - apparmor:unconfined
-    devices:
-      - /dev/fuse:/dev/fuse
+    <<: *afslet-common
+    container_name: afs-afslet-1
     volumes:
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
       - afslet_spillcache:/var/lib/afslet/spillcache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    ports:
-      - "61051:61051"
-    environment:
-      - AFS_DISCOVERY_READER_LOG_INTERVAL=${AFS_DISCOVERY_READER_LOG_INTERVAL:-0s}
-      - AFS_DISCOVERY_READER_LOG_MIN_CALLS=${AFS_DISCOVERY_READER_LOG_MIN_CALLS:-128}
-      - AFS_DISCOVERY_READER_LOG_MIN_BYTES=${AFS_DISCOVERY_READER_LOG_MIN_BYTES:-33554432}
-      - AFSLET_LAYER_MOUNT_CONCURRENCY=${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
-      - AFSLET_MOUNT_IN_PROCESS=${AFSLET_MOUNT_IN_PROCESS:-false}
-    entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
         set -euo pipefail
@@ -131,17 +186,103 @@ services:
           -shared-spill-cache-dir=/var/lib/afslet/spillcache \
           -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
           -shared-spill-cache-max-bytes=10737418240 \
+          -shared-spill-cache-pprof-listen=:6061 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
+          -pprof-listen=:6062 \
           -format-version=$${AFS_FORMAT_VERSION:-2} \
           -graceful-timeout=15s
+    ports:
+      - "61051:61051"
+      - "16061:6061"
+      - "16062:6062"
     networks:
-      - afsnet
+      afsnet:
+        aliases:
+          - afslet
+
+  afslet2:
+    <<: *afslet-common
+    container_name: afs-afslet-2
+    volumes:
+      - afslet_tmp_2:/var/lib/afslet/tmp
+      - afslet_work_2:/var/lib/afslet/work
+      - afslet_spillcache_2:/var/lib/afslet/spillcache
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    command:
+      - |
+        set -euo pipefail
+        exec /usr/local/bin/afslet \
+          -listen=:61051 \
+          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
+          -mount-binary=/usr/local/bin/afs_mount \
+          -runc-binary=/usr/local/bin/afs_runc \
+          -discovery-addr=discovery:60051 \
+          -temp-dir=/var/lib/afslet/tmp \
+          -limit-cpu=4 \
+          -limit-memory-mb=4096 \
+          -shared-spill-cache \
+          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
+          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
+          -shared-spill-cache-max-bytes=10737418240 \
+          -shared-spill-cache-pprof-listen=:6071 \
+          -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
+          -pprof-listen=:6072 \
+          -format-version=$${AFS_FORMAT_VERSION:-2} \
+          -graceful-timeout=15s
+    ports:
+      - "61052:61051"
+      - "16071:6071"
+      - "16072:6072"
+    networks:
+      afsnet:
+        aliases:
+          - afslet
+
+  afslet3:
+    <<: *afslet-common
+    container_name: afs-afslet-3
+    volumes:
+      - afslet_tmp_3:/var/lib/afslet/tmp
+      - afslet_work_3:/var/lib/afslet/work
+      - afslet_spillcache_3:/var/lib/afslet/spillcache
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    command:
+      - |
+        set -euo pipefail
+        exec /usr/local/bin/afslet \
+          -listen=:61051 \
+          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
+          -mount-binary=/usr/local/bin/afs_mount \
+          -runc-binary=/usr/local/bin/afs_runc \
+          -discovery-addr=discovery:60051 \
+          -temp-dir=/var/lib/afslet/tmp \
+          -limit-cpu=4 \
+          -limit-memory-mb=4096 \
+          -shared-spill-cache \
+          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
+          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
+          -shared-spill-cache-max-bytes=10737418240 \
+          -shared-spill-cache-pprof-listen=:6081 \
+          -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
+          -pprof-listen=:6082 \
+          -format-version=$${AFS_FORMAT_VERSION:-2} \
+          -graceful-timeout=15s
+    ports:
+      - "61053:61051"
+      - "16081:6081"
+      - "16082:6082"
+    networks:
+      afsnet:
+        aliases:
+          - afslet
 
   afs_proxy:
     <<: *afs-runtime
     restart: unless-stopped
     depends_on:
       - afslet
+      - afslet2
+      - afslet3
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
@@ -149,6 +290,7 @@ services:
         exec /usr/local/bin/afs_proxy \
           -listen=:62051 \
           -http-listen=:62052 \
+          -pprof-listen=:6066 \
           -afslet-target=afslet:61051 \
           -discovery-target=discovery:60051 \
           -proxy-peers-target=afs_proxy:62052 \
@@ -157,6 +299,7 @@ services:
     ports:
       - "62051:62051"
       - "62052:62052"
+      - "16067:6066"
     networks:
       - afsnet
 
@@ -166,6 +309,14 @@ networks:
 
 volumes:
   layerstore_cache:
+  layerstore_cache_2:
+  layerstore_cache_3:
   afslet_tmp:
   afslet_work:
   afslet_spillcache:
+  afslet_tmp_2:
+  afslet_work_2:
+  afslet_spillcache_2:
+  afslet_tmp_3:
+  afslet_work_3:
+  afslet_spillcache_3:
