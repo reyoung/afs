@@ -1,6 +1,6 @@
 [project]
 name = "afs-sdk"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Asyncio grpclib SDK for afs_proxy/afslet"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -10,8 +10,17 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["hatchling>=1.25.0"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=80", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["afs_sdk"]
+[project.urls]
+Repository = "https://github.com/reyoung/afs"
+
+[tool.setuptools.packages.find]
+include = ["afs_sdk*"]
+
+[tool.setuptools_scm]
+root = ".."
+fallback_root = "."
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"

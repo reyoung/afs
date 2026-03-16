@@ -21,6 +21,10 @@ Example output:
 VersionInfo(version='v0.2.0-1-gabc1234-dirty', tag='v0.2.0', commit_sha='abc1234', distance=1, dirty=True)
 ```
 
+When installed from a built distribution without `.git` metadata, it falls back
+to the package metadata version. PyPI release versions are derived from git tags
+via `setuptools_scm`.
+
 ## Setup (uv)
 
 ```bash
