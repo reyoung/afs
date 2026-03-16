@@ -11,7 +11,7 @@
   - `afsproxypb.AfsProxy.Status`（流式状态）
 - HTTP：
   - `/status`
-  - `/dispatching`（兼容旧路径）
+  - `/debug/pprof/*`
 
 ## 交互对象
 
@@ -34,6 +34,8 @@
   - layerstore 实例状态（含 layer size 与 cache 上限）
   - afslet 实例状态（可达性与资源占用）
   - 汇总信息
+- HTTP 端口的主要目的是提供当前 proxy 服务状态的观测接口。
 - HTTP `/status`：
   - 查询 dispatching 队列数
   - `include_cluster` 默认 `true`
+- HTTP `/debug/pprof/*` 也复用这个端口提供。

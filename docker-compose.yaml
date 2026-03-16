@@ -290,7 +290,6 @@ services:
         exec /usr/local/bin/afs_proxy \
           -listen=:62051 \
           -http-listen=:62052 \
-          -pprof-listen=:6066 \
           -afslet-target=afslet:61051 \
           -discovery-target=discovery:60051 \
           -proxy-peers-target=afs_proxy:62052 \
@@ -298,8 +297,6 @@ services:
           -dispatch-backoff=50ms
     ports:
       - "62051:62051"
-      - "62052:62052"
-      - "16067:6066"
     networks:
       - afsnet
 

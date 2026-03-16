@@ -2,8 +2,11 @@ package afsproxy
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +75,51 @@ func TestParseBoolDefaultTrue(t *testing.T) {
 	}
 	if parseBoolDefaultTrue("no") {
 		t.Fatalf("expected false for no")
+	}
+}
+
+func TestHandleStatusHTTP(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Config{NodeID: "node-a"})
+	svc.dispatching.Store(3)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/status?include_cluster=false", nil)
+	rec := httptest.NewRecorder()
+	svc.HandleStatusHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp dispatchStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.NodeID != "node-a" {
+		t.Fatalf("node_id=%q, want %q", resp.NodeID, "node-a")
+	}
+	if resp.IncludeCluster {
+		t.Fatalf("include_cluster=%v, want false", resp.IncludeCluster)
+	}
+	if resp.LocalDispatching != 3 {
+		t.Fatalf("local_dispatching=%d, want 3", resp.LocalDispatching)
+	}
+	if resp.ClusterDispatching != 3 {
+		t.Fatalf("cluster_dispatching=%d, want 3", resp.ClusterDispatching)
+	}
+}
+
+func TestHandleStatusHTTPRejectsLegacyDispatchingPath(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Config{})
+	req := httptest.NewRequest(http.MethodGet, "http://example/dispatching", nil)
+	rec := httptest.NewRecorder()
+	svc.HandleStatusHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 

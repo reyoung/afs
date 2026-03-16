@@ -33,12 +33,11 @@ func main() {
 		httpPeerTimeout time.Duration
 		gracefulTimeout time.Duration
 		discoveryTarget string
-		pprofListen     string
 		formatVersion   int
 	)
 
 	flag.StringVar(&grpcListen, "listen", ":62051", "gRPC listen address")
-	flag.StringVar(&httpListen, "http-listen", ":62052", "HTTP listen address for dispatching status")
+	flag.StringVar(&httpListen, "http-listen", ":62052", "HTTP listen address for observability endpoints")
 	flag.StringVar(&afsletTarget, "afslet-target", "afslet:61051", "afslet DNS target host:port (A records are re-resolved every attempt)")
 	flag.StringVar(&proxyPeers, "proxy-peers-target", "", "afs_proxy DNS target host:port for cluster dispatching status aggregation")
 	flag.StringVar(&nodeID, "node-id", "", "node id for cluster status dedup")
@@ -48,7 +47,6 @@ func main() {
 	flag.DurationVar(&httpPeerTimeout, "peer-http-timeout", 2*time.Second, "peer query timeout for cluster dispatching status")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "graceful shutdown timeout")
 	flag.StringVar(&discoveryTarget, "discovery-target", "", "discovery DNS target host:port for layerstore status query")
-	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof; use the same value as -http-listen to expose pprof on the main HTTP server")
 	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
 	flag.Parse()
 
@@ -78,20 +76,7 @@ func main() {
 	afsproxypb.RegisterAfsProxyServer(grpcServer, svc)
 	reflection.Register(grpcServer)
 
-	httpMux := http.NewServeMux()
-	httpMux.HandleFunc("/status", svc.HandleStatusHTTP)
-	// Backward compatibility for old clients.
-	httpMux.HandleFunc("/dispatching", svc.HandleStatusHTTP)
-	if pprofListen != "" && pprofListen == httpListen {
-		debughttp.RegisterPprof(httpMux)
-	}
-	httpServer := &http.Server{Handler: httpMux}
-	shutdownPprof := func(context.Context) error { return nil }
-	if pprofListen != "" && pprofListen != httpListen {
-		if stopper := debughttp.StartPprofServer("afs_proxy", pprofListen); stopper != nil {
-			shutdownPprof = stopper
-		}
-	}
+	httpServer := &http.Server{Handler: newHTTPMux(svc)}
 
 	go func() {
 		log.Printf("afs_proxy gRPC listening on %s (afslet-target=%s)", grpcListen, afsletTarget)
@@ -123,5 +108,11 @@ func main() {
 	case <-ctx.Done():
 		grpcServer.Stop()
 	}
-	_ = shutdownPprof(ctx)
+}
+
+func newHTTPMux(svc *afsproxy.Service) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", svc.HandleStatusHTTP)
+	debughttp.RegisterPprof(mux)
+	return mux
 }

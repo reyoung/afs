@@ -11,7 +11,7 @@ Routes `Afslet.Execute` requests to one of multiple afslet backends with resourc
   - `afsproxypb.AfsProxy.Status` (streaming cluster status)
 - HTTP endpoints:
   - `/status`
-  - `/dispatching` (backward-compatible alias)
+  - `/debug/pprof/*`
 
 ## Talks To
 
@@ -34,8 +34,10 @@ Routes `Afslet.Execute` requests to one of multiple afslet backends with resourc
   - layerstore instances (node, endpoint, layer stats, cache max bytes),
   - afslet instances (reachable + runtime usage),
   - final summary.
+- The HTTP port is primarily for observability of the current proxy state.
 - HTTP `/status` returns dispatching queue counters.
   - `include_cluster` defaults to `true`.
+- HTTP `/debug/pprof/*` is served on the same port.
 
 ## Important Flags
 

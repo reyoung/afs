@@ -459,7 +459,7 @@ func (s *Service) ReconcileImageReplica(ctx context.Context, req *afsproxypb.Rec
 }
 
 func (s *Service) HandleStatusHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/status" && r.URL.Path != "/dispatching" {
+	if r.URL.Path != "/status" {
 		http.NotFound(w, r)
 		return
 	}
