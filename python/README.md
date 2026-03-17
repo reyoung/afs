@@ -36,7 +36,8 @@ cd python
 
 - Low-level: `AfsClient.raw_execute(requests: AsyncIterator[ExecuteRequest])`
 - High-level: `AfsClient.execute(request: ExecuteInput)`
-  - request is a single typed object (`image`, optional `command`, resources, and extra file entries)
+  - request is a single typed object (`image`, optional `command`, optional `env`, resources, and extra file entries)
+  - `env` accepts either a `dict[str, str]` or a sequence of `KEY=VALUE` strings, and overrides image env on key conflict
   - set `force_local_fetch=True` to force local layer fetch on selected layerstore
   - response is `AsyncIterator[ExecuteEvent]`
 - Proxy status stream: `AfsClient.status(include_layerstores=True, include_afslets=True)`
@@ -69,6 +70,7 @@ async def run():
         image="alpine",
         tag="latest",
         command=["/bin/sh", "-c", "echo ok >/tmp/ok.txt"],
+        env={"FOO": "bar", "PATH": "/custom/bin"},
         cpu_cores=1,
         memory_mb=256,
         timeout_ms=2000,
@@ -90,6 +92,8 @@ CLI-style demo:
 PYTHONPATH=python ~/.local/bin/uv run python python/examples/execute_stream.py \
   --addr 127.0.0.1:62051 \
   --dir ./extra-dir \
+  --env FOO=bar \
+  --env PATH=/custom/bin \
   --image alpine --tag latest \
   -- /bin/sh -c 'echo ok >/tmp/ok.txt'
 ```

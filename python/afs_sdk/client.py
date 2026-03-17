@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Mapping
 from concurrent.futures import Executor, ThreadPoolExecutor
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, Sequence
 
 from grpclib.client import Channel
 
@@ -286,12 +287,14 @@ class AfsClient:
             raise ValueError("upload_chunk_size must be > 0")
         if not req.image.strip():
             raise ValueError("image is required")
+        env = _normalize_env_entries(req.env)
 
         yield pb.ExecuteRequest(
             start=pb.StartRequest(
                 image=req.image,
                 tag=req.tag,
                 command=list(req.command),
+                env=env,
                 cpu_cores=req.cpu_cores,
                 memory_mb=req.memory_mb,
                 timeout_ms=req.timeout_ms,
@@ -364,3 +367,17 @@ class AfsClient:
                 continue
 
             raise TypeError(f"unsupported extra entry type: {type(entry)!r}")
+
+
+def _normalize_env_entries(env: Mapping[str, str] | Sequence[str]) -> list[str]:
+    if isinstance(env, Mapping):
+        return [f"{key}={value}" for key, value in env.items()]
+    if isinstance(env, str):
+        raise TypeError("env must be a mapping or a sequence of KEY=VALUE strings")
+
+    out: list[str] = []
+    for entry in env:
+        if not isinstance(entry, str):
+            raise TypeError(f"env entry must be str, got {type(entry)!r}")
+        out.append(entry)
+    return out

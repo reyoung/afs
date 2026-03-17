@@ -15,7 +15,7 @@ CLI client for execute and status workflows.
 ### Key Capabilities
 
 - Upload local directory as ordered file stream.
-- Send execute request with image/command/resources.
+- Send execute request with image/command/resources and request-level env overrides.
 - Print streaming logs and results.
 - Save writable-upper tar.gz output.
 - Query proxy status stream (`-proxy-status`).
@@ -31,7 +31,7 @@ Asyncio + grpclib client library for integration in Python applications.
 - Low level:
   - `raw_execute()` uses protobuf frames directly.
 - High level:
-  - `execute(ExecuteInput)` with typed request models and typed event stream.
+  - `execute(ExecuteInput)` with typed request models, typed event stream, and env overrides.
   - `status()` returns typed proxy status events.
 
 ### Streaming Model

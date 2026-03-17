@@ -49,6 +49,7 @@ Checks:
   2. image entrypoint override
   3. image env + user
   4. image working_dir + env
+  5. request env override
 
 Options:
   --mode <raw|bare|compose|helm|kubernetes|k8s>
@@ -153,10 +154,27 @@ run_execute_case() {
   local image="$2"
   local tag="$3"
   shift 3
+  local cli_args=()
+  local cmd_args=()
+  local parsing_cmd=0
+
+  while [[ $# -gt 0 ]]; do
+    if [[ "${1}" == "--" && "${parsing_cmd}" -eq 0 ]]; then
+      parsing_cmd=1
+      shift
+      continue
+    fi
+    if [[ "${parsing_cmd}" -eq 0 ]]; then
+      cli_args+=("$1")
+    else
+      cmd_args+=("$1")
+    fi
+    shift
+  done
 
   local out_path="${LOG_DIR}/${label}.tar.gz"
   local output
-  if [[ $# -gt 0 ]]; then
+  if [[ ${#cmd_args[@]} -gt 0 ]]; then
     output="$(
       run_without_proxy "${AFS_CLI}" \
         -addr "${ADDR}" \
@@ -165,7 +183,8 @@ run_execute_case() {
         -tag "${tag}" \
         -timeout 5s \
         -out "${out_path}" \
-        -- "$@" 2>&1
+        "${cli_args[@]}" \
+        -- "${cmd_args[@]}" 2>&1
     )"
   else
     output="$(
@@ -175,6 +194,7 @@ run_execute_case() {
         -image "${image}" \
         -tag "${tag}" \
         -timeout 5s \
+        "${cli_args[@]}" \
         -out "${out_path}" 2>&1
     )"
   fi
@@ -189,20 +209,24 @@ run_runtime_config_checks() {
   output="$(run_execute_case default-cmd "${DEFAULT_CMD_IMAGE}" "${DEFAULT_CMD_TAG}")"
   assert_contains "${output}" 'resolved_cmd=["/bin/sh"]' "default-cmd"
 
-  output="$(run_execute_case entrypoint "${ENTRYPOINT_IMAGE}" "${ENTRYPOINT_TAG}" -h)"
+  output="$(run_execute_case entrypoint "${ENTRYPOINT_IMAGE}" "${ENTRYPOINT_TAG}" -- -h)"
   assert_contains "${output}" 'resolved_cmd=["docker-entrypoint.sh" "-h"]' "entrypoint"
   assert_contains "${output}" 'memcached 1.6.41' "entrypoint"
 
-  output="$(run_execute_case user-env "${ENTRYPOINT_IMAGE}" "${ENTRYPOINT_TAG}" /bin/sh -lc 'id -un; id -u; pwd; printf "%s\n" "$MEMCACHED_VERSION"')"
+  output="$(run_execute_case user-env "${ENTRYPOINT_IMAGE}" "${ENTRYPOINT_TAG}" -- /bin/sh -lc 'id -un; id -u; pwd; printf "%s\n" "$MEMCACHED_VERSION"')"
   assert_contains "${output}" 'user="memcache"' "user-env"
   assert_contains "${output}" 'memcache' "user-env"
   assert_contains "${output}" '11211' "user-env"
   assert_contains "${output}" '1.6.41' "user-env"
 
-  output="$(run_execute_case working-dir "${WORKDIR_IMAGE}" "${WORKDIR_TAG}" /bin/sh -lc 'pwd; printf "%s\n" "$CADDY_VERSION"')"
+  output="$(run_execute_case working-dir "${WORKDIR_IMAGE}" "${WORKDIR_TAG}" -- /bin/sh -lc 'pwd; printf "%s\n" "$CADDY_VERSION"')"
   assert_contains "${output}" 'cwd="/srv"' "working-dir"
   assert_contains "${output}" '/srv' "working-dir"
   assert_contains "${output}" 'v2.11.2' "working-dir"
+
+  output="$(run_execute_case env-override "${ENTRYPOINT_IMAGE}" "${ENTRYPOINT_TAG}" -env MEMCACHED_VERSION=override-1.0 -env AFS_ENV_OVERRIDE=works -- /bin/sh -lc 'printf "%s\n%s\n" "$MEMCACHED_VERSION" "$AFS_ENV_OVERRIDE"')"
+  assert_contains "${output}" '[runc:stdout] override-1.0' "env-override"
+  assert_contains "${output}" '[runc:stdout] works' "env-override"
 }
 
 start_raw_mode() {

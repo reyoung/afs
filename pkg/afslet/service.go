@@ -717,7 +717,7 @@ func buildRuntimeProcessConfig(start *afsletpb.StartRequest, imageCfg *discovery
 	}
 	return runtimeProcessConfig{
 		command:    command,
-		env:        normalizeProcessEnv(imageCfg.GetEnv()),
+		env:        normalizeProcessEnv(imageCfg.GetEnv(), start.GetEnv()),
 		workingDir: normalizeWorkingDir(imageCfg.GetWorkingDir()),
 		user:       strings.TrimSpace(imageCfg.GetUser()),
 	}, nil
@@ -740,8 +740,12 @@ func resolveCommandArgs(requestedCmd, entrypoint, imageCmd []string) ([]string, 
 	return append(entrypoint, imageCmd...), nil
 }
 
-func normalizeProcessEnv(imageEnv []string) []string {
-	out := dedupeEnvKeepLast(imageEnv)
+func normalizeProcessEnv(envSets ...[]string) []string {
+	merged := make([]string, 0)
+	for _, envSet := range envSets {
+		merged = append(merged, envSet...)
+	}
+	out := dedupeEnvKeepLast(merged)
 	if !hasEnvKey(out, "PATH") {
 		out = append(out, defaultProcessPathEnv)
 	}

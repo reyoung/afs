@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Sequence, Union
+from typing import AsyncIterator, Mapping, Sequence, Union
 
 
 ByteChunks = AsyncIterator[bytes]
@@ -43,6 +43,7 @@ ExtraEntry = Union[ExtraDirectory, ExtraSymlink, ExtraFile]
 class ExecuteInput:
     image: str
     command: Sequence[str] = field(default_factory=tuple)
+    env: Mapping[str, str] | Sequence[str] = field(default_factory=tuple)
     tag: str = ""
     cpu_cores: int = 1
     memory_mb: int = 256

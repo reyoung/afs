@@ -15,7 +15,7 @@
 ### 能力
 
 - 上传本地目录为 extra-dir 流。
-- 发送执行请求（镜像/命令/资源）。
+- 发送执行请求（镜像/命令/资源）并支持请求级 env override。
 - 打印流式日志和结果。
 - 保存 writable-upper tar.gz。
 - 查询 proxy 状态流（`-proxy-status`）。
@@ -30,7 +30,7 @@
 
 - 低层：`raw_execute()`（直接 protobuf 帧）
 - 高层：
-  - `execute(ExecuteInput)`（类型化请求与事件）
+  - `execute(ExecuteInput)`（类型化请求与事件，也支持 env override）
   - `status()`（类型化 proxy 状态事件）
 
 ### 流式特性

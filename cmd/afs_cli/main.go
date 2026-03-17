@@ -40,8 +40,20 @@ type config struct {
 	platformVariant string
 	proxyMaxRetries int64
 	proxyBackoff    time.Duration
+	env             multiStringFlag
 	chunkSize       int
 	grpcTimeout     time.Duration
+}
+
+type multiStringFlag []string
+
+func (f *multiStringFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *multiStringFlag) Set(v string) error {
+	*f = append(*f, v)
+	return nil
 }
 
 func main() {
@@ -77,6 +89,7 @@ func parseFlags() (config, []string) {
 	flag.StringVar(&cfg.platformVariant, "platform-variant", "", "platform variant")
 	flag.Int64Var(&cfg.proxyMaxRetries, "proxy-dispatch-max-retries", 0, "dispatch retry count for afs_proxy (0 means infinite retries)")
 	flag.DurationVar(&cfg.proxyBackoff, "proxy-dispatch-backoff", 50*time.Millisecond, "dispatch retry backoff for afs_proxy")
+	flag.Var(&cfg.env, "env", "process environment override KEY=VALUE (repeatable; overrides image env)")
 	flag.IntVar(&cfg.chunkSize, "chunk-size", 256*1024, "upload chunk size bytes")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 20*time.Minute, "overall grpc timeout")
 	flag.Parse()
@@ -233,7 +246,15 @@ func run(cfg config, cmdArgs []string) error {
 }
 
 func sendStart(stream afsletpb.Afslet_ExecuteClient, cfg config, cmdArgs []string) error {
-	req := &afsletpb.ExecuteRequest{Payload: &afsletpb.ExecuteRequest_Start{Start: &afsletpb.StartRequest{
+	req := buildStartRequest(cfg, cmdArgs)
+	if err := stream.Send(req); err != nil {
+		return fmt.Errorf("send start: %w", err)
+	}
+	return nil
+}
+
+func buildStartRequest(cfg config, cmdArgs []string) *afsletpb.ExecuteRequest {
+	return &afsletpb.ExecuteRequest{Payload: &afsletpb.ExecuteRequest_Start{Start: &afsletpb.StartRequest{
 		Image:                   cfg.image,
 		Tag:                     cfg.tag,
 		Command:                 cmdArgs,
@@ -248,11 +269,8 @@ func sendStart(stream afsletpb.Afslet_ExecuteClient, cfg config, cmdArgs []strin
 		PlatformVariant:         cfg.platformVariant,
 		ProxyDispatchMaxRetries: cfg.proxyMaxRetries,
 		ProxyDispatchBackoffMs:  cfg.proxyBackoff.Milliseconds(),
+		Env:                     append([]string(nil), cfg.env...),
 	}}}
-	if err := stream.Send(req); err != nil {
-		return fmt.Errorf("send start: %w", err)
-	}
-	return nil
 }
 
 func uploadDir(stream afsletpb.Afslet_ExecuteClient, root string, chunkSize int) error {

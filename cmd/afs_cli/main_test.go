@@ -6,7 +6,9 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsproxypb"
 	"google.golang.org/grpc"
 )
@@ -81,5 +83,40 @@ func TestRunReconcileImageReplicaSubcommand(t *testing.T) {
 	}
 	if !strings.Contains(got, "instances=node-a@10.0.0.1:50051,node-b@10.0.0.2:50051") {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestBuildStartRequestIncludesEnvOverrides(t *testing.T) {
+	t.Parallel()
+
+	req := buildStartRequest(config{
+		image:           "alpine",
+		tag:             "3.20",
+		cpu:             2,
+		memoryMB:        512,
+		timeout:         3 * time.Second,
+		discoveryAddr:   "127.0.0.1:16051",
+		forceLocalFetch: true,
+		nodeID:          "node-a",
+		platformOS:      "linux",
+		platformArch:    "amd64",
+		platformVariant: "v3",
+		proxyMaxRetries: 2,
+		proxyBackoff:    75 * time.Millisecond,
+		env:             multiStringFlag{"FOO=bar", "PATH=/custom/bin"},
+	}, []string{"/bin/sh", "-lc", "env"})
+
+	start, ok := req.GetPayload().(*afsletpb.ExecuteRequest_Start)
+	if !ok || start.Start == nil {
+		t.Fatalf("expected start payload, got %T", req.GetPayload())
+	}
+	if got := start.Start.GetEnv(); len(got) != 2 || got[0] != "FOO=bar" || got[1] != "PATH=/custom/bin" {
+		t.Fatalf("env=%v, want request env", got)
+	}
+	if got := start.Start.GetCommand(); len(got) != 3 || got[0] != "/bin/sh" || got[2] != "env" {
+		t.Fatalf("command=%v, want command args", got)
+	}
+	if got := start.Start.GetTimeoutMs(); got != 3000 {
+		t.Fatalf("timeout_ms=%d, want 3000", got)
 	}
 }

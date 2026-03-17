@@ -45,12 +45,13 @@ func TestBuildRuntimeProcessConfigUsesImageDefaults(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeProcessConfigRequestedCommandOverridesImageCmd(t *testing.T) {
+func TestBuildRuntimeProcessConfigRequestedCommandAndEnvOverrideImageConfig(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := buildRuntimeProcessConfig(&afsletpb.StartRequest{
 		Image:    "nginx",
 		Command:  []string{"echo", "ok"},
+		Env:      []string{"PATH=/override/bin", "FOO=baz", "BAR=qux"},
 		CpuCores: 1,
 		MemoryMb: 256,
 	}, &discoverypb.ImageRuntimeConfig{
@@ -65,8 +66,8 @@ func TestBuildRuntimeProcessConfigRequestedCommandOverridesImageCmd(t *testing.T
 	if got := cfg.command; len(got) != 3 || got[0] != "/docker-entrypoint.sh" || got[1] != "echo" || got[2] != "ok" {
 		t.Fatalf("command=%v, want entrypoint + requested command", got)
 	}
-	if got := cfg.env; len(got) != 2 || got[0] != "PATH=/custom/bin" || got[1] != "FOO=bar" {
-		t.Fatalf("env=%v, want image env preserved", got)
+	if got := cfg.env; len(got) != 3 || got[0] != "PATH=/override/bin" || got[1] != "FOO=baz" || got[2] != "BAR=qux" {
+		t.Fatalf("env=%v, want request env to override image env", got)
 	}
 	if got := cfg.workingDir; got != "/" {
 		t.Fatalf("workingDir=%q, want /", got)

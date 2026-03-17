@@ -33,6 +33,7 @@ message StartRequest {
   string platform_variant = 12;
   int64 proxy_dispatch_max_retries = 13;
   int64 proxy_dispatch_backoff_ms = 14;
+  repeated string env = 15;
 }
 
 message FileEntryBegin {
