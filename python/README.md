@@ -71,6 +71,7 @@ async def run():
         tag="latest",
         command=["/bin/sh", "-c", "echo ok >/tmp/ok.txt"],
         env={"FOO": "bar", "PATH": "/custom/bin"},
+        fuse_max_read_ahead_bytes=16 << 20,
         cpu_cores=1,
         memory_mb=256,
         timeout_ms=2000,

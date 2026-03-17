@@ -420,6 +420,9 @@ func validateStartRequest(start *afsletpb.StartRequest) error {
 	if start.GetMemoryMb() <= 0 {
 		return fmt.Errorf("start.memory_mb must be > 0")
 	}
+	if start.GetFuseMaxReadAheadBytes() < 0 {
+		return fmt.Errorf("start.fuse_max_read_ahead_bytes must be >= 0")
+	}
 	return nil
 }
 
@@ -451,8 +454,13 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if logf != nil {
 		logf("image", fmt.Sprintf("resolved entrypoint=%q cmd=%q env=%d working_dir=%q user=%q", imageRuntimeConfig.GetEntrypoint(), imageRuntimeConfig.GetCmd(), len(imageRuntimeConfig.GetEnv()), imageRuntimeConfig.GetWorkingDir(), imageRuntimeConfig.GetUser()))
-		logf("request", fmt.Sprintf("image=%s tag=%s requested_cmd=%q resolved_cmd=%q env=%d cwd=%q user=%q cpu=%d memory_mb=%d timeout_ms=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t runc_no_pid_ns=%t runc_no_ipc_ns=%t runc_no_uts_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), processCfg.command, len(processCfg.env), processCfg.workingDir, processCfg.user, start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS, s.runcNoPIDNS, s.runcNoIPCNS, s.runcNoUTSNS))
+		logf("request", fmt.Sprintf("image=%s tag=%s requested_cmd=%q resolved_cmd=%q env=%d cwd=%q user=%q cpu=%d memory_mb=%d timeout_ms=%d fuse_max_read_ahead_bytes=%d runc_no_pivot=%t runc_no_new_keyring=%t runc_no_cgroup_ns=%t runc_no_pid_ns=%t runc_no_ipc_ns=%t runc_no_uts_ns=%t", start.GetImage(), start.GetTag(), start.GetCommand(), processCfg.command, len(processCfg.env), processCfg.workingDir, processCfg.user, start.GetCpuCores(), start.GetMemoryMb(), start.GetTimeoutMs(), start.GetFuseMaxReadAheadBytes(), s.runcNoPivot, s.runcNoNewKeyring, s.runcNoCgroupNS, s.runcNoPIDNS, s.runcNoIPCNS, s.runcNoUTSNS))
 		logf("resource", fmt.Sprintf("reserved cpu=%d memory_mb=%d", cpu, memory))
+	}
+
+	fuseMaxReadAheadBytes := s.fuseMaxReadAheadBytes
+	if start.GetFuseMaxReadAheadBytes() > 0 {
+		fuseMaxReadAheadBytes = start.GetFuseMaxReadAheadBytes()
 	}
 
 	mountCfg := afsmount.Config{
@@ -475,7 +483,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
 		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
 		LayerMountConcurrency:       s.layerMountConcurrency,
-		FUSEMaxReadAheadBytes:       s.fuseMaxReadAheadBytes,
+		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
 		FormatVersion:               s.formatVersion,
 	}
 	mountArgs := []string{
@@ -527,8 +535,8 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	if s.layerMountConcurrency > 0 {
 		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))
 	}
-	if s.fuseMaxReadAheadBytes > 0 {
-		mountArgs = append(mountArgs, "-fuse-max-read-ahead", strconv.FormatInt(s.fuseMaxReadAheadBytes, 10))
+	if fuseMaxReadAheadBytes > 0 {
+		mountArgs = append(mountArgs, "-fuse-max-read-ahead", strconv.FormatInt(fuseMaxReadAheadBytes, 10))
 	}
 
 	mountWait := make(chan error, 1)

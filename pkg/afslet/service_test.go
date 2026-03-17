@@ -160,6 +160,51 @@ func TestRunCommandInProcessMountRunnerError(t *testing.T) {
 	}
 }
 
+func TestRunCommandRequestFuseReadAheadOverridesServiceDefault(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(Config{
+		MountInProcess:        true,
+		LimitCPUCores:         8,
+		LimitMemoryMB:         2048,
+		FUSEMaxReadAheadBytes: 8 << 20,
+	})
+	called := make(chan afsmount.Config, 1)
+	svc.mountRunner = func(ctx context.Context, cfg afsmount.Config) error {
+		select {
+		case called <- cfg:
+		default:
+		}
+		return fmt.Errorf("synthetic mount failure")
+	}
+
+	sess, cleanup, err := newSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("newSession() error: %v", err)
+	}
+	defer cleanup()
+
+	res := svc.runCommand(context.Background(), sess, &afsletpb.StartRequest{
+		Image:                 "alpine",
+		Command:               []string{"echo", "ok"},
+		CpuCores:              1,
+		MemoryMb:              256,
+		FuseMaxReadAheadBytes: 16 << 20,
+	}, nil)
+	if res.Success {
+		t.Fatalf("expected runCommand failure, got success")
+	}
+
+	select {
+	case cfg := <-called:
+		if cfg.FUSEMaxReadAheadBytes != 16<<20 {
+			t.Fatalf("FUSEMaxReadAheadBytes=%d, want %d", cfg.FUSEMaxReadAheadBytes, 16<<20)
+		}
+	default:
+		t.Fatalf("expected mountRunner to be called")
+	}
+}
+
 func TestNormalizeImageAndTag(t *testing.T) {
 	t.Parallel()
 

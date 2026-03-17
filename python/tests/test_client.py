@@ -41,6 +41,23 @@ class ExecuteInputEnvTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+    async def test_iter_raw_requests_includes_fuse_read_ahead_override(self) -> None:
+        client = AfsClient("127.0.0.1", 1)
+        try:
+            reqs = client._iter_raw_requests(
+                ExecuteInput(
+                    image="alpine",
+                    command=["/bin/true"],
+                    fuse_max_read_ahead_bytes=16 << 20,
+                )
+            )
+
+            first = await anext(reqs)
+
+            self.assertEqual(first.start.fuse_max_read_ahead_bytes, 16 << 20)
+        finally:
+            await client.close()
+
 
 if __name__ == "__main__":
     unittest.main()

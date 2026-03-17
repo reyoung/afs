@@ -44,6 +44,7 @@ class ExecuteInput:
     image: str
     command: Sequence[str] = field(default_factory=tuple)
     env: Mapping[str, str] | Sequence[str] = field(default_factory=tuple)
+    fuse_max_read_ahead_bytes: int = 0
     tag: str = ""
     cpu_cores: int = 1
     memory_mb: int = 256

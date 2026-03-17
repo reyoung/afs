@@ -75,6 +75,7 @@ async def main() -> None:
     parser.add_argument("--image", required=True)
     parser.add_argument("--tag", default="")
     parser.add_argument("--env", action="append", default=[], help="process environment override KEY=VALUE (repeatable)")
+    parser.add_argument("--fuse-max-read-ahead-bytes", type=int, default=0, help="request-level FUSE read-ahead override in bytes")
     parser.add_argument("--cpu", type=int, default=1)
     parser.add_argument("--memory-mb", type=int, default=256)
     parser.add_argument("--timeout-ms", type=int, default=1000)
@@ -92,6 +93,7 @@ async def main() -> None:
         tag=args.tag,
         command=args.command,
         env=args.env,
+        fuse_max_read_ahead_bytes=args.fuse_max_read_ahead_bytes,
         cpu_cores=args.cpu,
         memory_mb=args.memory_mb,
         timeout_ms=args.timeout_ms,

@@ -306,6 +306,7 @@ class AfsClient:
                 platform_variant=req.platform_variant,
                 proxy_dispatch_max_retries=req.proxy_dispatch_max_retries,
                 proxy_dispatch_backoff_ms=req.proxy_dispatch_backoff_ms,
+                fuse_max_read_ahead_bytes=req.fuse_max_read_ahead_bytes,
             )
         )
 
