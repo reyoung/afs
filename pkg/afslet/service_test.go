@@ -2,6 +2,7 @@ package afslet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -345,25 +346,41 @@ func TestWaitForInProcessMountReadyReturnsWhenMountProcessExits(t *testing.T) {
 func TestTerminateProcessDoesNotBlockAfterWaitConsumed(t *testing.T) {
 	t.Parallel()
 
-	cmd := exec.Command("sh", "-c", "exit 1")
-	if err := cmd.Start(); err != nil {
+	proc := (&Service{}).newManagedCommand("sh", "-c", "exit 1")
+	if err := proc.start(); err != nil {
 		t.Fatalf("start command: %v", err)
 	}
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
-
-	// Simulate waitForMountReady having already consumed mountWait.
-	select {
-	case <-waitCh:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for command to exit")
+	if err := proc.wait(); err == nil {
+		t.Fatalf("expected command to exit with error")
 	}
-
 	start := time.Now()
-	if err := terminateProcess(cmd, waitCh); err != nil {
-		t.Fatalf("terminateProcess() returned unexpected error: %v", err)
+	if err := terminateProcess(proc, 200*time.Millisecond); err == nil {
+		t.Fatalf("terminateProcess() returned nil, want cached exit error")
 	}
 	if d := time.Since(start); d > 500*time.Millisecond {
 		t.Fatalf("terminateProcess blocked too long: %v", d)
+	}
+}
+
+func TestTerminateProcessKillsProcessGroup(t *testing.T) {
+	t.Parallel()
+
+	proc := (&Service{}).newManagedCommand("sh", "-c", "sleep 30")
+	if err := proc.start(); err != nil {
+		t.Fatalf("start command: %v", err)
+	}
+	if _, exited := proc.tryWait(); exited {
+		t.Fatalf("process exited too early")
+	}
+	if err := terminateProcess(proc, 200*time.Millisecond); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("terminateProcess() error = %v, want exit error from signaled process", err)
+		}
+	}
+	select {
+	case <-proc.done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for command to exit")
 	}
 }

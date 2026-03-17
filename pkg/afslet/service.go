@@ -154,6 +154,54 @@ type session struct {
 	extraDir   string
 }
 
+type managedProcess struct {
+	cmd     *exec.Cmd
+	done    chan struct{}
+	waitErr error
+	mu      sync.Mutex
+}
+
+func (p *managedProcess) start() error {
+	if p == nil || p.cmd == nil {
+		return fmt.Errorf("missing command")
+	}
+	if err := p.cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		err := p.cmd.Wait()
+		p.mu.Lock()
+		p.waitErr = err
+		p.mu.Unlock()
+		close(p.done)
+	}()
+	return nil
+}
+
+func (p *managedProcess) wait() error {
+	if p == nil {
+		return nil
+	}
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waitErr
+}
+
+func (p *managedProcess) tryWait() (error, bool) {
+	if p == nil {
+		return nil, true
+	}
+	select {
+	case <-p.done:
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.waitErr, true
+	default:
+		return nil, false
+	}
+}
+
 type fileAssembler struct {
 	baseDir string
 
@@ -518,21 +566,34 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 			logf("mount", fmt.Sprintf("started in-process mount for image=%s tag=%s", image, tag))
 		}
 	} else {
-		mountCmd := s.newCommandContext(ctx, s.mountBinary, mountArgs...)
+		mountProc := s.newManagedCommand(s.mountBinary, mountArgs...)
 		mountStdout = newProcessLogWriter("mount:stdout", logf)
 		mountStderr = newProcessLogWriter("mount:stderr", logf)
 		defer mountStdout.Flush()
 		defer mountStderr.Flush()
-		mountCmd.Stdout = mountStdout
-		mountCmd.Stderr = mountStderr
-		if err := mountCmd.Start(); err != nil {
+		mountProc.cmd.Stdout = mountStdout
+		mountProc.cmd.Stderr = mountStderr
+		if err := mountProc.start(); err != nil {
 			return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_mount: %v", err)}
 		}
-		go func() { mountWait <- mountCmd.Wait() }()
-		stopMount = func() { _ = terminateProcess(mountCmd, mountWait) }
+		watchContextCancellation(ctx, mountProc, 5*time.Second, "mount", logf)
+		stopMount = func() { _ = terminateProcess(mountProc, 5*time.Second) }
 		if logf != nil {
 			logf("mount", fmt.Sprintf("started: %s %s", s.mountBinary, strings.Join(mountArgs, " ")))
 		}
+		go func() {
+			if err := mountProc.wait(); err != nil {
+				select {
+				case mountWait <- err:
+				default:
+				}
+				return
+			}
+			select {
+			case mountWait <- nil:
+			default:
+			}
+		}()
 	}
 
 	waitMountReadyStart := time.Now()
@@ -606,18 +667,18 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	runcArgs = append(runcArgs, "--")
 	runcArgs = append(runcArgs, processCfg.command...)
-	runcCmd := s.newCommandContext(ctx, s.runcBinary, runcArgs...)
+	runcProc := s.newManagedCommand(s.runcBinary, runcArgs...)
 	runcStdout := newProcessLogWriter("runc:stdout", logf)
 	runcStderr := newProcessLogWriter("runc:stderr", logf)
 	defer runcStdout.Flush()
 	defer runcStderr.Flush()
-	runcCmd.Stdout = runcStdout
-	runcCmd.Stderr = runcStderr
+	runcProc.cmd.Stdout = runcStdout
+	runcProc.cmd.Stderr = runcStderr
 	if logf != nil {
 		logf("runc", fmt.Sprintf("running: %s %s", s.runcBinary, strings.Join(runcArgs, " ")))
 	}
 	runcStart := time.Now()
-	if err := runcCmd.Start(); err != nil {
+	if err := runcProc.start(); err != nil {
 		stopMountSafe()
 		_ = s.tryForceUmount(sess.mountpoint)
 		if logf != nil {
@@ -625,13 +686,14 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		}
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_runc: %v", err)}
 	}
+	watchContextCancellation(ctx, runcProc, 5*time.Second, "runc", logf)
 	if logf != nil {
 		logf("runc", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=runc_start ms=%d ok=true", time.Since(runcStart).Milliseconds()))
 	}
 	s.addRunningContainers(1)
 	defer s.addRunningContainers(-1)
 	runcWaitStart := time.Now()
-	runErr := runcCmd.Wait()
+	runErr := runcProc.wait()
 	if logf != nil {
 		logf("runc", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=runc_wait ms=%d", time.Since(runcWaitStart).Milliseconds()))
 	}
@@ -1064,12 +1126,21 @@ func newSession(tempDir string) (*session, func(), error) {
 	return s, cleanup, nil
 }
 
-func (s *Service) newCommandContext(ctx context.Context, binary string, args ...string) *exec.Cmd {
+func (s *Service) newManagedCommand(binary string, args ...string) *managedProcess {
+	cmd := s.newCommand(binary, args...)
+	return &managedProcess{cmd: cmd, done: make(chan struct{})}
+}
+
+func (s *Service) newCommand(binary string, args ...string) *exec.Cmd {
+	var cmd *exec.Cmd
 	if s.useSudo {
 		all := append([]string{binary}, args...)
-		return exec.CommandContext(ctx, "sudo", all...)
+		cmd = exec.Command("sudo", all...)
+	} else {
+		cmd = exec.Command(binary, args...)
 	}
-	return exec.CommandContext(ctx, binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
 }
 
 func waitForMountReady(mountpoint string, mountWait <-chan error, timeout time.Duration, onProgress func(string)) error {
@@ -1241,42 +1312,71 @@ func unescapeMountField(v string) string {
 	return replacer.Replace(v)
 }
 
-func terminateProcess(cmd *exec.Cmd, waitCh <-chan error) error {
-	if cmd == nil || cmd.Process == nil {
+func watchContextCancellation(ctx context.Context, proc *managedProcess, gracefulTimeout time.Duration, source string, logf func(string, string)) {
+	if ctx == nil || proc == nil {
+		return
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			if logf != nil {
+				logf(source, fmt.Sprintf("context canceled: %v", ctx.Err()))
+			}
+			if err := terminateProcess(proc, gracefulTimeout); err != nil && logf != nil {
+				logf(source, fmt.Sprintf("terminate on cancel failed: %v", err))
+			}
+		case <-proc.done:
+		}
+	}()
+}
+
+func terminateProcess(proc *managedProcess, gracefulTimeout time.Duration) error {
+	if proc == nil || proc.cmd == nil || proc.cmd.Process == nil {
 		return nil
 	}
-	select {
-	case err := <-waitCh:
+	if err, exited := proc.tryWait(); exited {
 		return err
-	default:
 	}
-	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+	if proc.cmd.ProcessState != nil && proc.cmd.ProcessState.Exited() {
 		return nil
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if gracefulTimeout <= 0 {
+		gracefulTimeout = 5 * time.Second
+	}
+	if err := signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	select {
-	case err := <-waitCh:
-		return err
-	case <-time.After(5 * time.Second):
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+	case <-proc.done:
+		return proc.wait()
+	case <-time.After(gracefulTimeout):
+		if proc.cmd.ProcessState != nil && proc.cmd.ProcessState.Exited() {
 			return nil
 		}
-		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := signalProcessGroup(proc.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
 		select {
-		case err := <-waitCh:
-			return err
+		case <-proc.done:
+			return proc.wait()
 		case <-time.After(time.Second):
 			return nil
 		}
 	}
 }
 
+func signalProcessGroup(pid int, sig syscall.Signal) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(-pid, sig); err == nil || errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return syscall.Kill(pid, sig)
+}
+
 func (s *Service) tryForceUmount(mountpoint string) error {
-	cmd := s.newCommandContext(context.Background(), "umount", mountpoint)
+	cmd := s.newCommand("umount", mountpoint)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		text := strings.TrimSpace(string(out))
 		if text == "" {

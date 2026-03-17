@@ -178,6 +178,7 @@ func (l *Launcher) spawnDaemon() error {
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start cache daemon %s: %w", l.cfg.BinaryPath, err)

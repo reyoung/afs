@@ -109,6 +109,8 @@ func main() {
 	afsletpb.RegisterAfsletServer(grpcServer, svc)
 	reflection.Register(grpcServer)
 	shutdownPprof := debughttp.StartPprofServer("afslet", pprofListen)
+	stopReaper := afslet.StartChildReaper(log.Printf)
+	defer stopReaper()
 
 	go func() {
 		log.Printf("afslet listening on %s", listenAddr)

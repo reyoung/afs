@@ -11,12 +11,14 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -233,6 +235,9 @@ func run(cfg config, cmdArgs []string) error {
 		waitCh <- waitErr
 	}()
 	timedOut := false
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	select {
 	case err := <-waitCh:
@@ -246,6 +251,21 @@ func run(cfg config, cmdArgs []string) error {
 			return fmt.Errorf("runc run failed: %w", err)
 		}
 		return nil
+	case sig := <-sigCh:
+		log.Printf("received %s, stopping container %s", sig, cfg.containerID)
+		if killErr := exec.Command(cfg.runcBinary, "kill", cfg.containerID, "KILL").Run(); killErr != nil {
+			log.Printf("runc kill failed for %s: %v", cfg.containerID, killErr)
+		}
+		err := <-waitCh
+		logTiming("runc_wait", time.Since(startStart))
+		delStart := time.Now()
+		deleteContainer(cfg.runcBinary, cfg.containerID)
+		logTiming("runc_delete", time.Since(delStart))
+		logTiming("total", time.Since(totalStart))
+		if err != nil {
+			return fmt.Errorf("runc run interrupted by %s: %w", sig, err)
+		}
+		return fmt.Errorf("runc run interrupted by %s", sig)
 	case <-time.After(cfg.timeout):
 		timedOut = true
 	}
