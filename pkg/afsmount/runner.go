@@ -34,6 +34,7 @@ import (
 
 const (
 	DefaultGRPCTimeout          = 30 * time.Second
+	DefaultFUSEMaxReadAhead     = 8 << 20
 	maxCachedGRPCConns          = 128
 	imageResolveCacheTTL        = 45 * time.Second
 	imageResolveCacheMaxEntries = 256
@@ -52,6 +53,7 @@ type Config struct {
 	DiscoveryAddr               string
 	GRPCTimeout                 time.Duration
 	GRPCMaxChunk                int
+	FUSEMaxReadAheadBytes       int64
 	GRPCInsecure                bool
 	NodeID                      string
 	Image                       string
@@ -84,6 +86,7 @@ type config struct {
 	discoveryAddr               string
 	grpcTimeout                 time.Duration
 	grpcMaxChunk                int
+	fuseMaxReadAheadBytes       int64
 	grpcInsecure                bool
 	nodeID                      string
 	image                       string
@@ -196,6 +199,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		discoveryAddr:               strings.TrimSpace(userCfg.DiscoveryAddr),
 		grpcTimeout:                 userCfg.GRPCTimeout,
 		grpcMaxChunk:                userCfg.GRPCMaxChunk,
+		fuseMaxReadAheadBytes:       userCfg.FUSEMaxReadAheadBytes,
 		grpcInsecure:                userCfg.GRPCInsecure,
 		nodeID:                      strings.TrimSpace(userCfg.NodeID),
 		image:                       strings.TrimSpace(userCfg.Image),
@@ -231,6 +235,9 @@ func normalizeConfig(userCfg Config) (config, error) {
 	}
 	if cfg.grpcMaxChunk <= 0 {
 		cfg.grpcMaxChunk = 4 << 20
+	}
+	if cfg.fuseMaxReadAheadBytes <= 0 {
+		cfg.fuseMaxReadAheadBytes = DefaultFUSEMaxReadAhead
 	}
 	if cfg.platformOS == "" {
 		cfg.platformOS = "linux"
@@ -499,7 +506,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
 
 			layerFuseMountStarted := time.Now()
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient, cfg.fuseMaxReadAheadBytes)
 			if err != nil {
 				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
@@ -1110,7 +1117,7 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache) (*fuse.Server, error) {
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
 	root := layerfuse.NewRootWithSharedCache(reader, tempDir, noSpillCache, layerDigest, sharedCache)
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
@@ -1125,7 +1132,7 @@ func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDiges
 			Name:         "afslyr",
 			Options:      []string{"ro", "exec"},
 			MaxWrite:     1 << 20,
-			MaxReadAhead: 1 << 20,
+			MaxReadAhead: int(fuseMaxReadAheadBytes),
 		},
 	})
 	if err != nil {

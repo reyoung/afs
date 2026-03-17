@@ -1,11 +1,14 @@
 apiVersion: apps/v1
-kind: DaemonSet
+kind: {{ if .Values.grpcd.daemonSet }}DaemonSet{{ else }}Deployment{{ end }}
 metadata:
   name: {{ include "afs.fullname" . }}-grpcd
   labels:
     {{- include "afs.labels" . | nindent 4 }}
     app.kubernetes.io/component: grpcd
 spec:
+  {{- if not .Values.grpcd.daemonSet }}
+  replicas: {{ .Values.grpcd.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "afs.selectorLabels" . | nindent 6 }}
@@ -22,6 +25,10 @@ spec:
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.grpcd.nodeSelector }}
+      nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:

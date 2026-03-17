@@ -74,3 +74,18 @@ func TestWaitForUnionMountReadyTimeoutIncludesLastProbeError(t *testing.T) {
 		t.Fatalf("timeout error should include probe failure detail: %v", err)
 	}
 }
+
+func TestNormalizeConfigDefaultsFuseMaxReadAhead(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := normalizeConfig(Config{
+		Mountpoint: "/tmp/mountpoint",
+		Image:      "alpine",
+	})
+	if err != nil {
+		t.Fatalf("normalizeConfig() error: %v", err)
+	}
+	if cfg.fuseMaxReadAheadBytes != DefaultFUSEMaxReadAhead {
+		t.Fatalf("fuseMaxReadAheadBytes=%d, want %d", cfg.fuseMaxReadAheadBytes, DefaultFUSEMaxReadAhead)
+	}
+}

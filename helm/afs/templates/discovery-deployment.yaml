@@ -25,6 +25,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.discovery.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: discovery
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

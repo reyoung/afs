@@ -628,50 +628,6 @@ func (s *Service) StatLayer(ctx context.Context, req *layerstorepb.StatLayerRequ
 	}, nil
 }
 
-func (s *Service) ReadLayer(ctx context.Context, req *layerstorepb.ReadLayerRequest) (*layerstorepb.ReadLayerResponse, error) {
-	_ = ctx
-	if req == nil {
-		return nil, status.Error(codes.InvalidArgument, "request is required")
-	}
-	if req.GetOffset() < 0 {
-		return nil, status.Error(codes.InvalidArgument, "offset must be >= 0")
-	}
-	if req.GetLength() <= 0 {
-		return nil, status.Error(codes.InvalidArgument, "length must be > 0")
-	}
-	if int(req.GetLength()) > s.maxReadSize {
-		return nil, status.Errorf(codes.InvalidArgument, "length exceeds max: %d", s.maxReadSize)
-	}
-
-	fullPath, err := s.layerPath(req.GetDigest())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-
-	f, err := os.Open(fullPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, status.Errorf(codes.NotFound, "layer is not cached: %s", req.GetDigest())
-		}
-		return nil, status.Errorf(codes.Internal, "open layer: %v", err)
-	}
-	defer f.Close()
-
-	buf := make([]byte, int(req.GetLength()))
-	n, readErr := f.ReadAt(buf, req.GetOffset())
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return nil, status.Errorf(codes.Internal, "read layer: %v", readErr)
-	}
-	_ = touchFile(fullPath)
-
-	return &layerstorepb.ReadLayerResponse{
-		Digest: req.GetDigest(),
-		Offset: req.GetOffset(),
-		Data:   buf[:n],
-		Eof:    errors.Is(readErr, io.EOF),
-	}, nil
-}
-
 func (s *Service) ReadLayerStream(req *layerstorepb.ReadLayerRequest, stream layerstorepb.LayerStore_ReadLayerStreamServer) error {
 	if req == nil {
 		return status.Error(codes.InvalidArgument, "request is required")
@@ -682,10 +638,6 @@ func (s *Service) ReadLayerStream(req *layerstorepb.ReadLayerRequest, stream lay
 	if req.GetLength() <= 0 {
 		return status.Error(codes.InvalidArgument, "length must be > 0")
 	}
-	if int(req.GetLength()) > s.maxReadSize {
-		return status.Errorf(codes.InvalidArgument, "length exceeds max: %d", s.maxReadSize)
-	}
-
 	fullPath, err := s.layerPath(req.GetDigest())
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())

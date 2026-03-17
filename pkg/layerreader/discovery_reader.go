@@ -12,9 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerstorepb"
@@ -154,17 +152,6 @@ func (r *DiscoveryBackedReaderAt) currentProvider() (layerstorepb.LayerStoreClie
 }
 
 func (r *DiscoveryBackedReaderAt) readOnce(client layerstorepb.LayerStoreClient, p []byte, off int64) (int, error) {
-	n, err := r.readOnceStream(client, p, off)
-	if err == nil || errors.Is(err, io.EOF) {
-		return n, err
-	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.Unimplemented {
-		return r.readOnceUnary(client, p, off)
-	}
-	return n, err
-}
-
-func (r *DiscoveryBackedReaderAt) readOnceUnary(client layerstorepb.LayerStoreClient, p []byte, off int64) (int, error) {
 	total := 0
 	for total < len(p) {
 		remaining := len(p) - total
@@ -172,53 +159,37 @@ func (r *DiscoveryBackedReaderAt) readOnceUnary(client layerstorepb.LayerStoreCl
 			remaining = r.cfg.GRPCMaxChunk
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
-		resp, err := client.ReadLayer(ctx, &layerstorepb.ReadLayerRequest{
+		stream, err := client.ReadLayerStream(ctx, &layerstorepb.ReadLayerRequest{
 			Digest: r.digest,
 			Offset: off + int64(total),
 			Length: int32(remaining),
 		})
-		cancel()
 		if err != nil {
+			cancel()
 			return total, err
 		}
-		n := copy(p[total:], resp.GetData())
-		total += n
-		if n == 0 || resp.GetEof() {
-			break
-		}
-	}
-	if total < len(p) {
-		return total, io.EOF
-	}
-	return total, nil
-}
-
-func (r *DiscoveryBackedReaderAt) readOnceStream(client layerstorepb.LayerStoreClient, p []byte, off int64) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
-	defer cancel()
-	stream, err := client.ReadLayerStream(ctx, &layerstorepb.ReadLayerRequest{
-		Digest: r.digest,
-		Offset: off,
-		Length: int32(len(p)),
-	})
-	if err != nil {
-		return 0, err
-	}
-	total := 0
-	for total < len(p) {
-		resp, recvErr := stream.Recv()
-		if recvErr != nil {
-			if errors.Is(recvErr, io.EOF) {
+		chunkTotal := 0
+		for chunkTotal < remaining {
+			resp, recvErr := stream.Recv()
+			if recvErr != nil {
+				cancel()
+				if errors.Is(recvErr, io.EOF) {
+					break
+				}
+				return total + chunkTotal, recvErr
+			}
+			if resp == nil {
 				break
 			}
-			return total, recvErr
+			n := copy(p[total+chunkTotal:], resp.GetData())
+			chunkTotal += n
+			if n == 0 || resp.GetEof() {
+				break
+			}
 		}
-		if resp == nil {
-			break
-		}
-		n := copy(p[total:], resp.GetData())
-		total += n
-		if n == 0 || resp.GetEof() {
+		cancel()
+		total += chunkTotal
+		if chunkTotal < remaining {
 			break
 		}
 	}

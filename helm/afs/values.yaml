@@ -14,6 +14,7 @@ podAnnotations: {}
 
 discovery:
   replicas: 3
+  nodeSelector: {}
   containerPort: 60051
   goMemLimit: 896MiB
   service:
@@ -28,6 +29,9 @@ discovery:
       memory: 1Gi
 
 grpcd:
+  daemonSet: true
+  replicas: 1
+  nodeSelector: {}
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
   registryAuth:
@@ -55,7 +59,9 @@ grpcd:
       memory: 4Gi
 
 afslet:
+  daemonSet: false
   replicas: 50
+  nodeSelector: {}
   spreadAcrossNodes:
     enabled: true
     weight: 100
@@ -99,6 +105,7 @@ afslet:
 
 afsProxy:
   replicas: 3
+  nodeSelector: {}
   grpcPort: 62051
   httpPort: 62052
   dispatchBackoff: 50ms

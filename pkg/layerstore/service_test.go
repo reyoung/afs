@@ -13,13 +13,41 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 	"github.com/reyoung/afs/pkg/registry"
 )
+
+type captureReadLayerStream struct {
+	responses []*layerstorepb.ReadLayerResponse
+}
+
+func (s *captureReadLayerStream) Send(resp *layerstorepb.ReadLayerResponse) error {
+	s.responses = append(s.responses, resp)
+	return nil
+}
+
+func (s *captureReadLayerStream) SetHeader(metadata.MD) error  { return nil }
+func (s *captureReadLayerStream) SendHeader(metadata.MD) error { return nil }
+func (s *captureReadLayerStream) SetTrailer(metadata.MD)       {}
+func (s *captureReadLayerStream) Context() context.Context     { return context.Background() }
+func (s *captureReadLayerStream) SendMsg(any) error            { return nil }
+func (s *captureReadLayerStream) RecvMsg(any) error            { return nil }
+
+var _ grpc.ServerStreamingServer[layerstorepb.ReadLayerResponse] = (*captureReadLayerStream)(nil)
+
+func (s *captureReadLayerStream) joinedData() []byte {
+	var out []byte
+	for _, resp := range s.responses {
+		out = append(out, resp.GetData()...)
+	}
+	return out
+}
 
 func TestPullImageSkipsLocalFetchWhenPeerHasImage(t *testing.T) {
 	t.Parallel()
@@ -269,16 +297,68 @@ func TestReadLayerReturnsMagicBytes(t *testing.T) {
 		t.Fatalf("PullImage: %v", err)
 	}
 
-	readResp, err := svc.ReadLayer(context.Background(), &layerstorepb.ReadLayerRequest{
+	stream := &captureReadLayerStream{}
+	if err := svc.ReadLayerStream(&layerstorepb.ReadLayerRequest{
 		Digest: layerDigest,
 		Offset: 0,
 		Length: 8,
-	})
-	if err != nil {
-		t.Fatalf("ReadLayer: %v", err)
+	}, stream); err != nil {
+		t.Fatalf("ReadLayerStream: %v", err)
 	}
-	if string(readResp.GetData()) != "AFSLYR02" {
-		t.Fatalf("ReadLayer data=%q, want AFSLYR02", string(readResp.GetData()))
+	if got := string(stream.joinedData()); got != "AFSLYR02" {
+		t.Fatalf("ReadLayerStream data=%q, want AFSLYR02", got)
+	}
+}
+
+func TestReadLayerStreamSplitsLargeLogicalRead(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	layerDigest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	layerBytes := buildTarGzip(t, map[string]string{
+		"big.bin": strings.Repeat("x", maxReadBytes+64),
+	})
+	fake := &fakeFetcher{
+		layers: []registry.Layer{{
+			Digest:    layerDigest,
+			MediaType: layerformat.OCILayerTarGzipMediaType,
+			Size:      int64(len(layerBytes)),
+		}},
+		byDigest: map[string][]byte{layerDigest: layerBytes},
+	}
+	svc.newFetcher = func() fetcher { return fake }
+
+	pullResp, err := svc.PullImage(context.Background(), &layerstorepb.PullImageRequest{Image: "busybox", Tag: "latest"})
+	if err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+	layerPath := pullResp.GetLayers()[0].GetCachePath()
+	raw, err := os.ReadFile(layerPath)
+	if err != nil {
+		t.Fatalf("read cached layer: %v", err)
+	}
+
+	stream := &captureReadLayerStream{}
+	if err := svc.ReadLayerStream(&layerstorepb.ReadLayerRequest{
+		Digest: layerDigest,
+		Offset: 0,
+		Length: int32(maxReadBytes + 32),
+	}, stream); err != nil {
+		t.Fatalf("ReadLayerStream: %v", err)
+	}
+	if len(stream.responses) < 2 {
+		t.Fatalf("responses=%d, want at least 2", len(stream.responses))
+	}
+	if got := len(stream.joinedData()); got != maxReadBytes+32 {
+		t.Fatalf("joined data length=%d, want %d", got, maxReadBytes+32)
+	}
+	if !bytes.Equal(stream.joinedData(), raw[:maxReadBytes+32]) {
+		t.Fatalf("streamed bytes mismatch")
 	}
 }
 

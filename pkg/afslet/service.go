@@ -33,6 +33,7 @@ const (
 	defaultMemoryMB       = int64(256)
 	defaultTimeout        = time.Second
 	defaultProcessPathEnv = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	defaultFUSEReadAhead  = int64(8 << 20)
 )
 
 type Config struct {
@@ -58,6 +59,7 @@ type Config struct {
 	SharedSpillCacheBinaryPath  string
 	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
+	FUSEMaxReadAheadBytes       int64
 	FormatVersion               int
 }
 
@@ -91,6 +93,7 @@ type Service struct {
 	sharedSpillCacheBinaryPath  string
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
+	fuseMaxReadAheadBytes       int64
 	formatVersion               int
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
@@ -120,6 +123,7 @@ func NewService(cfg Config) *Service {
 		sharedSpillCacheBinaryPath:  strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
 		sharedSpillCachePprofListen: strings.TrimSpace(cfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
+		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
 		formatVersion:               cfg.FormatVersion,
 	}
 	if s.mountBinary == "" {
@@ -142,6 +146,9 @@ func NewService(cfg Config) *Service {
 	}
 	if s.layerMountConcurrency <= 0 {
 		s.layerMountConcurrency = 1
+	}
+	if s.fuseMaxReadAheadBytes <= 0 {
+		s.fuseMaxReadAheadBytes = defaultFUSEReadAhead
 	}
 	s.resolveImageRuntimeConfig = s.fetchImageRuntimeConfig
 	return s
@@ -468,6 +475,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
 		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
 		LayerMountConcurrency:       s.layerMountConcurrency,
+		FUSEMaxReadAheadBytes:       s.fuseMaxReadAheadBytes,
 		FormatVersion:               s.formatVersion,
 	}
 	mountArgs := []string{
@@ -518,6 +526,9 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if s.layerMountConcurrency > 0 {
 		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))
+	}
+	if s.fuseMaxReadAheadBytes > 0 {
+		mountArgs = append(mountArgs, "-fuse-max-read-ahead", strconv.FormatInt(s.fuseMaxReadAheadBytes, 10))
 	}
 
 	mountWait := make(chan error, 1)

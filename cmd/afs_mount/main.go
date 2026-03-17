@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/reyoung/afs/pkg/bytesize"
 	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/layerformat"
@@ -41,6 +42,7 @@ type config struct {
 	discoveryAddr               string
 	grpcTimeout                 time.Duration
 	grpcMaxChunk                int
+	fuseMaxReadAheadBytes       int64
 	grpcInsecure                bool
 	nodeID                      string
 	image                       string
@@ -108,6 +110,8 @@ func parseFlags() config {
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
 	flag.IntVar(&cfg.grpcMaxChunk, "grpc-max-chunk", 4<<20, "max bytes per gRPC read call")
+	var fuseMaxReadAhead string
+	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes, e.g. 8M, 16M, 32MiB")
 	flag.BoolVar(&cfg.grpcInsecure, "grpc-insecure", true, "use insecure gRPC transport")
 	flag.StringVar(&cfg.nodeID, "node-id", "", "node affinity id for preferring local layerstore")
 	flag.StringVar(&cfg.image, "image", "", "image reference for remote image mode")
@@ -146,6 +150,11 @@ func parseFlags() config {
 	if cfg.grpcMaxChunk <= 0 {
 		log.Fatal("-grpc-max-chunk must be > 0")
 	}
+	readAheadBytes, err := bytesize.Parse(fuseMaxReadAhead)
+	if err != nil {
+		log.Fatalf("invalid -fuse-max-read-ahead: %v", err)
+	}
+	cfg.fuseMaxReadAheadBytes = readAheadBytes
 	if !cfg.grpcInsecure {
 		log.Fatal("only -grpc-insecure=true is supported now")
 	}
@@ -296,7 +305,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}
 				return
 			}
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient, cfg.fuseMaxReadAheadBytes)
 			if err != nil {
 				stop.Store(true)
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("mount layer %s: %w", digest, err)}
@@ -585,7 +594,7 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache) (*fuse.Server, error) {
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
 	root := layerfuse.NewRootWithSharedCache(reader, tempDir, noSpillCache, layerDigest, sharedCache)
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
@@ -600,7 +609,7 @@ func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDiges
 			Name:         "afslyr",
 			Options:      []string{"ro", "exec"},
 			MaxWrite:     1 << 20,
-			MaxReadAhead: 1 << 20,
+			MaxReadAhead: int(fuseMaxReadAheadBytes),
 		},
 	})
 	if err != nil {

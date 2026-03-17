@@ -46,7 +46,7 @@
 
 原因：
 
-- proxy 只看到 `ReadLayer(digest, offset, length)`，看不到 layer 内文件路径。
+- proxy 只看到 `ReadLayerStream(digest, offset, length)`，看不到 layer 内文件路径。
 - 多个 mount 对同层热点文件的读取模式通常会重复到相同 `(offset,length)`，可直接命中。
 - 实现复杂度低，且符合“类似 afs_mount spill 的落盘文件缓存”思路。
 
@@ -99,7 +99,7 @@
 
 ## 读流程（命中/回源）
 
-1. `afs_mount` 调 proxy 的 `ReadLayer(digest, offset, length)`。
+1. `afs_mount` 调 proxy 的 `ReadLayerStream(digest, offset, length)`。
 2. 以 `digest+offset+length` 查本地缓存索引。
 3. 命中：直接读本地缓存文件并返回，同时增加 `freq`。
 4. 未命中：向远端 layerstore 发起一次同参数回源，写入本地缓存文件，再返回。
