@@ -78,14 +78,18 @@ afslet:
   sudoBinaries: false
   tarChunk: 262144
   gracefulTimeout: 15s
+  pprofListen: ""
+  mountPprofListen: ""
   tempDir: /var/lib/afslet/tmp
   workDir: /var/lib/afslet/work
+  layerMountConcurrency: 1
   sharedSpillCache:
     enabled: true
     dir: /var/lib/afslet/spillcache
     sock: ""
     maxBytes: "10737418240"
     binary: /usr/local/bin/afs_mount_cached
+    pprofListen: ""
   spillCacheVolume:
     type: emptyDir
     emptyDir: {}

@@ -59,6 +59,7 @@ type Config struct {
 	SharedSpillCacheBinaryPath  string
 	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
+	MountPprofListen            string
 	FUSEMaxReadAheadBytes       int64
 	FormatVersion               int
 }
@@ -93,6 +94,7 @@ type Service struct {
 	sharedSpillCacheBinaryPath  string
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
+	mountPprofListen            string
 	fuseMaxReadAheadBytes       int64
 	formatVersion               int
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
@@ -123,6 +125,7 @@ func NewService(cfg Config) *Service {
 		sharedSpillCacheBinaryPath:  strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
 		sharedSpillCachePprofListen: strings.TrimSpace(cfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
+		mountPprofListen:            strings.TrimSpace(cfg.MountPprofListen),
 		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
 		formatVersion:               cfg.FormatVersion,
 	}
@@ -483,6 +486,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
 		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
 		LayerMountConcurrency:       s.layerMountConcurrency,
+		PprofListen:                 s.mountPprofListen,
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
 		FormatVersion:               s.formatVersion,
 	}
@@ -534,6 +538,9 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if s.layerMountConcurrency > 0 {
 		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))
+	}
+	if s.mountPprofListen != "" {
+		mountArgs = append(mountArgs, "-pprof-listen", s.mountPprofListen)
 	}
 	if fuseMaxReadAheadBytes > 0 {
 		mountArgs = append(mountArgs, "-fuse-max-read-ahead", strconv.FormatInt(fuseMaxReadAheadBytes, 10))

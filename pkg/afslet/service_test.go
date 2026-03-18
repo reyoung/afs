@@ -167,6 +167,7 @@ func TestRunCommandRequestFuseReadAheadOverridesServiceDefault(t *testing.T) {
 		MountInProcess:        true,
 		LimitCPUCores:         8,
 		LimitMemoryMB:         2048,
+		MountPprofListen:      "127.0.0.1:6065",
 		FUSEMaxReadAheadBytes: 8 << 20,
 	})
 	called := make(chan afsmount.Config, 1)
@@ -197,6 +198,9 @@ func TestRunCommandRequestFuseReadAheadOverridesServiceDefault(t *testing.T) {
 
 	select {
 	case cfg := <-called:
+		if cfg.PprofListen != "127.0.0.1:6065" {
+			t.Fatalf("PprofListen=%q, want %q", cfg.PprofListen, "127.0.0.1:6065")
+		}
 		if cfg.FUSEMaxReadAheadBytes != 16<<20 {
 			t.Fatalf("FUSEMaxReadAheadBytes=%d, want %d", cfg.FUSEMaxReadAheadBytes, 16<<20)
 		}

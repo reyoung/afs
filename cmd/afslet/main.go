@@ -44,6 +44,7 @@ func main() {
 	var sharedSpillCacheBinary string
 	var sharedSpillCachePprofListen string
 	var layerMountConcurrency int
+	var mountPprofListen string
 	var fuseMaxReadAhead string
 	var pprofListen string
 	var formatVersion int
@@ -72,6 +73,7 @@ func main() {
 	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
 	flag.StringVar(&sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
+	flag.StringVar(&mountPprofListen, "mount-pprof-listen", "", "optional HTTP listen address for afs_mount pprof")
 	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes for afs_mount, e.g. 8M, 16M, 32MiB")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
 	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
@@ -110,6 +112,7 @@ func main() {
 		SharedSpillCacheBinaryPath:  sharedSpillCacheBinary,
 		SharedSpillCachePprofListen: sharedSpillCachePprofListen,
 		LayerMountConcurrency:       layerMountConcurrency,
+		MountPprofListen:            mountPprofListen,
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
 		FormatVersion:               formatVersion,
 	})

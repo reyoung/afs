@@ -64,9 +64,16 @@ spec:
             - -tar-chunk={{ .Values.afslet.tarChunk }}
             - -graceful-timeout={{ .Values.afslet.gracefulTimeout }}
             - -discovery-addr={{ include "afs.discoveryHeadlessServiceName" . }}:{{ .Values.discovery.service.port }}
+            {{- if .Values.afslet.pprofListen }}
+            - -pprof-listen={{ .Values.afslet.pprofListen }}
+            {{- end }}
+            {{- if .Values.afslet.mountPprofListen }}
+            - -mount-pprof-listen={{ .Values.afslet.mountPprofListen }}
+            {{- end }}
             - -temp-dir={{ .Values.afslet.tempDir }}
             - -limit-cpu={{ .Values.afslet.limitCPUCores }}
             - -limit-memory-mb={{ .Values.afslet.limitMemoryMB }}
+            - -layer-mount-concurrency={{ .Values.afslet.layerMountConcurrency }}
             {{- if .Values.afslet.sharedSpillCache.enabled }}
             - -shared-spill-cache=true
             - -shared-spill-cache-dir={{ .Values.afslet.sharedSpillCache.dir }}
@@ -75,6 +82,9 @@ spec:
             {{- end }}
             - -shared-spill-cache-max-bytes={{ .Values.afslet.sharedSpillCache.maxBytes }}
             - -shared-spill-cache-binary={{ .Values.afslet.sharedSpillCache.binary }}
+            {{- if .Values.afslet.sharedSpillCache.pprofListen }}
+            - -shared-spill-cache-pprof-listen={{ .Values.afslet.sharedSpillCache.pprofListen }}
+            {{- end }}
             {{- end }}
           env:
             - name: GOMAXPROCS

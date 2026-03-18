@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/grpcclientcache"
 	"github.com/reyoung/afs/pkg/layerformat"
@@ -73,6 +74,7 @@ type Config struct {
 	SharedSpillCacheBinaryPath  string
 	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
+	PprofListen                 string
 	OnReady                     func()
 	FormatVersion               int
 }
@@ -106,6 +108,7 @@ type config struct {
 	sharedSpillCacheBinaryPath  string
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
+	pprofListen                 string
 	onReady                     func()
 	formatVersion               int
 }
@@ -172,6 +175,14 @@ func Run(ctx context.Context, userCfg Config) error {
 	if err != nil {
 		return err
 	}
+	shutdownPprof := debughttp.StartPprofServer("afs_mount", cfg.pprofListen)
+	if shutdownPprof != nil {
+		defer func() {
+			pprofCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownPprof(pprofCtx)
+		}()
+	}
 
 	log.Printf("starting mount client: image=%s tag=%s mountpoint=%s discovery=%s node-id=%s platform=%s/%s variant=%s force_local_fetch=%v", cfg.image, cfg.tag, cfg.mountpoint, cfg.discoveryAddr, cfg.nodeID, cfg.platformOS, cfg.platformArch, cfg.platformVariant, cfg.forceLocalFetch)
 
@@ -219,6 +230,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		sharedSpillCacheBinaryPath:  strings.TrimSpace(userCfg.SharedSpillCacheBinaryPath),
 		sharedSpillCachePprofListen: strings.TrimSpace(userCfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       userCfg.LayerMountConcurrency,
+		pprofListen:                 strings.TrimSpace(userCfg.PprofListen),
 		onReady:                     userCfg.OnReady,
 		formatVersion:               userCfg.FormatVersion,
 	}
