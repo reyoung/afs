@@ -33,35 +33,27 @@ import (
 )
 
 type config struct {
-	mountpoint                  string
-	debug                       bool
-	mountProcDev                bool
-	noSpillCache                bool
-	extraDir                    string
-	discoveryAddr               string
-	grpcTimeout                 time.Duration
-	grpcMaxChunk                int
-	fuseMaxReadAheadBytes       int64
-	grpcInsecure                bool
-	nodeID                      string
-	image                       string
-	tag                         string
-	platformOS                  string
-	platformArch                string
-	platformVariant             string
-	forceLocalFetch             bool
-	pullTimeout                 time.Duration
-	workDir                     string
-	keepWorkDir                 bool
-	fuseTempDir                 string
-	sharedSpillCacheEnabled     bool
-	sharedSpillCacheDir         string
-	sharedSpillCacheSock        string
-	sharedSpillCacheMaxBytes    int64
-	sharedSpillCacheBinaryPath  string
-	sharedSpillCachePprofListen string
-	layerMountConcurrency       int
-	pprofListen                 string
+	mountpoint            string
+	debug                 bool
+	mountProcDev          bool
+	extraDir              string
+	discoveryAddr         string
+	grpcTimeout           time.Duration
+	grpcMaxChunk          int
+	fuseMaxReadAheadBytes int64
+	grpcInsecure          bool
+	nodeID                string
+	image                 string
+	tag                   string
+	platformOS            string
+	platformArch          string
+	platformVariant       string
+	forceLocalFetch       bool
+	pullTimeout           time.Duration
+	workDir               string
+	keepWorkDir           bool
+	layerMountConcurrency int
+	pprofListen           string
 }
 
 type serviceInfo struct {
@@ -103,7 +95,6 @@ func parseFlags() config {
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "mount target directory")
 	flag.BoolVar(&cfg.debug, "debug", false, "enable go-fuse debug logs")
 	flag.BoolVar(&cfg.mountProcDev, "mount-proc-dev", true, "mount /proc and /dev into mounted rootfs (linux only)")
-	flag.BoolVar(&cfg.noSpillCache, "no-spill-cache", false, "disable on-disk spill cache reuse for decompressed file payloads")
 	flag.StringVar(&cfg.extraDir, "extra-dir", "", "extra read-only directory inserted between writable upper and image layers")
 	flag.StringVar(&cfg.discoveryAddr, "discovery-addr", "127.0.0.1:60051", "service discovery gRPC address")
 	flag.DurationVar(&cfg.grpcTimeout, "grpc-timeout", 10*time.Second, "timeout for each gRPC call")
@@ -121,13 +112,6 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.pullTimeout, "pull-timeout", 20*time.Minute, "timeout for PullImage RPC")
 	flag.StringVar(&cfg.workDir, "work-dir", "", "working directory for per-layer mountpoints (default: temp dir)")
 	flag.BoolVar(&cfg.keepWorkDir, "keep-work-dir", false, "keep work directory after exit")
-	flag.StringVar(&cfg.fuseTempDir, "fuse-temp-dir", "", "local temp directory for decompressed file spill during FUSE reads")
-	flag.BoolVar(&cfg.sharedSpillCacheEnabled, "shared-spill-cache", false, "enable shared multi-process spill cache daemon")
-	flag.StringVar(&cfg.sharedSpillCacheDir, "shared-spill-cache-dir", ".cache/afs_mount_cached", "shared spill cache root directory")
-	flag.StringVar(&cfg.sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache unix socket path (default: <shared-spill-cache-dir>/daemon.sock)")
-	flag.Int64Var(&cfg.sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes")
-	flag.StringVar(&cfg.sharedSpillCacheBinaryPath, "shared-spill-cache-binary", "afs_mount_cached", "path of shared spill cache daemon binary")
-	flag.StringVar(&cfg.sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.StringVar(&cfg.pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6065")
 	flag.Parse()

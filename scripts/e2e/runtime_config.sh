@@ -230,7 +230,7 @@ run_runtime_config_checks() {
 }
 
 start_raw_mode() {
-  mkdir -p "${LOG_DIR}/raw-cache" "${LOG_DIR}/raw-temp" "${LOG_DIR}/raw-spillcache"
+  mkdir -p "${LOG_DIR}/raw-cache" "${LOG_DIR}/raw-temp"
 
   start_local_process discovery \
     "${DIST_DIR}/afs_discovery_grpcd" \
@@ -254,10 +254,7 @@ start_raw_mode() {
     -discovery-addr "127.0.0.1:${DISCOVERY_PORT}" \
     -temp-dir "${LOG_DIR}/raw-temp" \
     -limit-cpu 4 \
-    -limit-memory-mb 4096 \
-    -shared-spill-cache \
-    -shared-spill-cache-dir "${LOG_DIR}/raw-spillcache" \
-    -shared-spill-cache-binary "${DIST_DIR}/afs_mount_cached"
+    -limit-memory-mb 4096
   wait_for_tcp 127.0.0.1 "${AFSLET_PORT}" afslet
 
   start_local_process afs_proxy \

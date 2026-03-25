@@ -52,12 +52,6 @@ type Config struct {
 	TempDir                     string
 	LimitCPUCores               int64
 	LimitMemoryMB               int64
-	SharedSpillCacheEnabled     bool
-	SharedSpillCacheDir         string
-	SharedSpillCacheSock        string
-	SharedSpillCacheMaxBytes    int64
-	SharedSpillCacheBinaryPath  string
-	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
 	MountPprofListen            string
 	FUSEMaxReadAheadBytes       int64
@@ -86,12 +80,6 @@ type Service struct {
 	usedCPUCores                int64
 	usedMemoryMB                int64
 	runningContainers           int64
-	sharedSpillCacheEnabled     bool
-	sharedSpillCacheDir         string
-	sharedSpillCacheSock        string
-	sharedSpillCacheMaxBytes    int64
-	sharedSpillCacheBinaryPath  string
-	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
 	mountPprofListen            string
 	fuseMaxReadAheadBytes       int64
@@ -116,12 +104,6 @@ func NewService(cfg Config) *Service {
 		tempDir:                     strings.TrimSpace(cfg.TempDir),
 		limitCPUCores:               cfg.LimitCPUCores,
 		limitMemoryMB:               cfg.LimitMemoryMB,
-		sharedSpillCacheEnabled:     cfg.SharedSpillCacheEnabled,
-		sharedSpillCacheDir:         strings.TrimSpace(cfg.SharedSpillCacheDir),
-		sharedSpillCacheSock:        strings.TrimSpace(cfg.SharedSpillCacheSock),
-		sharedSpillCacheMaxBytes:    cfg.SharedSpillCacheMaxBytes,
-		sharedSpillCacheBinaryPath:  strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
-		sharedSpillCachePprofListen: strings.TrimSpace(cfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
 		mountPprofListen:            strings.TrimSpace(cfg.MountPprofListen),
 		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
@@ -140,9 +122,6 @@ func NewService(cfg Config) *Service {
 	}
 	if s.limitMemoryMB <= 0 {
 		s.limitMemoryMB = defaultMemoryMB
-	}
-	if s.sharedSpillCacheMaxBytes <= 0 {
-		s.sharedSpillCacheMaxBytes = 10 << 30
 	}
 	if s.layerMountConcurrency <= 0 {
 		s.layerMountConcurrency = 1
@@ -507,24 +486,6 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if mountCfg.PlatformVariant != "" {
 		mountArgs = append(mountArgs, "-platform-variant", mountCfg.PlatformVariant)
-	}
-	if s.sharedSpillCacheEnabled {
-		mountArgs = append(mountArgs, "-shared-spill-cache")
-		if s.sharedSpillCacheDir != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-dir", s.sharedSpillCacheDir)
-		}
-		if s.sharedSpillCacheSock != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-sock", s.sharedSpillCacheSock)
-		}
-		if s.sharedSpillCacheMaxBytes > 0 {
-			mountArgs = append(mountArgs, "-shared-spill-cache-max-bytes", strconv.FormatInt(s.sharedSpillCacheMaxBytes, 10))
-		}
-		if s.sharedSpillCacheBinaryPath != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-binary", s.sharedSpillCacheBinaryPath)
-		}
-		if s.sharedSpillCachePprofListen != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-pprof-listen", s.sharedSpillCachePprofListen)
-		}
 	}
 	if s.layerMountConcurrency > 0 {
 		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))

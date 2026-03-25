@@ -83,17 +83,6 @@ afslet:
   tempDir: /var/lib/afslet/tmp
   workDir: /var/lib/afslet/work
   layerMountConcurrency: 1
-  sharedSpillCache:
-    enabled: true
-    dir: /var/lib/afslet/spillcache
-    sock: ""
-    maxBytes: "10737418240"
-    binary: /usr/local/bin/afs_mount_cached
-    pprofListen: ""
-  spillCacheVolume:
-    type: emptyDir
-    emptyDir: {}
-    hostPath: /var/lib/afslet/spillcache
   mountProcDev: false
   limitCPUCores: 4
   limitMemoryMB: 16384

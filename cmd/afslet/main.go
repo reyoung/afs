@@ -37,12 +37,6 @@ func main() {
 	var tempDir string
 	var limitCPUCores int64
 	var limitMemoryMB int64
-	var sharedSpillCache bool
-	var sharedSpillCacheDir string
-	var sharedSpillCacheSock string
-	var sharedSpillCacheMaxBytes int64
-	var sharedSpillCacheBinary string
-	var sharedSpillCachePprofListen string
 	var layerMountConcurrency int
 	var mountPprofListen string
 	var fuseMaxReadAhead string
@@ -65,12 +59,6 @@ func main() {
 	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
 	flag.Int64Var(&limitCPUCores, "limit-cpu", 1, "total allocatable CPU cores for afslet admission control")
 	flag.Int64Var(&limitMemoryMB, "limit-memory-mb", 256, "total allocatable memory (MB) for afslet admission control")
-	flag.BoolVar(&sharedSpillCache, "shared-spill-cache", false, "enable shared spill cache for afs_mount")
-	flag.StringVar(&sharedSpillCacheDir, "shared-spill-cache-dir", "/var/lib/afslet/spillcache", "shared spill cache dir for afs_mount")
-	flag.StringVar(&sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache socket path for afs_mount")
-	flag.Int64Var(&sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes for afs_mount")
-	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
-	flag.StringVar(&sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
 	flag.StringVar(&mountPprofListen, "mount-pprof-listen", "", "optional HTTP listen address for afs_mount pprof")
 	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes for afs_mount, e.g. 8M, 16M, 32MiB")
@@ -103,12 +91,6 @@ func main() {
 		TempDir:                     tempDir,
 		LimitCPUCores:               limitCPUCores,
 		LimitMemoryMB:               limitMemoryMB,
-		SharedSpillCacheEnabled:     sharedSpillCache,
-		SharedSpillCacheDir:         sharedSpillCacheDir,
-		SharedSpillCacheSock:        sharedSpillCacheSock,
-		SharedSpillCacheMaxBytes:    sharedSpillCacheMaxBytes,
-		SharedSpillCacheBinaryPath:  sharedSpillCacheBinary,
-		SharedSpillCachePprofListen: sharedSpillCachePprofListen,
 		LayerMountConcurrency:       layerMountConcurrency,
 		MountPprofListen:            mountPprofListen,
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,

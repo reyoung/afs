@@ -165,7 +165,6 @@ services:
     volumes:
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
-      - afslet_spillcache:/var/lib/afslet/spillcache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
@@ -179,17 +178,11 @@ services:
           -temp-dir=/var/lib/afslet/tmp \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
-          -shared-spill-cache \
-          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
-          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
-          -shared-spill-cache-max-bytes=10737418240 \
-          -shared-spill-cache-pprof-listen=:6061 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6062 \
           -graceful-timeout=15s
     ports:
       - "61051:61051"
-      - "16061:6061"
       - "16062:6062"
     networks:
       afsnet:
@@ -202,7 +195,6 @@ services:
     volumes:
       - afslet_tmp_2:/var/lib/afslet/tmp
       - afslet_work_2:/var/lib/afslet/work
-      - afslet_spillcache_2:/var/lib/afslet/spillcache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
@@ -216,17 +208,11 @@ services:
           -temp-dir=/var/lib/afslet/tmp \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
-          -shared-spill-cache \
-          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
-          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
-          -shared-spill-cache-max-bytes=10737418240 \
-          -shared-spill-cache-pprof-listen=:6071 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6072 \
           -graceful-timeout=15s
     ports:
       - "61052:61051"
-      - "16071:6071"
       - "16072:6072"
     networks:
       afsnet:
@@ -239,7 +225,6 @@ services:
     volumes:
       - afslet_tmp_3:/var/lib/afslet/tmp
       - afslet_work_3:/var/lib/afslet/work
-      - afslet_spillcache_3:/var/lib/afslet/spillcache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
@@ -253,17 +238,11 @@ services:
           -temp-dir=/var/lib/afslet/tmp \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
-          -shared-spill-cache \
-          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
-          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
-          -shared-spill-cache-max-bytes=10737418240 \
-          -shared-spill-cache-pprof-listen=:6081 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6082 \
           -graceful-timeout=15s
     ports:
       - "61053:61051"
-      - "16081:6081"
       - "16082:6082"
     networks:
       afsnet:
@@ -303,10 +282,7 @@ volumes:
   layerstore_cache_3:
   afslet_tmp:
   afslet_work:
-  afslet_spillcache:
   afslet_tmp_2:
   afslet_work_2:
-  afslet_spillcache_2:
   afslet_tmp_3:
   afslet_work_3:
-  afslet_spillcache_3:

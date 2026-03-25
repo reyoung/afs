@@ -285,7 +285,7 @@ measure_reconcile() {
 run_raw_iteration() {
   local iteration="$1"
   local iter_dir="${LOG_DIR}/raw/iter-${iteration}"
-  mkdir -p "${iter_dir}/cache" "${iter_dir}/temp" "${iter_dir}/spillcache"
+  mkdir -p "${iter_dir}/cache" "${iter_dir}/temp"
 
   measure_docker_pull "raw" "${iteration}" "${iter_dir}"
 
@@ -310,10 +310,7 @@ run_raw_iteration() {
     -discovery-addr "127.0.0.1:${DISCOVERY_PORT}" \
     -temp-dir "${iter_dir}/temp" \
     -limit-cpu 4 \
-    -limit-memory-mb 4096 \
-    -shared-spill-cache \
-    -shared-spill-cache-dir "${iter_dir}/spillcache" \
-    -shared-spill-cache-binary "${DIST_DIR}/afs_mount_cached"
+    -limit-memory-mb 4096
   wait_for_tcp 127.0.0.1 "${AFSLET_PORT}" afslet
 
   start_local_process "${iter_dir}/afs_proxy.log" \
