@@ -69,7 +69,8 @@ type Config struct {
 	PprofListen                 string
 	OnReady                     func()
 	PageCacheStore              *pagecache.Store
-	HoldReaper                  func() func() // pause child reaper during fusermount3 subprocess
+	HoldReaper                  func() func()
+	TOCCache                    *layerformat.TOCCache
 }
 
 type config struct {
@@ -97,6 +98,7 @@ type config struct {
 	onReady                     func()
 	pageCacheStore              *pagecache.Store
 	holdReaper                  func() func()
+	tocCache                    *layerformat.TOCCache
 }
 
 type serviceInfo struct {
@@ -212,6 +214,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		onReady:                     userCfg.OnReady,
 		pageCacheStore:              userCfg.PageCacheStore,
 		holdReaper:                  userCfg.HoldReaper,
+		tocCache:                    userCfg.TOCCache,
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -459,7 +462,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			observedReader := layerreader.NewObservedReaderAt(reader, layerreader.ObserveConfig{
 				Name: "discovery:" + digest,
 			})
-			afslReader, err := layerformat.NewReader(observedReader)
+			afslReader, err := layerformat.NewReaderCached(observedReader, cfg.tocCache, digest)
 			if err != nil {
 				logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()

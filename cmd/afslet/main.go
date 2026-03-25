@@ -17,6 +17,7 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/bytesize"
 	"github.com/reyoung/afs/pkg/debughttp"
+	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/pagecache"
 )
 
@@ -109,6 +110,7 @@ func main() {
 		MountPprofListen:            mountPprofListen,
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
 		PageCacheStore:              pageCacheStore,
+		TOCCache:                    layerformat.NewTOCCache(256),
 	})
 
 	grpcServer := grpc.NewServer()

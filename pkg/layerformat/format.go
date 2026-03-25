@@ -273,6 +273,33 @@ func NewReader(ra io.ReaderAt) (*Reader, error) {
 	return &Reader{ra: ra, toc: t, entriesByP: entriesByP, dataStart: int64(fixedHdrSize) + int64(tocLen)}, nil
 }
 
+// NewReaderCached is like NewReader but uses a TOC cache keyed by layer digest.
+// On cache hit, the JSON TOC parsing and map construction are skipped entirely.
+func NewReaderCached(ra io.ReaderAt, cache *TOCCache, digest string) (*Reader, error) {
+	if cache != nil {
+		if cached, ok := cache.Get(digest); ok {
+			return &Reader{
+				ra:         ra,
+				toc:        cached.tocData,
+				entriesByP: cached.entriesByP,
+				dataStart:  cached.dataStart,
+			}, nil
+		}
+	}
+	r, err := NewReader(ra)
+	if err != nil {
+		return nil, err
+	}
+	if cache != nil {
+		cache.Put(digest, &cachedTOC{
+			tocData:    r.toc,
+			entriesByP: r.entriesByP,
+			dataStart:  r.dataStart,
+		})
+	}
+	return r, nil
+}
+
 func (r *Reader) Entries() []Entry {
 	out := make([]Entry, len(r.toc.Entries))
 	copy(out, r.toc.Entries)
