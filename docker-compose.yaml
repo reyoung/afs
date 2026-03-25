@@ -56,11 +56,17 @@ x-afslet-common: &afslet-common
   restart: unless-stopped
   cgroup: host
   depends_on:
-    - discovery
-    - layerstore
-    - layerstore2
-    - layerstore3
-    - page_cache
+    discovery:
+      condition: service_started
+    layerstore:
+      condition: service_started
+    layerstore2:
+      condition: service_started
+    layerstore3:
+      condition: service_started
+    page_cache:
+      condition: service_started
+      required: false
   privileged: true
   cap_add:
     - SYS_ADMIN
@@ -72,6 +78,7 @@ x-afslet-common: &afslet-common
     <<: *afs-runtime-env
     AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
     AFSLET_MOUNT_IN_PROCESS: ${AFSLET_MOUNT_IN_PROCESS:-false}
+    AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-true}
   entrypoint: ["/bin/bash", "-lc"]
 
 services:
@@ -122,16 +129,21 @@ services:
     <<: *afs-runtime
     container_name: afs-page-cache
     restart: unless-stopped
+    profiles:
+      - page-cache
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
         set -euo pipefail
         exec /usr/local/bin/afs_page_cached \
           -cache-dir=/var/cache/afs-page-cache \
-          -max-cache-size=8GB \
+          -max-cache-size=$${AFS_PAGE_CACHE_MAX_SIZE:-8GB} \
           -uds-path=/var/run/afs-page-cache/page-cache.sock \
           -lease-timeout=30s \
           -pprof-listen=:6090
+    environment:
+      <<: *afs-runtime-env
+      AFS_PAGE_CACHE_MAX_SIZE: ${AFS_PAGE_CACHE_MAX_SIZE:-8GB}
     volumes:
       - page_cache_data:/var/cache/afs-page-cache
       - page_cache_sock:/var/run/afs-page-cache
@@ -193,6 +205,10 @@ services:
     command:
       - |
         set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+        fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
           -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
@@ -204,8 +220,8 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6062 \
-          -page-cache-uds=/var/run/afs-page-cache/page-cache.sock \
-          -graceful-timeout=15s
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
     ports:
       - "61051:61051"
       - "16062:6062"
@@ -225,6 +241,10 @@ services:
     command:
       - |
         set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+        fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
           -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
@@ -236,8 +256,8 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6072 \
-          -page-cache-uds=/var/run/afs-page-cache/page-cache.sock \
-          -graceful-timeout=15s
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
     ports:
       - "61052:61051"
       - "16072:6072"
@@ -257,6 +277,10 @@ services:
     command:
       - |
         set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+        fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
           -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
@@ -268,8 +292,8 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6082 \
-          -page-cache-uds=/var/run/afs-page-cache/page-cache.sock \
-          -graceful-timeout=15s
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
     ports:
       - "61053:61051"
       - "16082:6082"
