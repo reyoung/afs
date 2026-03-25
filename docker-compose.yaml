@@ -77,7 +77,6 @@ x-afslet-common: &afslet-common
   environment:
     <<: *afs-runtime-env
     AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
-    AFSLET_MOUNT_IN_PROCESS: ${AFSLET_MOUNT_IN_PROCESS:-false}
     AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-true}
   entrypoint: ["/bin/bash", "-lc"]
 
@@ -211,8 +210,6 @@ services:
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
-          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
-          -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
@@ -247,8 +244,6 @@ services:
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
-          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
-          -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
@@ -283,8 +278,6 @@ services:
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
-          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
-          -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \

@@ -37,11 +37,7 @@ RUN mkdir -p /out && \
     echo "==> building afs_proxy (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
     go build -trimpath -o /out/afs_proxy ./cmd/afs_proxy && \
     echo "==> building afs_runc (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
-    go build -trimpath -o /out/afs_runc ./cmd/afs_runc && \
-    echo "==> building afs_mount (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
-    go build -trimpath -o /out/afs_mount ./cmd/afs_mount && \
-    echo "==> building afs_page_cached (${GOOS}/${GOARCH}, cgo=${CGO_ENABLED})" && \
-    go build -trimpath -o /out/afs_page_cached ./cmd/afs_page_cached
+    go build -trimpath -o /out/afs_runc ./cmd/afs_runc
 
 FROM ubuntu:24.04
 
@@ -57,4 +53,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /out/ /usr/local/bin/
 
-CMD ["afs_mount", "-h"]
+CMD ["afslet", "-h"]

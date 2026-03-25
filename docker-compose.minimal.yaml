@@ -1,0 +1,150 @@
+x-afs-runtime-env: &afs-runtime-env
+  AFS_DISCOVERY_READER_LOG_INTERVAL: ${AFS_DISCOVERY_READER_LOG_INTERVAL:-0s}
+  AFS_DISCOVERY_READER_LOG_MIN_CALLS: ${AFS_DISCOVERY_READER_LOG_MIN_CALLS:-128}
+  AFS_DISCOVERY_READER_LOG_MIN_BYTES: ${AFS_DISCOVERY_READER_LOG_MIN_BYTES:-33554432}
+
+x-afs-runtime: &afs-runtime
+  image: afs-local:compose
+  pull_policy: never
+  environment: *afs-runtime-env
+
+services:
+  discovery:
+    <<: *afs-runtime
+    container_name: afs-discovery
+    restart: unless-stopped
+    env_file:
+      - .env.layerstore
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        update-ca-certificates >/dev/null 2>&1 || true
+        AUTH_ARGS=()
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_1}")
+        fi
+        exec /usr/local/bin/afs_discovery_grpcd \
+          -listen=:60051 \
+          -pprof-listen=:6064 \
+          "$${AUTH_ARGS[@]}"
+    ports:
+      - "60051:60051"
+    networks:
+      - afsnet
+
+  layerstore:
+    <<: *afs-runtime
+    container_name: afs-layerstore-1
+    restart: unless-stopped
+    depends_on:
+      - discovery
+    env_file:
+      - .env.layerstore
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        update-ca-certificates >/dev/null 2>&1 || true
+        IP="$$(hostname -i | awk '{print $$1}')"
+        AUTH_ARGS=()
+        if [[ -n "$${LAYERSTORE_AUTH_BASIC_1:-}" ]]; then
+          AUTH_ARGS+=(-auth-registry-basic "$${LAYERSTORE_AUTH_BASIC_1}")
+        fi
+        exec /usr/local/bin/afs_layerstore_grpcd \
+          -listen="$$IP:50051" \
+          -cache-dir=/var/lib/afs/cache \
+          -node-id=layerstore-1 \
+          -discovery-endpoint=discovery:60051 \
+          -pprof-listen=:6063 \
+          "$${AUTH_ARGS[@]}"
+    volumes:
+      - layerstore_cache:/var/lib/afs/cache
+    ports:
+      - "16063:6063"
+    networks:
+      - afsnet
+
+  afslet:
+    <<: *afs-runtime
+    container_name: afs-afslet-1
+    restart: unless-stopped
+    cgroup: host
+    depends_on:
+      discovery:
+        condition: service_started
+      layerstore:
+        condition: service_started
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/fuse:/dev/fuse
+    environment:
+      <<: *afs-runtime-env
+      AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
+      AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-false}
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-false}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-dir /var/cache/afs-page-cache -page-cache-max-size 8GB)
+        fi
+        exec /usr/local/bin/afslet \
+          -listen=:61051 \
+          -runc-binary=/usr/local/bin/afs_runc \
+          -discovery-addr=discovery:60051 \
+          -temp-dir=/var/lib/afslet/tmp \
+          -limit-cpu=4 \
+          -limit-memory-mb=4096 \
+          -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
+          -pprof-listen=:6062 \
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
+    volumes:
+      - afslet_tmp:/var/lib/afslet/tmp
+      - afslet_work:/var/lib/afslet/work
+      - afslet_page_cache:/var/cache/afs-page-cache
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    ports:
+      - "61051:61051"
+      - "16062:6062"
+    networks:
+      afsnet:
+        aliases:
+          - afslet
+
+  afs_proxy:
+    <<: *afs-runtime
+    restart: unless-stopped
+    depends_on:
+      - afslet
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        exec /usr/local/bin/afs_proxy \
+          -listen=:62051 \
+          -http-listen=:62052 \
+          -afslet-target=afslet:61051 \
+          -discovery-target=discovery:60051 \
+          -proxy-peers-target=afs_proxy:62052 \
+          -dispatch-backoff=50ms
+    ports:
+      - "62051:62051"
+    networks:
+      - afsnet
+
+networks:
+  afsnet:
+    driver: bridge
+
+volumes:
+  layerstore_cache:
+  afslet_tmp:
+  afslet_work:
+  afslet_page_cache:

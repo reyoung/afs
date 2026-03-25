@@ -10,9 +10,7 @@ type CacheEntry struct {
 	ChunkID   uint32
 	SlabIndex int
 	SlabClass int
-	PinCount  int32
 	DataSize  uint32
-	Node      *lruNode
 }
 
 // PageIndex is a thread-safe in-memory index mapping page keys to cache entries.
