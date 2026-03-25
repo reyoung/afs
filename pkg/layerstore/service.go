@@ -70,8 +70,7 @@ type Service struct {
 	pruneMu       sync.Mutex
 	cacheMax      int64
 	reservedBytes int64
-	evictReport   func()
-	formatVersion layerformat.FormatVersion
+	evictReport func()
 
 	localEndpoint      string
 	discoveryEndpoints []string
@@ -142,15 +141,11 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		mirrorsByHost:    make(map[string][]string),
 		cacheMax:         cacheMax,
 		peerFetchTimeout: 5 * time.Second,
-		formatVersion:    layerformat.FormatV2,
 	}, nil
 }
 
-// SetFormatVersion sets the AFS layer format version for new conversions.
-// Default is FormatV1. Use FormatV2 for identity (plain) payloads.
-func (s *Service) SetFormatVersion(v layerformat.FormatVersion) {
-	s.formatVersion = v
-}
+// SetFormatVersion is a no-op retained for API compatibility. Only AFSLYR02 is supported.
+func (s *Service) SetFormatVersion(v int) {}
 
 func (s *Service) SetRegistryMirrors(m map[string][]string) {
 	out := make(map[string][]string, len(m))
@@ -221,7 +216,7 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 	platformOS := valueOrDefault(req.GetPlatformOs(), defaultPlatformOS)
 	platformArch := valueOrDefault(req.GetPlatformArch(), defaultPlatformArch)
 	platformVariant := strings.TrimSpace(req.GetPlatformVariant())
-	imgKey := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant, s.formatVersion)
+	imgKey := imageKey(req.GetImage(), req.GetTag(), platformOS, platformArch, platformVariant)
 	if s.pullReport != nil {
 		s.pullReport(imgKey, true)
 		defer s.pullReport(imgKey, false)
@@ -498,10 +493,7 @@ func (s *Service) estimateRequiredBytesLocked(layers []registry.Layer) (int64, m
 			continue
 		}
 		if l.Size > 0 {
-			estimate := l.Size
-			if s.formatVersion == layerformat.FormatV2 {
-				estimate *= v2EstimateMultiplier
-			}
+			estimate := l.Size * v2EstimateMultiplier
 			required += estimate
 		} else {
 			required += 1
@@ -516,7 +508,7 @@ func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, ta
 		return imageMetadata{}, false, err
 	}
 
-	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant, s.formatVersion)
+	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
 	if !forceRefreshMetadata {
 		if cached, err := s.loadImageMetadata(cacheKey); err == nil {
 			return cached, true, nil
@@ -544,12 +536,8 @@ func (s *Service) resolveImageMetadata(ctx context.Context, f fetcher, image, ta
 	return meta, false, nil
 }
 
-func metadataCacheKey(registryHost, repository, reference, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
-	fvStr := "v1"
-	if formatVersion == layerformat.FormatV2 {
-		fvStr = "v2"
-	}
-	joined := strings.Join([]string{registryHost, repository, reference, platformOS, platformArch, platformVariant, fvStr}, "|")
+func metadataCacheKey(registryHost, repository, reference, platformOS, platformArch, platformVariant string) string {
+	joined := strings.Join([]string{registryHost, repository, reference, platformOS, platformArch, platformVariant, "v2"}, "|")
 	sum := sha256.Sum256([]byte(joined))
 	return hex.EncodeToString(sum[:])
 }
@@ -719,7 +707,7 @@ func (s *Service) HasImage(ctx context.Context, req *layerstorepb.HasImageReques
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "parse image reference: %v", err)
 	}
-	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant, s.formatVersion)
+	cacheKey := metadataCacheKey(ref.Registry, ref.Repository, ref.Reference, platformOS, platformArch, platformVariant)
 	meta, err := s.loadImageMetadata(cacheKey)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -837,7 +825,7 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		}
 	}()
 
-	if err = layerformat.ConvertOCILayerWithVersion(layer.MediaType, rc, tmpFile, s.formatVersion); err != nil {
+	if err = layerformat.ConvertOCILayer(layer.MediaType, rc, tmpFile); err != nil {
 		return "", 0, false, status.Errorf(codes.Internal, "convert layer %s: %v", layer.Digest, err)
 	}
 	log.Printf("converted layer digest=%s to afs temp=%s", layer.Digest, tmpPath)
@@ -854,8 +842,7 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	}
 	_ = touchFile(fullPath)
 	// Post-conversion: log if actual size exceeds the pre-admission estimate.
-	// This helps operators detect when the V2 estimate multiplier is insufficient.
-	if s.formatVersion == layerformat.FormatV2 && layer.Size > 0 {
+	if layer.Size > 0 {
 		estimated := layer.Size * v2EstimateMultiplier
 		actual := st.Size()
 		if actual > estimated {
@@ -1072,19 +1059,15 @@ func touchFile(path string) error {
 }
 
 func (s *Service) layerPath(digest string) (string, error) {
-	return layerPathForVersion(s.layersDir, digest, s.formatVersion)
+	return layerPathForVersion(s.layersDir, digest)
 }
 
-func layerPathForVersion(layersDir, digest string, version layerformat.FormatVersion) (string, error) {
+func layerPathForVersion(layersDir, digest string) (string, error) {
 	algo, hex, err := splitDigest(digest)
 	if err != nil {
 		return "", err
 	}
-	suffix := ".afslyr"
-	if version == layerformat.FormatV2 {
-		suffix = ".v2.afslyr"
-	}
-	return filepath.Join(layersDir, algo, strings.ToLower(hex)+suffix), nil
+	return filepath.Join(layersDir, algo, strings.ToLower(hex)+".v2.afslyr"), nil
 }
 
 func splitDigest(digest string) (algo, hex string, err error) {
@@ -1140,18 +1123,14 @@ func valueOrDefault(v, d string) string {
 	return d
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
-	fvStr := "v1"
-	if formatVersion == layerformat.FormatV2 {
-		fvStr = "v2"
-	}
+func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
-		fvStr,
+		"v2",
 	}, "|")
 }
 

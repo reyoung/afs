@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestConvertTarGzipToArchive_ReadFileAndStat(t *testing.T) {
+func TestRoundTrip(t *testing.T) {
 	layer := buildLayerTarGz(t)
 
 	var out bytes.Buffer
@@ -19,79 +19,6 @@ func TestConvertTarGzipToArchive_ReadFileAndStat(t *testing.T) {
 	r, err := NewReader(bytes.NewReader(out.Bytes()))
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
-	}
-
-	if r.FormatVersion() != FormatV1 {
-		t.Fatalf("expected FormatV1, got %d", r.FormatVersion())
-	}
-
-	e, err := r.Stat("dir/hello.txt")
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if e.Type != EntryTypeFile {
-		t.Fatalf("unexpected entry type: %s", e.Type)
-	}
-
-	data, err := r.ReadFile("dir/hello.txt")
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	var copied bytes.Buffer
-	n, err := r.CopyFile("dir/hello.txt", &copied)
-	if err != nil {
-		t.Fatalf("CopyFile() error = %v", err)
-	}
-	if n != int64(len("hello world")) {
-		t.Fatalf("CopyFile() bytes = %d, want %d", n, len("hello world"))
-	}
-	if copied.String() != "hello world" {
-		t.Fatalf("unexpected copied content: %q", copied.String())
-	}
-	if string(data) != "hello world" {
-		t.Fatalf("unexpected file content: %q", string(data))
-	}
-
-	symlink, err := r.Stat("dir/link")
-	if err != nil {
-		t.Fatalf("Stat(symlink) error = %v", err)
-	}
-	if symlink.Type != EntryTypeSymlink || symlink.SymlinkTarget != "hello.txt" {
-		t.Fatalf("unexpected symlink metadata: %+v", symlink)
-	}
-
-	hardlink, err := r.Stat("dir/hard")
-	if err != nil {
-		t.Fatalf("Stat(hardlink) error = %v", err)
-	}
-	if hardlink.Type != EntryTypeFile {
-		t.Fatalf("unexpected hardlink entry type: %s", hardlink.Type)
-	}
-	hardlinkData, err := r.ReadFile("dir/hard")
-	if err != nil {
-		t.Fatalf("ReadFile(hardlink) error = %v", err)
-	}
-	if string(hardlinkData) != "hello world" {
-		t.Fatalf("unexpected hardlink content: %q", string(hardlinkData))
-	}
-}
-
-func TestV2RoundTrip(t *testing.T) {
-	layer := buildLayerTarGz(t)
-
-	var out bytes.Buffer
-	if err := ConvertTarGzipToArchiveV2(bytes.NewReader(layer), &out); err != nil {
-		t.Fatalf("ConvertTarGzipToArchiveV2() error = %v", err)
-	}
-
-	r, err := NewReader(bytes.NewReader(out.Bytes()))
-	if err != nil {
-		t.Fatalf("NewReader() error = %v", err)
-	}
-
-	if r.FormatVersion() != FormatV2 {
-		t.Fatalf("expected FormatV2, got %d", r.FormatVersion())
 	}
 
 	// Check magic
@@ -140,12 +67,12 @@ func TestV2RoundTrip(t *testing.T) {
 	}
 }
 
-func TestV2HardlinkReusesPayload(t *testing.T) {
+func TestHardlinkReusesPayload(t *testing.T) {
 	layer := buildLayerTarGz(t)
 
 	var out bytes.Buffer
-	if err := ConvertTarGzipToArchiveV2(bytes.NewReader(layer), &out); err != nil {
-		t.Fatalf("ConvertTarGzipToArchiveV2() error = %v", err)
+	if err := ConvertTarGzipToArchive(bytes.NewReader(layer), &out); err != nil {
+		t.Fatalf("ConvertTarGzipToArchive() error = %v", err)
 	}
 
 	r, err := NewReader(bytes.NewReader(out.Bytes()))
@@ -182,12 +109,12 @@ func TestV2HardlinkReusesPayload(t *testing.T) {
 	}
 }
 
-func TestV2OffsetRead(t *testing.T) {
+func TestOffsetRead(t *testing.T) {
 	layer := buildLayerTarGz(t)
 
 	var out bytes.Buffer
-	if err := ConvertTarGzipToArchiveV2(bytes.NewReader(layer), &out); err != nil {
-		t.Fatalf("ConvertTarGzipToArchiveV2() error = %v", err)
+	if err := ConvertTarGzipToArchive(bytes.NewReader(layer), &out); err != nil {
+		t.Fatalf("ConvertTarGzipToArchive() error = %v", err)
 	}
 
 	r, err := NewReader(bytes.NewReader(out.Bytes()))
@@ -226,12 +153,12 @@ func TestV2OffsetRead(t *testing.T) {
 	}
 }
 
-func TestV2OpenFileSection(t *testing.T) {
+func TestOpenFileSection(t *testing.T) {
 	layer := buildLayerTarGz(t)
 
 	var out bytes.Buffer
-	if err := ConvertTarGzipToArchiveV2(bytes.NewReader(layer), &out); err != nil {
-		t.Fatalf("ConvertTarGzipToArchiveV2() error = %v", err)
+	if err := ConvertTarGzipToArchive(bytes.NewReader(layer), &out); err != nil {
+		t.Fatalf("ConvertTarGzipToArchive() error = %v", err)
 	}
 
 	r, err := NewReader(bytes.NewReader(out.Bytes()))
@@ -259,26 +186,7 @@ func TestV2OpenFileSection(t *testing.T) {
 	}
 }
 
-func TestV1OpenFileSectionFails(t *testing.T) {
-	layer := buildLayerTarGz(t)
-
-	var out bytes.Buffer
-	if err := ConvertTarGzipToArchive(bytes.NewReader(layer), &out); err != nil {
-		t.Fatalf("ConvertTarGzipToArchive() error = %v", err)
-	}
-
-	r, err := NewReader(bytes.NewReader(out.Bytes()))
-	if err != nil {
-		t.Fatalf("NewReader() error = %v", err)
-	}
-
-	_, err = r.OpenFileSection("dir/hello.txt")
-	if err == nil {
-		t.Fatal("expected error for V1 OpenFileSection")
-	}
-}
-
-func TestV2MultipleFiles(t *testing.T) {
+func TestMultipleFiles(t *testing.T) {
 	// Build a layer with multiple files to test offset correctness
 	var tarBuf bytes.Buffer
 	tw := tar.NewWriter(&tarBuf)
@@ -307,8 +215,8 @@ func TestV2MultipleFiles(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := ConvertTarGzipToArchiveV2(bytes.NewReader(gzBuf.Bytes()), &out); err != nil {
-		t.Fatalf("ConvertTarGzipToArchiveV2() error = %v", err)
+	if err := ConvertTarGzipToArchive(bytes.NewReader(gzBuf.Bytes()), &out); err != nil {
+		t.Fatalf("ConvertTarGzipToArchive() error = %v", err)
 	}
 
 	r, err := NewReader(bytes.NewReader(out.Bytes()))
@@ -337,31 +245,21 @@ func TestV2MultipleFiles(t *testing.T) {
 	}
 }
 
-func TestConvertOCILayerWithVersion(t *testing.T) {
+func TestConvertOCILayer(t *testing.T) {
 	layer := buildLayerTarGz(t)
 
-	// V1
-	var v1Out bytes.Buffer
-	if err := ConvertOCILayerWithVersion(OCILayerTarGzipMediaType, bytes.NewReader(layer), &v1Out, FormatV1); err != nil {
-		t.Fatalf("ConvertOCILayerWithVersion(V1) error = %v", err)
+	var out bytes.Buffer
+	if err := ConvertOCILayer(OCILayerTarGzipMediaType, bytes.NewReader(layer), &out); err != nil {
+		t.Fatalf("ConvertOCILayer() error = %v", err)
 	}
-	if got := string(v1Out.Bytes()[:8]); got != "AFSLYR01" {
-		t.Fatalf("V1 magic = %q, want AFSLYR01", got)
-	}
-
-	// V2
-	var v2Out bytes.Buffer
-	if err := ConvertOCILayerWithVersion(OCILayerTarGzipMediaType, bytes.NewReader(layer), &v2Out, FormatV2); err != nil {
-		t.Fatalf("ConvertOCILayerWithVersion(V2) error = %v", err)
-	}
-	if got := string(v2Out.Bytes()[:8]); got != "AFSLYR02" {
-		t.Fatalf("V2 magic = %q, want AFSLYR02", got)
+	if got := string(out.Bytes()[:8]); got != "AFSLYR02" {
+		t.Fatalf("magic = %q, want AFSLYR02", got)
 	}
 
-	// Invalid version
+	// Invalid media type
 	var badOut bytes.Buffer
-	if err := ConvertOCILayerWithVersion(OCILayerTarGzipMediaType, bytes.NewReader(layer), &badOut, 99); err == nil {
-		t.Fatal("expected error for invalid format version")
+	if err := ConvertOCILayer("application/invalid", bytes.NewReader(layer), &badOut); err == nil {
+		t.Fatal("expected error for invalid media type")
 	}
 }
 

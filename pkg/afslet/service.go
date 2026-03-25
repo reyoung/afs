@@ -61,7 +61,6 @@ type Config struct {
 	LayerMountConcurrency       int
 	MountPprofListen            string
 	FUSEMaxReadAheadBytes       int64
-	FormatVersion               int
 }
 
 type Service struct {
@@ -96,7 +95,6 @@ type Service struct {
 	layerMountConcurrency       int
 	mountPprofListen            string
 	fuseMaxReadAheadBytes       int64
-	formatVersion               int
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
@@ -127,7 +125,6 @@ func NewService(cfg Config) *Service {
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
 		mountPprofListen:            strings.TrimSpace(cfg.MountPprofListen),
 		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
-		formatVersion:               cfg.FormatVersion,
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -467,28 +464,21 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 
 	mountCfg := afsmount.Config{
-		Mountpoint:                  sess.mountpoint,
-		WorkDir:                     sess.workDir,
-		ExtraDir:                    sess.extraDir,
-		MountProcDev:                false,
-		Image:                       image,
-		Tag:                         tag,
-		DiscoveryAddr:               discoveryAddr,
-		NodeID:                      strings.TrimSpace(start.GetNodeId()),
-		PlatformOS:                  strings.TrimSpace(start.GetPlatformOs()),
-		PlatformArch:                strings.TrimSpace(start.GetPlatformArch()),
-		PlatformVariant:             strings.TrimSpace(start.GetPlatformVariant()),
-		ForceLocalFetch:             start.GetForceLocalFetch(),
-		SharedSpillCacheEnabled:     s.sharedSpillCacheEnabled,
-		SharedSpillCacheDir:         s.sharedSpillCacheDir,
-		SharedSpillCacheSock:        s.sharedSpillCacheSock,
-		SharedSpillCacheMaxBytes:    s.sharedSpillCacheMaxBytes,
-		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
-		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
-		LayerMountConcurrency:       s.layerMountConcurrency,
-		PprofListen:                 s.mountPprofListen,
-		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
-		FormatVersion:               s.formatVersion,
+		Mountpoint:            sess.mountpoint,
+		WorkDir:               sess.workDir,
+		ExtraDir:              sess.extraDir,
+		MountProcDev:          false,
+		Image:                 image,
+		Tag:                   tag,
+		DiscoveryAddr:         discoveryAddr,
+		NodeID:                strings.TrimSpace(start.GetNodeId()),
+		PlatformOS:            strings.TrimSpace(start.GetPlatformOs()),
+		PlatformArch:          strings.TrimSpace(start.GetPlatformArch()),
+		PlatformVariant:       strings.TrimSpace(start.GetPlatformVariant()),
+		ForceLocalFetch:       start.GetForceLocalFetch(),
+		LayerMountConcurrency: s.layerMountConcurrency,
+		PprofListen:           s.mountPprofListen,
+		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
 	}
 	mountArgs := []string{
 		"-mountpoint", sess.mountpoint,

@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/reyoung/afs/pkg/layerformat"
 )
 
 func TestParseRegistryTokenPair(t *testing.T) {
@@ -110,11 +108,11 @@ func TestValidateListenEndpoint(t *testing.T) {
 	}
 }
 
-func TestScanCachedLayerStats(t *testing.T) {
+func TestScanCachedLayerStats_V2(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
-	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
+	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.v2.afslyr")
 	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -122,7 +120,7 @@ func TestScanCachedLayerStats(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got, err := scanCachedLayerStats(tmp, layerformat.FormatV1)
+	got, err := scanCachedLayerStats(tmp)
 	if err != nil {
 		t.Fatalf("scanCachedLayerStats: %v", err)
 	}
@@ -131,6 +129,28 @@ func TestScanCachedLayerStats(t *testing.T) {
 	}
 	if got[0].GetAfsSize() != 1 {
 		t.Fatalf("afs_size=%d, want 1", got[0].GetAfsSize())
+	}
+}
+
+func TestScanCachedLayerStats_IgnoresV1(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	// Place only a V1 .afslyr file — should be ignored
+	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
+	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(layerPath, []byte("v1data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := scanCachedLayerStats(tmp)
+	if err != nil {
+		t.Fatalf("scanCachedLayerStats: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("scan should not see V1 file, got=%v", got)
 	}
 }
 
@@ -147,7 +167,7 @@ func TestScanCachedImageKeys_NoLayersField(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got, err := scanCachedImageKeys(tmp, layerformat.FormatV1)
+	got, err := scanCachedImageKeys(tmp)
 	if err != nil {
 		t.Fatalf("scanCachedImageKeys: %v", err)
 	}
@@ -168,7 +188,7 @@ func TestScanCachedImageKeys_LayersComplete(t *testing.T) {
 	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
+	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.v2.afslyr")
 	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll layer dir: %v", err)
 	}
@@ -176,12 +196,12 @@ func TestScanCachedImageKeys_LayersComplete(t *testing.T) {
 		t.Fatalf("WriteFile layer: %v", err)
 	}
 
-	got, err := scanCachedImageKeys(tmp, layerformat.FormatV1)
+	got, err := scanCachedImageKeys(tmp)
 	if err != nil {
 		t.Fatalf("scanCachedImageKeys: %v", err)
 	}
-	if len(got) != 1 || got[0] != "nginx|latest|linux|amd64||v1" {
-		t.Fatalf("got=%v, want [nginx|latest|linux|amd64||v1]", got)
+	if len(got) != 1 || got[0] != "nginx|latest|linux|amd64||v2" {
+		t.Fatalf("got=%v, want [nginx|latest|linux|amd64||v2]", got)
 	}
 }
 
@@ -198,7 +218,7 @@ func TestScanCachedImageKeys_LayersMissing(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	got, err := scanCachedImageKeys(tmp, layerformat.FormatV1)
+	got, err := scanCachedImageKeys(tmp)
 	if err != nil {
 		t.Fatalf("scanCachedImageKeys: %v", err)
 	}
@@ -207,51 +227,7 @@ func TestScanCachedImageKeys_LayersMissing(t *testing.T) {
 	}
 }
 
-func TestScanCachedLayerStats_V2DoesNotSeeV1(t *testing.T) {
-	t.Parallel()
-
-	tmp := t.TempDir()
-	// Place only a V1 .afslyr file
-	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
-	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(layerPath, []byte("v1data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	got, err := scanCachedLayerStats(tmp, layerformat.FormatV2)
-	if err != nil {
-		t.Fatalf("scanCachedLayerStats: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("V2 scan should not see V1 file, got=%v", got)
-	}
-}
-
-func TestScanCachedLayerStats_V1DoesNotSeeV2(t *testing.T) {
-	t.Parallel()
-
-	tmp := t.TempDir()
-	// Place only a V2 .v2.afslyr file
-	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.v2.afslyr")
-	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(layerPath, []byte("v2data"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	got, err := scanCachedLayerStats(tmp, layerformat.FormatV1)
-	if err != nil {
-		t.Fatalf("scanCachedLayerStats: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("V1 scan should not see V2 file, got=%v", got)
-	}
-}
-
-func TestScanCachedImageKeys_V2DoesNotSeeV1Layers(t *testing.T) {
+func TestScanCachedImageKeys_V1LayersIgnored(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -263,7 +239,7 @@ func TestScanCachedImageKeys_V2DoesNotSeeV1Layers(t *testing.T) {
 	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	// Only place a V1 layer file
+	// Only place a V1 layer file — should not count as present
 	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.afslyr")
 	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll layer dir: %v", err)
@@ -272,57 +248,20 @@ func TestScanCachedImageKeys_V2DoesNotSeeV1Layers(t *testing.T) {
 		t.Fatalf("WriteFile layer: %v", err)
 	}
 
-	got, err := scanCachedImageKeys(tmp, layerformat.FormatV2)
+	got, err := scanCachedImageKeys(tmp)
 	if err != nil {
 		t.Fatalf("scanCachedImageKeys: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("V2 image scan should not see V1 layers as ready, got=%v", got)
+		t.Fatalf("image scan should not see V1 layers as ready, got=%v", got)
 	}
 }
 
-func TestScanCachedImageKeys_V1DoesNotSeeV2Layers(t *testing.T) {
+func TestImageKeyAlwaysV2(t *testing.T) {
 	t.Parallel()
 
-	tmp := t.TempDir()
-	metaPath := filepath.Join(tmp, "metadata", "a.json")
-	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	content := `{"image":"nginx","tag":"latest","platform_os":"linux","platform_arch":"amd64","platform_variant":"","layers":[{"Digest":"sha256:abcdef"}]}`
-	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	// Only place a V2 layer file
-	layerPath := filepath.Join(tmp, "layers", "sha256", "abcdef.v2.afslyr")
-	if err := os.MkdirAll(filepath.Dir(layerPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll layer dir: %v", err)
-	}
-	if err := os.WriteFile(layerPath, []byte("v2layer"), 0o644); err != nil {
-		t.Fatalf("WriteFile layer: %v", err)
-	}
-
-	got, err := scanCachedImageKeys(tmp, layerformat.FormatV1)
-	if err != nil {
-		t.Fatalf("scanCachedImageKeys: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("V1 image scan should not see V2 layers as ready, got=%v", got)
-	}
-}
-
-func TestImageKeyIncludesFormatVersion(t *testing.T) {
-	t.Parallel()
-
-	v1Key := imageKey("nginx", "latest", "linux", "amd64", "", layerformat.FormatV1)
-	v2Key := imageKey("nginx", "latest", "linux", "amd64", "", layerformat.FormatV2)
-	if v1Key == v2Key {
-		t.Fatalf("V1 and V2 image keys should differ, both=%q", v1Key)
-	}
-	if !strings.HasSuffix(v1Key, "|v1") {
-		t.Fatalf("V1 key should end with |v1, got=%q", v1Key)
-	}
-	if !strings.HasSuffix(v2Key, "|v2") {
-		t.Fatalf("V2 key should end with |v2, got=%q", v2Key)
+	key := imageKey("nginx", "latest", "linux", "amd64", "")
+	if !strings.HasSuffix(key, "|v2") {
+		t.Fatalf("image key should end with |v2, got=%q", key)
 	}
 }

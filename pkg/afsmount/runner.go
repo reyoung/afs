@@ -30,7 +30,6 @@ import (
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
-	"github.com/reyoung/afs/pkg/spillcache"
 )
 
 const (
@@ -49,7 +48,6 @@ type Config struct {
 	Mountpoint                  string
 	Debug                       bool
 	MountProcDev                bool
-	NoSpillCache                bool
 	ExtraDir                    string
 	DiscoveryAddr               string
 	GRPCTimeout                 time.Duration
@@ -66,24 +64,15 @@ type Config struct {
 	PullTimeout                 time.Duration
 	WorkDir                     string
 	KeepWorkDir                 bool
-	FUSETempDir                 string
-	SharedSpillCacheEnabled     bool
-	SharedSpillCacheDir         string
-	SharedSpillCacheSock        string
-	SharedSpillCacheMaxBytes    int64
-	SharedSpillCacheBinaryPath  string
-	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
 	PprofListen                 string
 	OnReady                     func()
-	FormatVersion               int
 }
 
 type config struct {
 	mountpoint                  string
 	debug                       bool
 	mountProcDev                bool
-	noSpillCache                bool
 	extraDir                    string
 	discoveryAddr               string
 	grpcTimeout                 time.Duration
@@ -100,17 +89,9 @@ type config struct {
 	pullTimeout                 time.Duration
 	workDir                     string
 	keepWorkDir                 bool
-	fuseTempDir                 string
-	sharedSpillCacheEnabled     bool
-	sharedSpillCacheDir         string
-	sharedSpillCacheSock        string
-	sharedSpillCacheMaxBytes    int64
-	sharedSpillCacheBinaryPath  string
-	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
 	pprofListen                 string
 	onReady                     func()
-	formatVersion               int
 }
 
 type serviceInfo struct {
@@ -205,7 +186,6 @@ func normalizeConfig(userCfg Config) (config, error) {
 		mountpoint:                  strings.TrimSpace(userCfg.Mountpoint),
 		debug:                       userCfg.Debug,
 		mountProcDev:                userCfg.MountProcDev,
-		noSpillCache:                userCfg.NoSpillCache,
 		extraDir:                    strings.TrimSpace(userCfg.ExtraDir),
 		discoveryAddr:               strings.TrimSpace(userCfg.DiscoveryAddr),
 		grpcTimeout:                 userCfg.GRPCTimeout,
@@ -222,21 +202,9 @@ func normalizeConfig(userCfg Config) (config, error) {
 		pullTimeout:                 userCfg.PullTimeout,
 		workDir:                     strings.TrimSpace(userCfg.WorkDir),
 		keepWorkDir:                 userCfg.KeepWorkDir,
-		fuseTempDir:                 strings.TrimSpace(userCfg.FUSETempDir),
-		sharedSpillCacheEnabled:     userCfg.SharedSpillCacheEnabled,
-		sharedSpillCacheDir:         strings.TrimSpace(userCfg.SharedSpillCacheDir),
-		sharedSpillCacheSock:        strings.TrimSpace(userCfg.SharedSpillCacheSock),
-		sharedSpillCacheMaxBytes:    userCfg.SharedSpillCacheMaxBytes,
-		sharedSpillCacheBinaryPath:  strings.TrimSpace(userCfg.SharedSpillCacheBinaryPath),
-		sharedSpillCachePprofListen: strings.TrimSpace(userCfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       userCfg.LayerMountConcurrency,
 		pprofListen:                 strings.TrimSpace(userCfg.PprofListen),
 		onReady:                     userCfg.OnReady,
-		formatVersion:               userCfg.FormatVersion,
-	}
-
-	if cfg.formatVersion != 1 && cfg.formatVersion != 2 {
-		cfg.formatVersion = 2
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -259,15 +227,6 @@ func normalizeConfig(userCfg Config) (config, error) {
 	}
 	if cfg.pullTimeout <= 0 {
 		cfg.pullTimeout = 20 * time.Minute
-	}
-	if cfg.sharedSpillCacheDir == "" {
-		cfg.sharedSpillCacheDir = ".cache/afs_mount_cached"
-	}
-	if cfg.sharedSpillCacheMaxBytes <= 0 {
-		cfg.sharedSpillCacheMaxBytes = 10 << 30
-	}
-	if cfg.sharedSpillCacheBinaryPath == "" {
-		cfg.sharedSpillCacheBinaryPath = "afs_mount_cached"
 	}
 	if cfg.layerMountConcurrency <= 0 {
 		cfg.layerMountConcurrency = 1
@@ -306,7 +265,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		providers []serviceInfo
 		err       error
 	)
-	imageKeyStr := imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant, layerformat.FormatVersion(cfg.formatVersion))
+	imageKeyStr := imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant)
 	cacheKey := imageResolveCacheKey(cfg, imageKeyStr)
 	cacheLookupStarted := time.Now()
 	if cached, ok := sharedImageCache.get(cacheKey); ok {
@@ -411,26 +370,6 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	}()
 
 	layerDirs := make([]string, 0, len(pullResp.GetLayers()))
-	var sharedCacheClient *spillcache.Client
-	if cfg.sharedSpillCacheEnabled {
-		sharedSpillCacheStarted := time.Now()
-		launcher, err := spillcache.NewLauncher(spillcache.LauncherConfig{
-			CacheDir:    cfg.sharedSpillCacheDir,
-			SockPath:    cfg.sharedSpillCacheSock,
-			MaxBytes:    cfg.sharedSpillCacheMaxBytes,
-			BinaryPath:  cfg.sharedSpillCacheBinaryPath,
-			PprofListen: cfg.sharedSpillCachePprofListen,
-		})
-		if err != nil {
-			return fmt.Errorf("configure shared spill cache: %w", err)
-		}
-		sharedCacheClient, err = launcher.EnsureStarted()
-		if err != nil {
-			return fmt.Errorf("start shared spill cache daemon: %w", err)
-		}
-		log.Printf("shared spill cache enabled: dir=%s sock=%s max-bytes=%d", cfg.sharedSpillCacheDir, cfg.sharedSpillCacheSock, cfg.sharedSpillCacheMaxBytes)
-		logTiming("shared_spill_cache_ensure_started", sharedSpillCacheStarted)
-	}
 	layers := pullResp.GetLayers()
 	results := make([]mountedLayer, len(layers))
 	type mountResult struct {
@@ -518,7 +457,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
 
 			layerFuseMountStarted := time.Now()
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient, cfg.fuseMaxReadAheadBytes)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes)
 			if err != nil {
 				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
@@ -1129,8 +1068,8 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
-	root := layerfuse.NewRootWithSharedCache(reader, tempDir, noSpillCache, layerDigest, sharedCache)
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
+	root := layerfuse.NewRoot(reader)
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
 	negativeTimeout := 5 * time.Second
@@ -1319,17 +1258,13 @@ func shortDigest(digest string) string {
 	return digest[:18]
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
-	fvStr := "v1"
-	if formatVersion == layerformat.FormatV2 {
-		fvStr = "v2"
-	}
+func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
-		fvStr,
+		"v2",
 	}, "|")
 }

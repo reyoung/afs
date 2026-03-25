@@ -1,5 +1,4 @@
 x-afs-runtime-env: &afs-runtime-env
-  AFS_FORMAT_VERSION: ${AFS_FORMAT_VERSION:-2}
   AFS_DISCOVERY_READER_LOG_INTERVAL: ${AFS_DISCOVERY_READER_LOG_INTERVAL:-0s}
   AFS_DISCOVERY_READER_LOG_MIN_CALLS: ${AFS_DISCOVERY_READER_LOG_MIN_CALLS:-128}
   AFS_DISCOVERY_READER_LOG_MIN_BYTES: ${AFS_DISCOVERY_READER_LOG_MIN_BYTES:-33554432}
@@ -48,7 +47,6 @@ x-layerstore-common: &layerstore-common
         -node-id="$${LAYERSTORE_NODE_ID}" \
         -discovery-endpoint=discovery:60051 \
         -pprof-listen="$${LAYERSTORE_PPROF_LISTEN}" \
-        -format-version=$${AFS_FORMAT_VERSION:-2} \
         "$${AUTH_ARGS[@]}"
   networks:
     - afsnet
@@ -112,7 +110,6 @@ services:
         exec /usr/local/bin/afs_discovery_grpcd \
           -listen=:60051 \
           -pprof-listen=:6064 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           "$${AUTH_ARGS[@]}"
     ports:
       - "60051:60051"
@@ -189,7 +186,6 @@ services:
           -shared-spill-cache-pprof-listen=:6061 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6062 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -graceful-timeout=15s
     ports:
       - "61051:61051"
@@ -227,7 +223,6 @@ services:
           -shared-spill-cache-pprof-listen=:6071 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6072 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -graceful-timeout=15s
     ports:
       - "61052:61051"
@@ -265,7 +260,6 @@ services:
           -shared-spill-cache-pprof-listen=:6081 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6082 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -graceful-timeout=15s
     ports:
       - "61053:61051"
@@ -293,7 +287,6 @@ services:
           -afslet-target=afslet:61051 \
           -discovery-target=discovery:60051 \
           -proxy-peers-target=afs_proxy:62052 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -dispatch-backoff=50ms
     ports:
       - "62051:62051"

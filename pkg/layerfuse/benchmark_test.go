@@ -14,25 +14,25 @@ import (
 
 const benchmarkWarmFileSize = 8 << 20
 
-func BenchmarkV2FileNodeReadWarmSequential64K(b *testing.B) {
-	benchmarkV2FileNodeReadWarm(b, 64<<10, false)
+func BenchmarkFileNodeReadWarmSequential64K(b *testing.B) {
+	benchmarkFileNodeReadWarm(b, 64<<10, false)
 }
 
-func BenchmarkV2FileNodeReadWarmParallel64K(b *testing.B) {
-	benchmarkV2FileNodeReadWarm(b, 64<<10, true)
+func BenchmarkFileNodeReadWarmParallel64K(b *testing.B) {
+	benchmarkFileNodeReadWarm(b, 64<<10, true)
 }
 
-func BenchmarkV2FileNodeReadWarmSequential128K(b *testing.B) {
-	benchmarkV2FileNodeReadWarm(b, 128<<10, false)
+func BenchmarkFileNodeReadWarmSequential128K(b *testing.B) {
+	benchmarkFileNodeReadWarm(b, 128<<10, false)
 }
 
-func BenchmarkV2FileNodeReadWarmParallel128K(b *testing.B) {
-	benchmarkV2FileNodeReadWarm(b, 128<<10, true)
+func BenchmarkFileNodeReadWarmParallel128K(b *testing.B) {
+	benchmarkFileNodeReadWarm(b, 128<<10, true)
 }
 
-func benchmarkV2FileNodeReadWarm(b *testing.B, chunkSize int, parallel bool) {
+func benchmarkFileNodeReadWarm(b *testing.B, chunkSize int, parallel bool) {
 	b.Helper()
-	reader := newV2ReaderWithSingleFile(b, "bench.bin", makeBenchmarkPayload(benchmarkWarmFileSize))
+	reader := newReaderWithSingleFile(b, "bench.bin", makeBenchmarkPayload(benchmarkWarmFileSize))
 	section, err := reader.OpenFileSection("bench.bin")
 	if err != nil {
 		b.Fatalf("OpenFileSection() error = %v", err)
@@ -44,8 +44,7 @@ func benchmarkV2FileNodeReadWarm(b *testing.B, chunkSize int, parallel bool) {
 			Mode:             0o644,
 			UncompressedSize: benchmarkWarmFileSize,
 		},
-		reader:        reader,
-		directSection: &section,
+		section: section,
 	}
 
 	b.ReportAllocs()
@@ -97,7 +96,7 @@ func benchmarkV2FileNodeReadWarm(b *testing.B, chunkSize int, parallel bool) {
 	}
 }
 
-func TestV2FileNodeReadAllowsConcurrentReadAt(t *testing.T) {
+func TestFileNodeReadAllowsConcurrentReadAt(t *testing.T) {
 	t.Parallel()
 
 	tracker := &trackingReaderAt{
@@ -117,7 +116,7 @@ func TestV2FileNodeReadAllowsConcurrentReadAt(t *testing.T) {
 			Mode:             0o644,
 			UncompressedSize: tracker.size,
 		},
-		directSection: &section,
+		section: section,
 	}
 
 	const workers = 8

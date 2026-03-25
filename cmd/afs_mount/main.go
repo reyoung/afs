@@ -30,7 +30,6 @@ import (
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
-	"github.com/reyoung/afs/pkg/spillcache"
 )
 
 type config struct {
@@ -63,7 +62,6 @@ type config struct {
 	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
 	pprofListen                 string
-	formatVersion               int
 }
 
 type serviceInfo struct {
@@ -132,7 +130,6 @@ func parseFlags() config {
 	flag.StringVar(&cfg.sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
 	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.StringVar(&cfg.pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6065")
-	flag.IntVar(&cfg.formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -140,9 +137,6 @@ func parseFlags() config {
 	}
 	if strings.TrimSpace(cfg.image) == "" {
 		log.Fatal("-image is required")
-	}
-	if cfg.formatVersion != 1 && cfg.formatVersion != 2 {
-		log.Fatalf("-format-version must be 1 or 2, got %d", cfg.formatVersion)
 	}
 	if cfg.layerMountConcurrency <= 0 {
 		log.Fatal("-layer-mount-concurrency must be > 0")
@@ -167,7 +161,7 @@ func parseFlags() config {
 }
 
 func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config) error {
-	imageProviders, err := findImageServices(discoveryClient, imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant, layerformat.FormatVersion(cfg.formatVersion)), cfg.grpcTimeout)
+	imageProviders, err := findImageServices(discoveryClient, imageKey(cfg.image, cfg.tag, cfg.platformOS, cfg.platformArch, cfg.platformVariant), cfg.grpcTimeout)
 	if err != nil {
 		return err
 	}
@@ -230,24 +224,6 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 	}()
 
 	layerDirs := make([]string, 0, len(pullResp.GetLayers()))
-	var sharedCacheClient *spillcache.Client
-	if cfg.sharedSpillCacheEnabled {
-		launcher, err := spillcache.NewLauncher(spillcache.LauncherConfig{
-			CacheDir:    cfg.sharedSpillCacheDir,
-			SockPath:    cfg.sharedSpillCacheSock,
-			MaxBytes:    cfg.sharedSpillCacheMaxBytes,
-			BinaryPath:  cfg.sharedSpillCacheBinaryPath,
-			PprofListen: cfg.sharedSpillCachePprofListen,
-		})
-		if err != nil {
-			return fmt.Errorf("configure shared spill cache: %w", err)
-		}
-		sharedCacheClient, err = launcher.EnsureStarted()
-		if err != nil {
-			return fmt.Errorf("start shared spill cache daemon: %w", err)
-		}
-		log.Printf("shared spill cache enabled: dir=%s sock=%s max-bytes=%d", cfg.sharedSpillCacheDir, cfg.sharedSpillCacheSock, cfg.sharedSpillCacheMaxBytes)
-	}
 	layers := pullResp.GetLayers()
 	results := make([]mountedLayer, len(layers))
 	type mountResult struct {
@@ -305,7 +281,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}
 				return
 			}
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseTempDir, cfg.noSpillCache, sharedCacheClient, cfg.fuseMaxReadAheadBytes)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes)
 			if err != nil {
 				stop.Store(true)
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("mount layer %s: %w", digest, err)}
@@ -594,8 +570,8 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, tempDir string, noSpillCache bool, sharedCache layerfuse.SharedSpillCache, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
-	root := layerfuse.NewRootWithSharedCache(reader, tempDir, noSpillCache, layerDigest, sharedCache)
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
+	root := layerfuse.NewRoot(reader)
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
 	negativeTimeout := 5 * time.Second
@@ -784,17 +760,13 @@ func shortDigest(digest string) string {
 	return digest[:18]
 }
 
-func imageKey(image, tag, platformOS, platformArch, platformVariant string, formatVersion layerformat.FormatVersion) string {
-	fvStr := "v1"
-	if formatVersion == layerformat.FormatV2 {
-		fvStr = "v2"
-	}
+func imageKey(image, tag, platformOS, platformArch, platformVariant string) string {
 	return strings.Join([]string{
 		strings.TrimSpace(image),
 		strings.TrimSpace(tag),
 		strings.TrimSpace(platformOS),
 		strings.TrimSpace(platformArch),
 		strings.TrimSpace(platformVariant),
-		fvStr,
+		"v2",
 	}, "|")
 }

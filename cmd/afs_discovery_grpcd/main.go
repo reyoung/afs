@@ -18,7 +18,6 @@ import (
 	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discovery"
 	"github.com/reyoung/afs/pkg/discoverypb"
-	"github.com/reyoung/afs/pkg/layerformat"
 )
 
 func main() {
@@ -32,7 +31,6 @@ func main() {
 		basicPairs    multiStringFlag
 		mirrorPairs   multiStringFlag
 		pprofListen   string
-		formatVersion int
 	)
 	flag.StringVar(&listenAddr, "listen", ":60051", "gRPC listen address")
 	flag.StringVar(&authHost, "auth-registry", "", "registry host for startup auth, e.g. registry-1.docker.io")
@@ -43,12 +41,7 @@ func main() {
 	flag.Var(&basicPairs, "auth-registry-basic", "repeatable registry basic auth, format <registry>=<username>[:<password>]")
 	flag.Var(&mirrorPairs, "registry-mirror", "repeatable registry mirror mapping, format <registry>=<mirror>[,<mirror>...]")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6064")
-	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
 	flag.Parse()
-
-	if formatVersion != 1 && formatVersion != 2 {
-		log.Fatalf("-format-version must be 1 or 2, got %d", formatVersion)
-	}
 
 	var authConfigs []discovery.RegistryAuthConfig
 	for _, pair := range authPairs {
@@ -95,7 +88,7 @@ func main() {
 	}
 
 	svc := discovery.NewService()
-	svc.SetFormatVersion(layerformat.FormatVersion(formatVersion))
+	svc.SetFormatVersion(2)
 	if err := svc.SetRegistryAuthConfigs(authConfigs); err != nil {
 		log.Fatalf("configure registry auth: %v", err)
 	}
