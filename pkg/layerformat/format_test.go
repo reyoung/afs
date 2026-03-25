@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"testing"
 )
@@ -33,6 +35,17 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if string(data) != "hello world" {
 		t.Fatalf("unexpected content: %q", string(data))
+	}
+
+	// Verify digest
+	e, err := r.Stat("dir/hello.txt")
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	wantSum := sha256.Sum256([]byte("hello world"))
+	wantDigest := "sha256:" + hex.EncodeToString(wantSum[:])
+	if e.Digest != wantDigest {
+		t.Fatalf("Digest = %q, want %q", e.Digest, wantDigest)
 	}
 
 	// CopyFile
@@ -98,6 +111,12 @@ func TestHardlinkReusesPayload(t *testing.T) {
 	}
 	if hard.PayloadCodec != PayloadCodecIdentity {
 		t.Fatalf("hardlink PayloadCodec=%q, want %q", hard.PayloadCodec, PayloadCodecIdentity)
+	}
+	if hard.Digest != orig.Digest {
+		t.Fatalf("hardlink Digest=%q, want %q", hard.Digest, orig.Digest)
+	}
+	if hard.Digest == "" {
+		t.Fatal("hardlink Digest should not be empty")
 	}
 
 	hardData, err := r.ReadFile("dir/hard")

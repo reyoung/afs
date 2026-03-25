@@ -3,7 +3,9 @@ package layerformat
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +46,7 @@ type Entry struct {
 	ModTimeUnix      int64        `json:"mod_time_unix,omitempty"`
 	SymlinkTarget    string       `json:"symlink_target,omitempty"`
 	UncompressedSize int64        `json:"uncompressed_size,omitempty"`
+	Digest           string       `json:"digest"`
 	PayloadCodec     PayloadCodec `json:"payload_codec,omitempty"`
 	PayloadOffset    int64        `json:"payload_offset,omitempty"`
 	PayloadSize      int64        `json:"payload_size,omitempty"`
@@ -127,6 +130,8 @@ func ConvertTarGzipToArchive(layerTarGzip io.Reader, out io.Writer) error {
 			if err != nil {
 				return fmt.Errorf("read %s: %w", normalized, err)
 			}
+			sum := sha256.Sum256(payload)
+			base.Digest = "sha256:" + hex.EncodeToString(sum[:])
 			dataOffset += int64(len(payload))
 			entries = append(entries, base)
 			dataChunks = append(dataChunks, payload)
@@ -215,6 +220,7 @@ func resolveHardlinks(entries []Entry, pending map[int]hardlinkRef, entryIndexBy
 				return fmt.Errorf("hardlink %s target %s is not a regular file", ref.entryPath, candidate)
 			}
 			entries[idx].UncompressedSize = target.UncompressedSize
+			entries[idx].Digest = target.Digest
 			entries[idx].PayloadCodec = target.PayloadCodec
 			entries[idx].PayloadOffset = target.PayloadOffset
 			entries[idx].PayloadSize = target.PayloadSize
