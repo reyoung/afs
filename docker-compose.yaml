@@ -60,6 +60,7 @@ x-afslet-common: &afslet-common
     - layerstore
     - layerstore2
     - layerstore3
+    - page_cache
   privileged: true
   cap_add:
     - SYS_ADMIN
@@ -117,6 +118,28 @@ services:
     networks:
       - afsnet
 
+  page_cache:
+    <<: *afs-runtime
+    container_name: afs-page-cache
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        exec /usr/local/bin/afs_page_cached \
+          -cache-dir=/var/cache/afs-page-cache \
+          -max-cache-size=8GB \
+          -uds-path=/var/run/afs-page-cache/page-cache.sock \
+          -lease-timeout=30s \
+          -pprof-listen=:6090
+    volumes:
+      - page_cache_data:/var/cache/afs-page-cache
+      - page_cache_sock:/var/run/afs-page-cache
+    ports:
+      - "16090:6090"
+    networks:
+      - afsnet
+
   layerstore:
     <<: *layerstore-common
     container_name: afs-layerstore-1
@@ -165,6 +188,7 @@ services:
     volumes:
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
+      - page_cache_sock:/var/run/afs-page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
@@ -180,6 +204,7 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6062 \
+          -page-cache-uds=/var/run/afs-page-cache/page-cache.sock \
           -graceful-timeout=15s
     ports:
       - "61051:61051"
@@ -195,6 +220,7 @@ services:
     volumes:
       - afslet_tmp_2:/var/lib/afslet/tmp
       - afslet_work_2:/var/lib/afslet/work
+      - page_cache_sock:/var/run/afs-page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
@@ -210,6 +236,7 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6072 \
+          -page-cache-uds=/var/run/afs-page-cache/page-cache.sock \
           -graceful-timeout=15s
     ports:
       - "61052:61051"
@@ -225,6 +252,7 @@ services:
     volumes:
       - afslet_tmp_3:/var/lib/afslet/tmp
       - afslet_work_3:/var/lib/afslet/work
+      - page_cache_sock:/var/run/afs-page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
@@ -240,6 +268,7 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6082 \
+          -page-cache-uds=/var/run/afs-page-cache/page-cache.sock \
           -graceful-timeout=15s
     ports:
       - "61053:61051"
@@ -286,3 +315,5 @@ volumes:
   afslet_work_2:
   afslet_tmp_3:
   afslet_work_3:
+  page_cache_data:
+  page_cache_sock:

@@ -30,6 +30,7 @@ import (
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 const (
@@ -67,6 +68,7 @@ type Config struct {
 	LayerMountConcurrency       int
 	PprofListen                 string
 	OnReady                     func()
+	PageCacheUDS                string
 }
 
 type config struct {
@@ -92,6 +94,7 @@ type config struct {
 	layerMountConcurrency       int
 	pprofListen                 string
 	onReady                     func()
+	pageCacheUDS                string
 }
 
 type serviceInfo struct {
@@ -205,6 +208,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		layerMountConcurrency:       userCfg.LayerMountConcurrency,
 		pprofListen:                 strings.TrimSpace(userCfg.PprofListen),
 		onReady:                     userCfg.OnReady,
+		pageCacheUDS:                strings.TrimSpace(userCfg.PageCacheUDS),
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -352,6 +356,17 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	}
 	logTiming("prepare_layers_root_dir", mkdirLayersRootStarted)
 
+	var cacheClient *pagecache.Client
+	if cfg.pageCacheUDS != "" {
+		var cacheErr error
+		cacheClient, cacheErr = pagecache.NewClient(cfg.pageCacheUDS)
+		if cacheErr != nil {
+			return fmt.Errorf("connect page cache daemon at %s: %w", cfg.pageCacheUDS, cacheErr)
+		}
+		defer cacheClient.Close()
+		log.Printf("page cache client connected: %s", cfg.pageCacheUDS)
+	}
+
 	type mountedLayer struct {
 		digest string
 		dir    string
@@ -457,7 +472,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
 
 			layerFuseMountStarted := time.Now()
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, cacheClient)
 			if err != nil {
 				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
@@ -1068,8 +1083,13 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
-	root := layerfuse.NewRoot(reader)
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheClient *pagecache.Client) (*fuse.Server, error) {
+	var root *layerfuse.DirNode
+	if cacheClient != nil {
+		root = layerfuse.NewRootWithPageCache(reader, cacheClient)
+	} else {
+		root = layerfuse.NewRoot(reader)
+	}
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
 	negativeTimeout := 5 * time.Second

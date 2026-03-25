@@ -12,27 +12,36 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/reyoung/afs/pkg/layerformat"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 // NewRoot builds a read-only inode tree backed by layerformat.Reader.
 func NewRoot(r *layerformat.Reader) *DirNode {
-	t := buildTree(r)
+	t := buildTree(r, nil)
+	return &DirNode{tree: t, relPath: ""}
+}
+
+// NewRootWithPageCache builds a read-only inode tree with page cache support.
+func NewRootWithPageCache(r *layerformat.Reader, cacheClient *pagecache.Client) *DirNode {
+	t := buildTree(r, cacheClient)
 	return &DirNode{tree: t, relPath: ""}
 }
 
 type tree struct {
-	reader   *layerformat.Reader
-	entries  map[string]layerformat.Entry
-	children map[string][]string
-	kinds    map[string]uint32
+	reader      *layerformat.Reader
+	cacheClient *pagecache.Client
+	entries     map[string]layerformat.Entry
+	children    map[string][]string
+	kinds       map[string]uint32
 }
 
-func buildTree(r *layerformat.Reader) *tree {
+func buildTree(r *layerformat.Reader, cacheClient *pagecache.Client) *tree {
 	t := &tree{
-		reader:   r,
-		entries:  make(map[string]layerformat.Entry),
-		children: make(map[string][]string),
-		kinds:    make(map[string]uint32),
+		reader:      r,
+		cacheClient: cacheClient,
+		entries:     make(map[string]layerformat.Entry),
+		children:    make(map[string][]string),
+		kinds:       make(map[string]uint32),
 	}
 	seenChild := make(map[string]map[string]struct{})
 
@@ -171,18 +180,21 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 			section = layerformat.FileSection{}
 		}
 		node := &FileNode{
-			entry:   e,
-			section: section,
+			entry:       e,
+			section:     section,
+			cacheClient: d.tree.cacheClient,
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
 }
 
 // FileNode is a read-only regular file backed by a direct archive section.
+// When cacheClient is set, reads go through the page cache for cross-process sharing.
 type FileNode struct {
 	fs.Inode
-	entry   layerformat.Entry
-	section layerformat.FileSection
+	entry       layerformat.Entry
+	section     layerformat.FileSection
+	cacheClient *pagecache.Client
 }
 
 var _ = (fs.NodeOpener)((*FileNode)(nil))
@@ -213,6 +225,18 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 		return fuse.ReadResultData(nil), 0
 	}
 	buf := dest[:remain]
+
+	// If page cache client is available, use CachedReaderAt for cross-process caching.
+	if f.cacheClient != nil && f.entry.Digest != "" {
+		cachedRA := pagecache.NewCachedReaderAt(&f.section, f.cacheClient, f.entry.Digest, fileSize)
+		n, err := cachedRA.ReadAt(buf, off)
+		if err != nil && err != io.EOF {
+			return nil, syscall.EIO
+		}
+		return fuse.ReadResultData(buf[:n]), 0
+	}
+
+	// Direct read (no page cache).
 	n, err := f.section.ReadAt(buf, off)
 	if err != nil && err != io.EOF {
 		return nil, syscall.EIO

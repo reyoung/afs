@@ -41,6 +41,7 @@ func main() {
 	var mountPprofListen string
 	var fuseMaxReadAhead string
 	var pprofListen string
+	var pageCacheUDS string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
@@ -63,6 +64,7 @@ func main() {
 	flag.StringVar(&mountPprofListen, "mount-pprof-listen", "", "optional HTTP listen address for afs_mount pprof")
 	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes for afs_mount, e.g. 8M, 16M, 32MiB")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
+	flag.StringVar(&pageCacheUDS, "page-cache-uds", "", "page cache daemon UDS path for afs_mount")
 	flag.Parse()
 
 	fuseMaxReadAheadBytes, err := bytesize.Parse(fuseMaxReadAhead)
@@ -94,6 +96,7 @@ func main() {
 		LayerMountConcurrency:       layerMountConcurrency,
 		MountPprofListen:            mountPprofListen,
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
+		PageCacheUDS:                pageCacheUDS,
 	})
 
 	grpcServer := grpc.NewServer()

@@ -30,6 +30,7 @@ import (
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 type config struct {
@@ -54,6 +55,7 @@ type config struct {
 	keepWorkDir           bool
 	layerMountConcurrency int
 	pprofListen           string
+	pageCacheUDS          string
 }
 
 type serviceInfo struct {
@@ -114,6 +116,7 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.keepWorkDir, "keep-work-dir", false, "keep work directory after exit")
 	flag.IntVar(&cfg.layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.StringVar(&cfg.pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6065")
+	flag.StringVar(&cfg.pageCacheUDS, "page-cache-uds", "", "page cache daemon UDS path (empty = disabled)")
 	flag.Parse()
 
 	if strings.TrimSpace(cfg.mountpoint) == "" {
@@ -265,7 +268,7 @@ func runImageMode(discoveryClient discoverypb.ServiceDiscoveryClient, cfg config
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}
 				return
 			}
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, nil)
 			if err != nil {
 				stop.Store(true)
 				resultCh <- mountResult{idx: i, err: fmt.Errorf("mount layer %s: %w", digest, err)}
@@ -554,8 +557,13 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64) (*fuse.Server, error) {
-	root := layerfuse.NewRoot(reader)
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheClient *pagecache.Client) (*fuse.Server, error) {
+	var root *layerfuse.DirNode
+	if cacheClient != nil {
+		root = layerfuse.NewRootWithPageCache(reader, cacheClient)
+	} else {
+		root = layerfuse.NewRoot(reader)
+	}
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
 	negativeTimeout := 5 * time.Second

@@ -55,6 +55,7 @@ type Config struct {
 	LayerMountConcurrency       int
 	MountPprofListen            string
 	FUSEMaxReadAheadBytes       int64
+	PageCacheUDS                string
 }
 
 type Service struct {
@@ -83,6 +84,7 @@ type Service struct {
 	layerMountConcurrency       int
 	mountPprofListen            string
 	fuseMaxReadAheadBytes       int64
+	pageCacheUDS                string
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
@@ -107,6 +109,7 @@ func NewService(cfg Config) *Service {
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
 		mountPprofListen:            strings.TrimSpace(cfg.MountPprofListen),
 		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
+		pageCacheUDS:                strings.TrimSpace(cfg.PageCacheUDS),
 	}
 	if s.mountBinary == "" {
 		s.mountBinary = "afs_mount"
@@ -458,6 +461,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		LayerMountConcurrency: s.layerMountConcurrency,
 		PprofListen:           s.mountPprofListen,
 		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
+		PageCacheUDS:          s.pageCacheUDS,
 	}
 	mountArgs := []string{
 		"-mountpoint", sess.mountpoint,
@@ -495,6 +499,9 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 	if fuseMaxReadAheadBytes > 0 {
 		mountArgs = append(mountArgs, "-fuse-max-read-ahead", strconv.FormatInt(fuseMaxReadAheadBytes, 10))
+	}
+	if s.pageCacheUDS != "" {
+		mountArgs = append(mountArgs, "-page-cache-uds", s.pageCacheUDS)
 	}
 
 	mountWait := make(chan error, 1)
