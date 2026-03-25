@@ -454,6 +454,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		PprofListen:           s.mountPprofListen,
 		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
 		PageCacheStore:          s.pageCacheStore,
+		HoldReaper:              HoldReaper,
 	}
 	mountWait := make(chan error, 1)
 	readyCh := make(chan struct{}, 1)

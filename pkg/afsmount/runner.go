@@ -69,6 +69,7 @@ type Config struct {
 	PprofListen                 string
 	OnReady                     func()
 	PageCacheStore              *pagecache.Store
+	HoldReaper                  func() func() // pause child reaper during fusermount3 subprocess
 }
 
 type config struct {
@@ -95,6 +96,7 @@ type config struct {
 	pprofListen                 string
 	onReady                     func()
 	pageCacheStore              *pagecache.Store
+	holdReaper                  func() func()
 }
 
 type serviceInfo struct {
@@ -209,6 +211,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		pprofListen:                 strings.TrimSpace(userCfg.PprofListen),
 		onReady:                     userCfg.OnReady,
 		pageCacheStore:              userCfg.PageCacheStore,
+		holdReaper:                  userCfg.HoldReaper,
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -467,7 +470,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
 
 			layerFuseMountStarted := time.Now()
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, cacheStore)
+			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, cacheStore, cfg.holdReaper)
 			if err != nil {
 				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
@@ -1078,7 +1081,7 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheStore *pagecache.Store) (*fuse.Server, error) {
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheStore *pagecache.Store, holdReaper func() func()) (*fuse.Server, error) {
 	var root *layerfuse.DirNode
 	if cacheStore != nil {
 		root = layerfuse.NewRootWithPageCache(reader, cacheStore)
@@ -1088,6 +1091,13 @@ func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDiges
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
 	negativeTimeout := 5 * time.Second
+	// Hold the child reaper while fusefs.Mount spawns fusermount3 subprocess.
+	// Without this, the reaper's Wait4(-1) can steal the fusermount3 child
+	// before go-fuse's exec.Cmd.Wait() runs, causing "waitid: no child processes".
+	var releaseReaper func()
+	if holdReaper != nil {
+		releaseReaper = holdReaper()
+	}
 	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{
 		EntryTimeout:    &entryTimeout,
 		AttrTimeout:     &attrTimeout,
@@ -1101,6 +1111,9 @@ func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDiges
 			MaxReadAhead: int(fuseMaxReadAheadBytes),
 		},
 	})
+	if releaseReaper != nil {
+		releaseReaper()
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
 			return nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
