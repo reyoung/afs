@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -16,29 +17,33 @@ import (
 )
 
 // NewRoot builds a read-only inode tree backed by layerformat.Reader.
-func NewRoot(r *layerformat.Reader) *DirNode {
-	t := buildTree(r, nil)
-	return &DirNode{tree: t, relPath: ""}
+func NewRoot(r *layerformat.Reader) (*DirNode, *FuseStats) {
+	stats := &FuseStats{}
+	t := buildTree(r, nil, stats)
+	return &DirNode{tree: t, relPath: ""}, stats
 }
 
 // NewRootWithPageCache builds a read-only inode tree with page cache support.
-func NewRootWithPageCache(r *layerformat.Reader, store *pagecache.Store) *DirNode {
-	t := buildTree(r, store)
-	return &DirNode{tree: t, relPath: ""}
+func NewRootWithPageCache(r *layerformat.Reader, store *pagecache.Store) (*DirNode, *FuseStats) {
+	stats := &FuseStats{}
+	t := buildTree(r, store, stats)
+	return &DirNode{tree: t, relPath: ""}, stats
 }
 
 type tree struct {
 	reader   *layerformat.Reader
 	store    *pagecache.Store
+	stats    *FuseStats
 	entries  map[string]layerformat.Entry
 	children map[string][]string
 	kinds    map[string]uint32
 }
 
-func buildTree(r *layerformat.Reader, store *pagecache.Store) *tree {
+func buildTree(r *layerformat.Reader, store *pagecache.Store, stats *FuseStats) *tree {
 	t := &tree{
 		reader:   r,
 		store:    store,
+		stats:    stats,
 		entries:  make(map[string]layerformat.Entry),
 		children: make(map[string][]string),
 		kinds:    make(map[string]uint32),
@@ -118,6 +123,8 @@ var _ = (fs.NodeReaddirer)((*DirNode)(nil))
 var _ = (fs.NodeGetattrer)((*DirNode)(nil))
 
 func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { d.tree.stats.LookupCount.Add(1); d.tree.stats.LookupNanos.Add(time.Since(t0).Nanoseconds()) }()
 	if strings.Contains(name, "/") || name == "" {
 		return nil, syscall.ENOENT
 	}
@@ -139,6 +146,8 @@ func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 }
 
 func (d *DirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { d.tree.stats.ReaddirCount.Add(1); d.tree.stats.ReaddirNanos.Add(time.Since(t0).Nanoseconds()) }()
 	names := d.tree.children[d.relPath]
 	out := make([]fuse.DirEntry, 0, len(names))
 	for _, name := range names {
@@ -156,6 +165,8 @@ func (d *DirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (d *DirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	t0 := time.Now()
+	defer func() { d.tree.stats.GetattrCount.Add(1); d.tree.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFDIR | 0o555)
 	if d.relPath != "" {
 		if e, ok := d.tree.entries[d.relPath]; ok {
@@ -171,7 +182,7 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 		node := &DirNode{tree: d.tree, relPath: e.Path}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR})
 	case layerformat.EntryTypeSymlink:
-		node := &SymlinkNode{entry: e}
+		node := &SymlinkNode{entry: e, stats: d.tree.stats}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
 	default:
 		section, err := d.tree.reader.OpenFileSection(e.Path)
@@ -183,6 +194,7 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 			entry:   e,
 			section: section,
 			store:   d.tree.store,
+			stats:   d.tree.stats,
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
@@ -195,6 +207,7 @@ type FileNode struct {
 	entry   layerformat.Entry
 	section layerformat.FileSection
 	store   *pagecache.Store
+	stats   *FuseStats
 }
 
 var _ = (fs.NodeOpener)((*FileNode)(nil))
@@ -202,6 +215,8 @@ var _ = (fs.NodeReader)((*FileNode)(nil))
 var _ = (fs.NodeGetattrer)((*FileNode)(nil))
 
 func (f *FileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { f.stats.OpenCount.Add(1); f.stats.OpenNanos.Add(time.Since(t0).Nanoseconds()) }()
 	accessMode := flags & uint32(syscall.O_ACCMODE)
 	if accessMode == syscall.O_WRONLY || accessMode == syscall.O_RDWR {
 		return nil, 0, syscall.EROFS
@@ -213,6 +228,11 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 }
 
 func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	t0 := time.Now()
+	defer func() {
+		f.stats.ReadCount.Add(1)
+		f.stats.ReadNanos.Add(time.Since(t0).Nanoseconds())
+	}()
 	fileSize := f.section.Size
 	if off >= fileSize {
 		return fuse.ReadResultData(nil), 0
@@ -232,6 +252,7 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 		if err != nil && err != io.EOF {
 			return nil, syscall.EIO
 		}
+		f.stats.ReadBytes.Add(int64(n))
 		return fuse.ReadResultData(buf[:n]), 0
 	}
 
@@ -240,10 +261,13 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 	if err != nil && err != io.EOF {
 		return nil, syscall.EIO
 	}
+	f.stats.ReadBytes.Add(int64(n))
 	return fuse.ReadResultData(buf[:n]), 0
 }
 
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	t0 := time.Now()
+	defer func() { f.stats.GetattrCount.Add(1); f.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFREG | f.entry.Mode)
 	out.Size = uint64(f.section.Size)
 	setAttrTimes(out, f.entry.ModTimeUnix)
@@ -254,16 +278,21 @@ func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 type SymlinkNode struct {
 	fs.Inode
 	entry layerformat.Entry
+	stats *FuseStats
 }
 
 var _ = (fs.NodeReadlinker)((*SymlinkNode)(nil))
 var _ = (fs.NodeGetattrer)((*SymlinkNode)(nil))
 
 func (s *SymlinkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { s.stats.ReadlinkCount.Add(1); s.stats.ReadlinkNanos.Add(time.Since(t0).Nanoseconds()) }()
 	return []byte(s.entry.SymlinkTarget), 0
 }
 
 func (s *SymlinkNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	t0 := time.Now()
+	defer func() { s.stats.GetattrCount.Add(1); s.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFLNK | 0o777)
 	out.Size = uint64(len(s.entry.SymlinkTarget))
 	setAttrTimes(out, s.entry.ModTimeUnix)

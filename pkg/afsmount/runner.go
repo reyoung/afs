@@ -369,14 +369,18 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	}
 
 	type mountedLayer struct {
-		digest string
-		dir    string
-		server *fuse.Server
-		reader *layerreader.DiscoveryBackedReaderAt
+		digest    string
+		dir       string
+		server    *fuse.Server
+		reader    *layerreader.DiscoveryBackedReaderAt
+		fuseStats *layerfuse.FuseStats
 	}
 	mounted := make([]mountedLayer, 0, len(pullResp.GetLayers()))
 	defer func() {
 		for i := len(mounted) - 1; i >= 0; i-- {
+			if mounted[i].fuseStats != nil {
+				mounted[i].fuseStats.Log(fmt.Sprintf("layer[%d:%s]", i, mounted[i].digest[:min(16, len(mounted[i].digest))]))
+			}
 			_ = mounted[i].server.Unmount()
 			mounted[i].server.Wait()
 			if mounted[i].reader != nil {
@@ -473,7 +477,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
 
 			layerFuseMountStarted := time.Now()
-			server, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, cacheStore, cfg.holdReaper)
+			server, layerFuseStats, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, cacheStore, cfg.holdReaper)
 			if err != nil {
 				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
 				_ = reader.Close()
@@ -486,10 +490,11 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 			resultCh <- mountResult{
 				idx: i,
 				layer: mountedLayer{
-					digest: digest,
-					dir:    mountDir,
-					server: server,
-					reader: reader,
+					digest:    digest,
+					dir:       mountDir,
+					server:    server,
+					reader:    reader,
+					fuseStats: layerFuseStats,
 				},
 			}
 		}()
@@ -1084,12 +1089,13 @@ func unmountCandidates(goos string, mountpoint string) [][]string {
 	}
 }
 
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheStore *pagecache.Store, holdReaper func() func()) (*fuse.Server, error) {
+func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheStore *pagecache.Store, holdReaper func() func()) (*fuse.Server, *layerfuse.FuseStats, error) {
 	var root *layerfuse.DirNode
+	var fuseStats *layerfuse.FuseStats
 	if cacheStore != nil {
-		root = layerfuse.NewRootWithPageCache(reader, cacheStore)
+		root, fuseStats = layerfuse.NewRootWithPageCache(reader, cacheStore)
 	} else {
-		root = layerfuse.NewRoot(reader)
+		root, fuseStats = layerfuse.NewRoot(reader)
 	}
 	entryTimeout := 30 * time.Second
 	attrTimeout := 30 * time.Second
@@ -1119,11 +1125,11 @@ func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDiges
 	}
 	if err != nil {
 		if strings.Contains(err.Error(), "no FUSE mount utility found") {
-			return nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
+			return nil, nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
 		}
-		return nil, fmt.Errorf("mount fuse: %w", err)
+		return nil, nil, fmt.Errorf("mount fuse: %w", err)
 	}
-	return server, nil
+	return server, fuseStats, nil
 }
 
 func mountExtraFilesystems(goos string, mountpoint string, enabled bool) ([]string, error) {
