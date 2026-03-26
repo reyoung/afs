@@ -70,7 +70,7 @@ type Config struct {
 	PageCacheStore              *pagecache.Store
 	HoldReaper                  func() func()
 	TOCCache                    *layerformat.TOCCache
-	MountMode                   string // "per-layer" (default) or "unified"
+	MountMode                   string // "per-layer" (default), "unified", or "unified-rw"
 }
 
 type config struct {
@@ -440,20 +440,26 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 
 	// Choose mounter based on config.
 	var mounter Mounter
-	if cfg.mountMode == "unified" {
+	switch cfg.mountMode {
+	case "unified":
 		mounter = &UnifiedMounter{}
-	} else {
+	case "unified-rw":
+		mounter = &UnifiedRWMounter{}
+	default:
 		mounter = &PerLayerMounter{Concurrency: cfg.layerMountConcurrency}
 	}
 
 	mountCfg := MountConfig{
-		Layers:     layerInfos,
-		WorkDir:    workDir,
-		Debug:      cfg.debug,
-		ReadAhead:  cfg.fuseMaxReadAheadBytes,
-		PageCache:  cacheStore,
-		TOCCache:   cfg.tocCache,
-		HoldReaper: cfg.holdReaper,
+		Layers:      layerInfos,
+		WorkDir:     workDir,
+		Debug:       cfg.debug,
+		ReadAhead:   cfg.fuseMaxReadAheadBytes,
+		PageCache:   cacheStore,
+		TOCCache:    cfg.tocCache,
+		HoldReaper:  cfg.holdReaper,
+		Mountpoint:  cfg.mountpoint,
+		ExtraDir:    cfg.extraDir,
+		WritableDir: filepath.Join(workDir, "writable-upper"),
 	}
 	mountResult, err := mounter.Mount(ctx, mountCfg)
 	if err != nil {
@@ -466,6 +472,31 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		return err
 	}
 	defer mountResult.Cleanup()
+
+	// DirectMount: the mounter already mounted at cfg.mountpoint with write support.
+	// Skip fuse-overlayfs entirely; just mount extra filesystems and wait.
+	if mountResult.DirectMount {
+		mountExtraFSStarted := time.Now()
+		extraMountTargets, err := mountExtraFilesystems(runtime.GOOS, cfg.mountpoint, cfg.mountProcDev)
+		if err != nil {
+			return err
+		}
+		logTiming("mount_extra_filesystems", mountExtraFSStarted, "targets="+strconv.Itoa(len(extraMountTargets)))
+		defer func() {
+			if err := unmountExtraFilesystems(runtime.GOOS, extraMountTargets); err != nil {
+				log.Printf("unmount extra filesystems failed: %v", err)
+			}
+		}()
+
+		if cfg.onReady != nil {
+			safeInvokeReadyCallback(cfg.onReady)
+		}
+
+		// Block until context is cancelled.
+		<-ctx.Done()
+		return nil
+	}
+
 	layerDirs := mountResult.LayerDirs
 
 	var writableLayerDir string

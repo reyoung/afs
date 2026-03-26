@@ -18,6 +18,9 @@ type MountResult struct {
 	Cleanup func()
 	// Stats holds per-layer or unified FUSE statistics.
 	Stats []*layerfuse.FuseStats
+	// DirectMount is true when the mounter mounted directly at the final
+	// rootfs mountpoint with write support, so the caller can skip fuse-overlayfs.
+	DirectMount bool
 }
 
 // LayerInfo describes a single OCI layer for mounting.
@@ -36,6 +39,11 @@ type MountConfig struct {
 	PageCache  *pagecache.Store
 	TOCCache   *layerformat.TOCCache
 	HoldReaper func() func()
+
+	// Fields for unified-rw mode.
+	Mountpoint  string // final rootfs mount point (for direct mount modes)
+	ExtraDir    string // extra files directory
+	WritableDir string // writable upper dir path
 }
 
 // Mounter prepares a read-only rootfs from a set of OCI layers.

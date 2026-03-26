@@ -168,6 +168,7 @@ func (d *DirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrO
 	t0 := time.Now()
 	defer func() { d.tree.stats.GetattrCount.Add(1); d.tree.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFDIR | 0o555)
+	out.Nlink = 2
 	if d.relPath != "" {
 		if e, ok := d.tree.entries[d.relPath]; ok {
 			setAttrTimes(out, e.ModTimeUnix)
@@ -269,6 +270,7 @@ func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 	t0 := time.Now()
 	defer func() { f.stats.GetattrCount.Add(1); f.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFREG | f.entry.Mode)
+	out.Nlink = 1
 	out.Size = uint64(f.section.Size)
 	setAttrTimes(out, f.entry.ModTimeUnix)
 	return 0
@@ -317,11 +319,14 @@ func setEntryOutAttr(out *fuse.EntryOut, e layerformat.Entry) {
 			mode = 0o755
 		}
 		out.Mode = uint32(syscall.S_IFDIR | mode)
+		out.Nlink = 2
 	case layerformat.EntryTypeSymlink:
 		out.Mode = uint32(syscall.S_IFLNK | 0o777)
+		out.Nlink = 1
 		out.Size = uint64(len(e.SymlinkTarget))
 	default:
 		out.Mode = uint32(syscall.S_IFREG | e.Mode)
+		out.Nlink = 1
 		out.Size = uint64(e.UncompressedSize)
 	}
 	if e.ModTimeUnix > 0 {
