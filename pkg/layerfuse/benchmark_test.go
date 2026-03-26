@@ -45,6 +45,7 @@ func benchmarkFileNodeReadWarm(b *testing.B, chunkSize int, parallel bool) {
 			UncompressedSize: benchmarkWarmFileSize,
 		},
 		section: section,
+		stats:   &FuseStats{},
 	}
 
 	b.ReportAllocs()
@@ -117,6 +118,7 @@ func TestFileNodeReadAllowsConcurrentReadAt(t *testing.T) {
 			UncompressedSize: tracker.size,
 		},
 		section: section,
+		stats:   &FuseStats{},
 	}
 
 	const workers = 8

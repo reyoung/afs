@@ -43,6 +43,7 @@ func main() {
 	var pprofListen string
 	var pageCacheDir string
 	var pageCacheMaxSize string
+	var mountMode string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&runcBinary, "runc-binary", "afs_runc", "afs_runc binary path")
@@ -65,6 +66,7 @@ func main() {
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
 	flag.StringVar(&pageCacheDir, "page-cache-dir", "", "directory for on-disk page cache (empty=disabled)")
 	flag.StringVar(&pageCacheMaxSize, "page-cache-max-size", "8GB", "max size for on-disk page cache, e.g. 8GB, 16GiB")
+	flag.StringVar(&mountMode, "mount-mode", "per-layer", "mount mode: per-layer or unified")
 	flag.Parse()
 
 	fuseMaxReadAheadBytes, err := bytesize.Parse(fuseMaxReadAhead)
@@ -111,6 +113,7 @@ func main() {
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
 		PageCacheStore:              pageCacheStore,
 		TOCCache:                    layerformat.NewTOCCache(256),
+		MountMode:                   mountMode,
 	})
 
 	grpcServer := grpc.NewServer()

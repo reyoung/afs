@@ -86,6 +86,7 @@ services:
       <<: *afs-runtime-env
       AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
       AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-false}
+      AFSLET_MOUNT_MODE: ${AFSLET_MOUNT_MODE:-per-layer}
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
@@ -102,6 +103,7 @@ services:
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
+          -mount-mode=$${AFSLET_MOUNT_MODE:-per-layer} \
           -pprof-listen=:6062 \
           -graceful-timeout=15s \
           "$${PAGE_CACHE_ARGS[@]}"

@@ -117,7 +117,7 @@ func TestFileNodeDirectRead(t *testing.T) {
 
 	node := &FileNode{
 		entry:   layerformat.Entry{Path: filePath, Type: layerformat.EntryTypeFile, Mode: 0o644},
-		section: section,
+		section: section, stats: &FuseStats{},
 	}
 
 	// Test sequential read
@@ -177,7 +177,7 @@ func TestFileNodeGetattr(t *testing.T) {
 
 	node := &FileNode{
 		entry:   layerformat.Entry{Path: filePath, Type: layerformat.EntryTypeFile, Mode: 0o644, UncompressedSize: int64(len(content))},
-		section: section,
+		section: section, stats: &FuseStats{},
 	}
 
 	out := &fuse.AttrOut{}

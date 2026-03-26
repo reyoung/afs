@@ -57,6 +57,7 @@ type Config struct {
 	FUSEMaxReadAheadBytes       int64
 	PageCacheStore              *pagecache.Store
 	TOCCache                    *layerformat.TOCCache
+	MountMode                   string
 }
 
 type Service struct {
@@ -85,6 +86,7 @@ type Service struct {
 	fuseMaxReadAheadBytes       int64
 	pageCacheStore              *pagecache.Store
 	tocCache                    *layerformat.TOCCache
+	mountMode                   string
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
@@ -109,6 +111,7 @@ func NewService(cfg Config) *Service {
 		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
 		pageCacheStore:              cfg.PageCacheStore,
 		tocCache:                    cfg.TOCCache,
+		mountMode:                   strings.TrimSpace(cfg.MountMode),
 	}
 	if s.runcBinary == "" {
 		s.runcBinary = "afs_runc"
@@ -460,6 +463,7 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		PageCacheStore:          s.pageCacheStore,
 		HoldReaper:              HoldReaper,
 		TOCCache:                s.tocCache,
+		MountMode:               s.mountMode,
 	}
 	mountWait := make(chan error, 1)
 	readyCh := make(chan struct{}, 1)

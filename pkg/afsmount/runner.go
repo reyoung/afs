@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -71,6 +70,7 @@ type Config struct {
 	PageCacheStore              *pagecache.Store
 	HoldReaper                  func() func()
 	TOCCache                    *layerformat.TOCCache
+	MountMode                   string // "per-layer" (default) or "unified"
 }
 
 type config struct {
@@ -99,6 +99,7 @@ type config struct {
 	pageCacheStore              *pagecache.Store
 	holdReaper                  func() func()
 	tocCache                    *layerformat.TOCCache
+	mountMode                   string
 }
 
 type serviceInfo struct {
@@ -215,6 +216,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		pageCacheStore:              userCfg.PageCacheStore,
 		holdReaper:                  userCfg.HoldReaper,
 		tocCache:                    userCfg.TOCCache,
+		mountMode:                   strings.TrimSpace(userCfg.MountMode),
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -243,6 +245,9 @@ func normalizeConfig(userCfg Config) (config, error) {
 	}
 	if !cfg.grpcInsecure {
 		cfg.grpcInsecure = true
+	}
+	if cfg.mountMode == "" {
+		cfg.mountMode = "per-layer"
 	}
 
 	if cfg.mountpoint == "" {
@@ -355,180 +360,113 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	}
 	defer cleanupWorkDir()
 
-	layersRoot := filepath.Join(workDir, "layers")
-	mkdirLayersRootStarted := time.Now()
-	if err := os.MkdirAll(layersRoot, 0o755); err != nil {
-		return fmt.Errorf("create layer work dir: %w", err)
-	}
-	logTiming("prepare_layers_root_dir", mkdirLayersRootStarted)
-
 	var cacheStore *pagecache.Store
 	if cfg.pageCacheStore != nil {
 		cacheStore = cfg.pageCacheStore
 		log.Printf("page cache store attached (in-process)")
 	}
 
-	type mountedLayer struct {
-		digest    string
-		dir       string
-		server    *fuse.Server
-		reader    *layerreader.DiscoveryBackedReaderAt
-		fuseStats *layerfuse.FuseStats
-	}
-	mounted := make([]mountedLayer, 0, len(pullResp.GetLayers()))
-	defer func() {
-		for i := len(mounted) - 1; i >= 0; i-- {
-			if mounted[i].fuseStats != nil {
-				mounted[i].fuseStats.Log(fmt.Sprintf("layer[%d:%s]", i, mounted[i].digest[:min(16, len(mounted[i].digest))]))
-			}
-			_ = mounted[i].server.Unmount()
-			mounted[i].server.Wait()
-			if mounted[i].reader != nil {
-				_ = mounted[i].reader.Close()
-			}
-		}
-	}()
-
-	layerDirs := make([]string, 0, len(pullResp.GetLayers()))
+	// Prepare layer readers from pullResp.
 	layers := pullResp.GetLayers()
-	results := make([]mountedLayer, len(layers))
-	type mountResult struct {
-		idx   int
-		layer mountedLayer
-		err   error
-	}
-	resultCh := make(chan mountResult, len(layers))
-	sema := make(chan struct{}, effectiveLayerMountConcurrency(cfg.layerMountConcurrency, len(layers)))
-	var stop atomic.Bool
-	var wg sync.WaitGroup
-	layersPrepareStarted := time.Now()
+	layerInfos := make([]LayerInfo, len(layers))
+	layerReadersStarted := time.Now()
 	for i, layer := range layers {
-		i := i
-		layer := layer
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sema <- struct{}{}
-			defer func() { <-sema }()
-			if stop.Load() {
-				return
-			}
-			digest := layer.GetDigest()
-			layerFields := []string{
-				"index=" + strconv.Itoa(i+1),
-				"digest=" + digest,
-			}
-			layerStarted := time.Now()
-			log.Printf("[%d/%d] preparing layer digest=%s", i+1, len(layers), digest)
-			mountDir := filepath.Join(layersRoot, fmt.Sprintf("%03d_%s", i+1, sanitizeForPath(shortDigest(digest))))
-			mkdirLayerDirStarted := time.Now()
-			if err := os.MkdirAll(mountDir, 0o755); err != nil {
-				logTiming("layer_prepare_mkdir_dir", mkdirLayerDirStarted, append(layerFields, "ok=false")...)
-				stop.Store(true)
-				resultCh <- mountResult{idx: i, err: fmt.Errorf("create layer mount dir: %w", err)}
-				return
-			}
-			logTiming("layer_prepare_mkdir_dir", mkdirLayerDirStarted, append(layerFields, "ok=true")...)
+		digest := layer.GetDigest()
+		layerFields := []string{
+			"index=" + strconv.Itoa(i+1),
+			"digest=" + digest,
+		}
 
-			readerInitStarted := time.Now()
-			reader, err := layerreader.NewDiscoveryBackedLayerReader(
-				layerreader.Config{
-					DiscoveryAddr:     cfg.discoveryAddr,
-					GRPCTimeout:       cfg.grpcTimeout,
-					GRPCMaxChunk:      cfg.grpcMaxChunk,
-					GRPCInsecure:      cfg.grpcInsecure,
-					NodeID:            cfg.nodeID,
-					KnownLayerAfsSize: layer.GetAfsSize(),
-					DialGRPCAcquire: func(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error) {
-						return sharedGRPCConnCache.Acquire(addr, timeout, insecureTransport)
-					},
-					FindLayerServices: func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]layerreader.ServiceInfo, error) {
-						services, err := findLayerServicesCached(ctx, discoveryAddr, digest, timeout, insecureTransport)
-						if err != nil {
-							return nil, err
-						}
-						return toLayerReaderServices(services), nil
-					},
+		readerInitStarted := time.Now()
+		reader, err := layerreader.NewDiscoveryBackedLayerReader(
+			layerreader.Config{
+				DiscoveryAddr:     cfg.discoveryAddr,
+				GRPCTimeout:       cfg.grpcTimeout,
+				GRPCMaxChunk:      cfg.grpcMaxChunk,
+				GRPCInsecure:      cfg.grpcInsecure,
+				NodeID:            cfg.nodeID,
+				KnownLayerAfsSize: layer.GetAfsSize(),
+				DialGRPCAcquire: func(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error) {
+					return sharedGRPCConnCache.Acquire(addr, timeout, insecureTransport)
 				},
-				digest,
-				chosen.endpoint,
-				toLayerReaderServices(providers),
-			)
-			if err != nil {
-				logTiming("layer_prepare_reader_init", readerInitStarted, append(layerFields, "ok=false")...)
-				stop.Store(true)
-				resultCh <- mountResult{idx: i, err: fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)}
-				return
-			}
-			logTiming("layer_prepare_reader_init", readerInitStarted, append(layerFields, "ok=true")...)
-
-			layerformatOpenStarted := time.Now()
-			observedReader := layerreader.NewObservedReaderAt(reader, layerreader.ObserveConfig{
-				Name: "discovery:" + digest,
-			})
-			afslReader, err := layerformat.NewReaderCached(observedReader, cfg.tocCache, digest)
-			if err != nil {
-				logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=false")...)
-				_ = reader.Close()
-				stop.Store(true)
-				resultCh <- mountResult{idx: i, err: fmt.Errorf("open layer %s: %w", digest, err)}
-				return
-			}
-			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
-
-			layerFuseMountStarted := time.Now()
-			server, layerFuseStats, err := mountLayerReader(afslReader, mountDir, "discovery:"+digest, digest, cfg.debug, cfg.fuseMaxReadAheadBytes, cacheStore, cfg.holdReaper)
-			if err != nil {
-				logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=false")...)
-				_ = reader.Close()
-				stop.Store(true)
-				resultCh <- mountResult{idx: i, err: fmt.Errorf("mount layer %s: %w", digest, err)}
-				return
-			}
-			logTiming("layer_prepare_fuse_mount", layerFuseMountStarted, append(layerFields, "ok=true")...)
-			logTiming("layer_prepare_total", layerStarted, append(layerFields, "ok=true")...)
-			resultCh <- mountResult{
-				idx: i,
-				layer: mountedLayer{
-					digest:    digest,
-					dir:       mountDir,
-					server:    server,
-					reader:    reader,
-					fuseStats: layerFuseStats,
+				FindLayerServices: func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]layerreader.ServiceInfo, error) {
+					services, err := findLayerServicesCached(ctx, discoveryAddr, digest, timeout, insecureTransport)
+					if err != nil {
+						return nil, err
+					}
+					return toLayerReaderServices(services), nil
 				},
+			},
+			digest,
+			chosen.endpoint,
+			toLayerReaderServices(providers),
+		)
+		if err != nil {
+			logTiming("layer_prepare_reader_init", readerInitStarted, append(layerFields, "ok=false")...)
+			// Close any already-opened readers.
+			for j := 0; j < i; j++ {
+				if layerInfos[j].Remote != nil {
+					_ = layerInfos[j].Remote.Close()
+				}
 			}
-		}()
-	}
-	wg.Wait()
-	logTiming("layers_prepare_parallel_total", layersPrepareStarted, "layers="+strconv.Itoa(len(layers)))
-	close(resultCh)
+			return fmt.Errorf("prepare discovery-backed layer reader for %s: %w", digest, err)
+		}
+		logTiming("layer_prepare_reader_init", readerInitStarted, append(layerFields, "ok=true")...)
 
-	var mountErr error
-	for r := range resultCh {
-		if r.err != nil {
-			if mountErr == nil {
-				mountErr = r.err
+		layerformatOpenStarted := time.Now()
+		observedReader := layerreader.NewObservedReaderAt(reader, layerreader.ObserveConfig{
+			Name: "discovery:" + digest,
+		})
+		afslReader, err := layerformat.NewReaderCached(observedReader, cfg.tocCache, digest)
+		if err != nil {
+			logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=false")...)
+			_ = reader.Close()
+			for j := 0; j < i; j++ {
+				if layerInfos[j].Remote != nil {
+					_ = layerInfos[j].Remote.Close()
+				}
 			}
-			continue
+			return fmt.Errorf("open layer %s: %w", digest, err)
 		}
-		results[r.idx] = r.layer
+		logTiming("layer_prepare_open_layerformat", layerformatOpenStarted, append(layerFields, "ok=true")...)
+
+		layerInfos[i] = LayerInfo{
+			Digest: digest,
+			Reader: afslReader,
+			Remote: reader,
+		}
 	}
-	if mountErr != nil {
-		for _, m := range results {
-			if m.server != nil {
-				mounted = append(mounted, m)
+	logTiming("layer_readers_prepare_total", layerReadersStarted, "layers="+strconv.Itoa(len(layers)))
+
+	// Choose mounter based on config.
+	var mounter Mounter
+	if cfg.mountMode == "unified" {
+		mounter = &UnifiedMounter{}
+	} else {
+		mounter = &PerLayerMounter{Concurrency: cfg.layerMountConcurrency}
+	}
+
+	mountCfg := MountConfig{
+		Layers:     layerInfos,
+		WorkDir:    workDir,
+		Debug:      cfg.debug,
+		ReadAhead:  cfg.fuseMaxReadAheadBytes,
+		PageCache:  cacheStore,
+		TOCCache:   cfg.tocCache,
+		HoldReaper: cfg.holdReaper,
+	}
+	mountResult, err := mounter.Mount(ctx, mountCfg)
+	if err != nil {
+		// Close readers on mount failure.
+		for _, li := range layerInfos {
+			if li.Remote != nil {
+				_ = li.Remote.Close()
 			}
 		}
-		return mountErr
+		return err
 	}
-	for i, m := range results {
-		if m.server == nil {
-			return fmt.Errorf("layer %d mount result missing", i)
-		}
-		mounted = append(mounted, m)
-		layerDirs = append(layerDirs, m.dir)
-		log.Printf("[%d/%d] mounted layer %s at %s", i+1, len(results), m.digest, m.dir)
-	}
+	defer mountResult.Cleanup()
+	layerDirs := mountResult.LayerDirs
 
 	var writableLayerDir string
 	var writableWorkDir string
