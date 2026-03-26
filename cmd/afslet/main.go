@@ -17,12 +17,12 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/bytesize"
 	"github.com/reyoung/afs/pkg/debughttp"
+	"github.com/reyoung/afs/pkg/layerformat"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 func main() {
 	var listenAddr string
-	var mountBinary string
-	var mountInProcess bool
 	var runcBinary string
 	var runcNoPivot bool
 	var runcNoNewKeyring bool
@@ -37,21 +37,14 @@ func main() {
 	var tempDir string
 	var limitCPUCores int64
 	var limitMemoryMB int64
-	var sharedSpillCache bool
-	var sharedSpillCacheDir string
-	var sharedSpillCacheSock string
-	var sharedSpillCacheMaxBytes int64
-	var sharedSpillCacheBinary string
-	var sharedSpillCachePprofListen string
 	var layerMountConcurrency int
 	var mountPprofListen string
 	var fuseMaxReadAhead string
 	var pprofListen string
-	var formatVersion int
+	var pageCacheDir string
+	var pageCacheMaxSize string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
-	flag.StringVar(&mountBinary, "mount-binary", "afs_mount", "afs_mount binary path")
-	flag.BoolVar(&mountInProcess, "mount-in-process", false, "run mount flow in-process instead of spawning afs_mount binary")
 	flag.StringVar(&runcBinary, "runc-binary", "afs_runc", "afs_runc binary path")
 	flag.BoolVar(&runcNoPivot, "runc-no-pivot", false, "pass --no-pivot to afs_runc")
 	flag.BoolVar(&runcNoNewKeyring, "runc-no-new-keyring", false, "pass --no-new-keyring to afs_runc")
@@ -59,29 +52,39 @@ func main() {
 	flag.BoolVar(&runcNoPIDNS, "runc-no-pid-ns", false, "do not create pid namespace in afs_runc spec")
 	flag.BoolVar(&runcNoIPCNS, "runc-no-ipc-ns", false, "do not create ipc namespace in afs_runc spec")
 	flag.BoolVar(&runcNoUTSNS, "runc-no-uts-ns", false, "do not create uts namespace in afs_runc spec")
-	flag.BoolVar(&useSudo, "sudo-binaries", false, "run afs_mount/afs_runc through sudo")
+	flag.BoolVar(&useSudo, "sudo-binaries", false, "run afs_runc through sudo")
 	flag.IntVar(&tarChunk, "tar-chunk", 256*1024, "tar.gz stream chunk size in bytes")
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
 	flag.StringVar(&defaultDiscoveryAddr, "discovery-addr", "", "default discovery address used when request does not specify one")
 	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
 	flag.Int64Var(&limitCPUCores, "limit-cpu", 1, "total allocatable CPU cores for afslet admission control")
 	flag.Int64Var(&limitMemoryMB, "limit-memory-mb", 256, "total allocatable memory (MB) for afslet admission control")
-	flag.BoolVar(&sharedSpillCache, "shared-spill-cache", false, "enable shared spill cache for afs_mount")
-	flag.StringVar(&sharedSpillCacheDir, "shared-spill-cache-dir", "/var/lib/afslet/spillcache", "shared spill cache dir for afs_mount")
-	flag.StringVar(&sharedSpillCacheSock, "shared-spill-cache-sock", "", "shared spill cache socket path for afs_mount")
-	flag.Int64Var(&sharedSpillCacheMaxBytes, "shared-spill-cache-max-bytes", 10<<30, "shared spill cache max bytes for afs_mount")
-	flag.StringVar(&sharedSpillCacheBinary, "shared-spill-cache-binary", "/usr/local/bin/afs_mount_cached", "shared spill cache daemon binary path")
-	flag.StringVar(&sharedSpillCachePprofListen, "shared-spill-cache-pprof-listen", "", "optional HTTP listen address for afs_mount_cached pprof")
-	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently in afs_mount")
-	flag.StringVar(&mountPprofListen, "mount-pprof-listen", "", "optional HTTP listen address for afs_mount pprof")
-	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes for afs_mount, e.g. 8M, 16M, 32MiB")
+	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
+	flag.StringVar(&mountPprofListen, "mount-pprof-listen", "", "optional HTTP listen address for mount pprof")
+	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes, e.g. 8M, 16M, 32MiB")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
-	flag.IntVar(&formatVersion, "format-version", 2, "AFS layer format version (1=AFSLYR01, 2=AFSLYR02); default is 2")
+	flag.StringVar(&pageCacheDir, "page-cache-dir", "", "directory for on-disk page cache (empty=disabled)")
+	flag.StringVar(&pageCacheMaxSize, "page-cache-max-size", "8GB", "max size for on-disk page cache, e.g. 8GB, 16GiB")
 	flag.Parse()
 
 	fuseMaxReadAheadBytes, err := bytesize.Parse(fuseMaxReadAhead)
 	if err != nil {
 		log.Fatalf("invalid -fuse-max-read-ahead: %v", err)
+	}
+
+	var pageCacheStore *pagecache.Store
+	if pageCacheDir != "" {
+		maxBytes, parseErr := bytesize.Parse(pageCacheMaxSize)
+		if parseErr != nil {
+			log.Fatalf("invalid -page-cache-max-size: %v", parseErr)
+		}
+		var storeErr error
+		pageCacheStore, storeErr = pagecache.NewStore(pageCacheDir, maxBytes)
+		if storeErr != nil {
+			log.Fatalf("init page cache store: %v", storeErr)
+		}
+		defer pageCacheStore.Close()
+		log.Printf("page cache store initialized: dir=%s max-size=%s", pageCacheDir, pageCacheMaxSize)
 	}
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -90,8 +93,6 @@ func main() {
 	}
 
 	svc := afslet.NewService(afslet.Config{
-		MountBinary:                 mountBinary,
-		MountInProcess:              mountInProcess,
 		RuncBinary:                  runcBinary,
 		RuncNoPivot:                 runcNoPivot,
 		RuncNoNewKeyring:            runcNoNewKeyring,
@@ -105,16 +106,11 @@ func main() {
 		TempDir:                     tempDir,
 		LimitCPUCores:               limitCPUCores,
 		LimitMemoryMB:               limitMemoryMB,
-		SharedSpillCacheEnabled:     sharedSpillCache,
-		SharedSpillCacheDir:         sharedSpillCacheDir,
-		SharedSpillCacheSock:        sharedSpillCacheSock,
-		SharedSpillCacheMaxBytes:    sharedSpillCacheMaxBytes,
-		SharedSpillCacheBinaryPath:  sharedSpillCacheBinary,
-		SharedSpillCachePprofListen: sharedSpillCachePprofListen,
 		LayerMountConcurrency:       layerMountConcurrency,
 		MountPprofListen:            mountPprofListen,
 		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
-		FormatVersion:               formatVersion,
+		PageCacheStore:              pageCacheStore,
+		TOCCache:                    layerformat.NewTOCCache(256),
 	})
 
 	grpcServer := grpc.NewServer()

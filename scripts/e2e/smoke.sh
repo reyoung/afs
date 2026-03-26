@@ -249,7 +249,7 @@ detect_helm_smoke_image() {
 start_bare_mode() {
   require_cmd bash
 
-  mkdir -p "${LOG_DIR}/bare-cache" "${LOG_DIR}/bare-temp" "${LOG_DIR}/bare-spillcache"
+  mkdir -p "${LOG_DIR}/bare-cache" "${LOG_DIR}/bare-temp"
 
   start_local_process discovery \
     "${DIST_DIR}/afs_discovery_grpcd" \
@@ -272,10 +272,7 @@ start_bare_mode() {
     -discovery-addr "127.0.0.1:${DISCOVERY_PORT}" \
     -temp-dir "${LOG_DIR}/bare-temp" \
     -limit-cpu 4 \
-    -limit-memory-mb 4096 \
-    -shared-spill-cache \
-    -shared-spill-cache-dir "${LOG_DIR}/bare-spillcache" \
-    -shared-spill-cache-binary "${DIST_DIR}/afs_mount_cached"
+    -limit-memory-mb 4096
   wait_for_tcp 127.0.0.1 "${AFSLET_PORT}" afslet
 
   start_local_process afs_proxy \

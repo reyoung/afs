@@ -125,7 +125,7 @@ func TestRunCommandRequiresExplicitCPUAndMemory(t *testing.T) {
 func TestRunCommandInProcessMountRunnerError(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(Config{MountInProcess: true, LimitCPUCores: 8, LimitMemoryMB: 2048})
+	svc := NewService(Config{LimitCPUCores: 8, LimitMemoryMB: 2048})
 	called := make(chan struct{}, 1)
 	svc.mountRunner = func(ctx context.Context, _ afsmount.Config) error {
 		select {
@@ -164,7 +164,6 @@ func TestRunCommandRequestFuseReadAheadOverridesServiceDefault(t *testing.T) {
 	t.Parallel()
 
 	svc := NewService(Config{
-		MountInProcess:        true,
 		LimitCPUCores:         8,
 		LimitMemoryMB:         2048,
 		MountPprofListen:      "127.0.0.1:6065",

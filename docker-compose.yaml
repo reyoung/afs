@@ -1,5 +1,4 @@
 x-afs-runtime-env: &afs-runtime-env
-  AFS_FORMAT_VERSION: ${AFS_FORMAT_VERSION:-2}
   AFS_DISCOVERY_READER_LOG_INTERVAL: ${AFS_DISCOVERY_READER_LOG_INTERVAL:-0s}
   AFS_DISCOVERY_READER_LOG_MIN_CALLS: ${AFS_DISCOVERY_READER_LOG_MIN_CALLS:-128}
   AFS_DISCOVERY_READER_LOG_MIN_BYTES: ${AFS_DISCOVERY_READER_LOG_MIN_BYTES:-33554432}
@@ -48,7 +47,6 @@ x-layerstore-common: &layerstore-common
         -node-id="$${LAYERSTORE_NODE_ID}" \
         -discovery-endpoint=discovery:60051 \
         -pprof-listen="$${LAYERSTORE_PPROF_LISTEN}" \
-        -format-version=$${AFS_FORMAT_VERSION:-2} \
         "$${AUTH_ARGS[@]}"
   networks:
     - afsnet
@@ -58,10 +56,17 @@ x-afslet-common: &afslet-common
   restart: unless-stopped
   cgroup: host
   depends_on:
-    - discovery
-    - layerstore
-    - layerstore2
-    - layerstore3
+    discovery:
+      condition: service_started
+    layerstore:
+      condition: service_started
+    layerstore2:
+      condition: service_started
+    layerstore3:
+      condition: service_started
+    page_cache:
+      condition: service_started
+      required: false
   privileged: true
   cap_add:
     - SYS_ADMIN
@@ -72,7 +77,7 @@ x-afslet-common: &afslet-common
   environment:
     <<: *afs-runtime-env
     AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
-    AFSLET_MOUNT_IN_PROCESS: ${AFSLET_MOUNT_IN_PROCESS:-false}
+    AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-true}
   entrypoint: ["/bin/bash", "-lc"]
 
 services:
@@ -112,11 +117,37 @@ services:
         exec /usr/local/bin/afs_discovery_grpcd \
           -listen=:60051 \
           -pprof-listen=:6064 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           "$${AUTH_ARGS[@]}"
     ports:
       - "60051:60051"
       - "16064:6064"
+    networks:
+      - afsnet
+
+  page_cache:
+    <<: *afs-runtime
+    container_name: afs-page-cache
+    restart: unless-stopped
+    profiles:
+      - page-cache
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        exec /usr/local/bin/afs_page_cached \
+          -cache-dir=/var/cache/afs-page-cache \
+          -max-cache-size=$${AFS_PAGE_CACHE_MAX_SIZE:-8GB} \
+          -uds-path=/var/run/afs-page-cache/page-cache.sock \
+          -lease-timeout=30s \
+          -pprof-listen=:6090
+    environment:
+      <<: *afs-runtime-env
+      AFS_PAGE_CACHE_MAX_SIZE: ${AFS_PAGE_CACHE_MAX_SIZE:-8GB}
+    volumes:
+      - page_cache_data:/var/cache/afs-page-cache
+      - page_cache_sock:/var/run/afs-page-cache
+    ports:
+      - "16090:6090"
     networks:
       - afsnet
 
@@ -168,32 +199,28 @@ services:
     volumes:
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
-      - afslet_spillcache:/var/lib/afslet/spillcache
+      - page_cache_sock:/var/run/afs-page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
         set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+        fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
-          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
-          -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
-          -shared-spill-cache \
-          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
-          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
-          -shared-spill-cache-max-bytes=10737418240 \
-          -shared-spill-cache-pprof-listen=:6061 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6062 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
-          -graceful-timeout=15s
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
     ports:
       - "61051:61051"
-      - "16061:6061"
       - "16062:6062"
     networks:
       afsnet:
@@ -206,32 +233,28 @@ services:
     volumes:
       - afslet_tmp_2:/var/lib/afslet/tmp
       - afslet_work_2:/var/lib/afslet/work
-      - afslet_spillcache_2:/var/lib/afslet/spillcache
+      - page_cache_sock:/var/run/afs-page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
         set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+        fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
-          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
-          -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
-          -shared-spill-cache \
-          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
-          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
-          -shared-spill-cache-max-bytes=10737418240 \
-          -shared-spill-cache-pprof-listen=:6071 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6072 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
-          -graceful-timeout=15s
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
     ports:
       - "61052:61051"
-      - "16071:6071"
       - "16072:6072"
     networks:
       afsnet:
@@ -244,32 +267,28 @@ services:
     volumes:
       - afslet_tmp_3:/var/lib/afslet/tmp
       - afslet_work_3:/var/lib/afslet/work
-      - afslet_spillcache_3:/var/lib/afslet/spillcache
+      - page_cache_sock:/var/run/afs-page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
         set -euo pipefail
+        PAGE_CACHE_ARGS=()
+        if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
+          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+        fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
-          -mount-in-process=$${AFSLET_MOUNT_IN_PROCESS:-false} \
-          -mount-binary=/usr/local/bin/afs_mount \
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
-          -shared-spill-cache \
-          -shared-spill-cache-dir=/var/lib/afslet/spillcache \
-          -shared-spill-cache-binary=/usr/local/bin/afs_mount_cached \
-          -shared-spill-cache-max-bytes=10737418240 \
-          -shared-spill-cache-pprof-listen=:6081 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -pprof-listen=:6082 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
-          -graceful-timeout=15s
+          -graceful-timeout=15s \
+          "$${PAGE_CACHE_ARGS[@]}"
     ports:
       - "61053:61051"
-      - "16081:6081"
       - "16082:6082"
     networks:
       afsnet:
@@ -293,7 +312,6 @@ services:
           -afslet-target=afslet:61051 \
           -discovery-target=discovery:60051 \
           -proxy-peers-target=afs_proxy:62052 \
-          -format-version=$${AFS_FORMAT_VERSION:-2} \
           -dispatch-backoff=50ms
     ports:
       - "62051:62051"
@@ -310,10 +328,9 @@ volumes:
   layerstore_cache_3:
   afslet_tmp:
   afslet_work:
-  afslet_spillcache:
   afslet_tmp_2:
   afslet_work_2:
-  afslet_spillcache_2:
   afslet_tmp_3:
   afslet_work_3:
-  afslet_spillcache_3:
+  page_cache_data:
+  page_cache_sock:

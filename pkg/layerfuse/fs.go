@@ -1,92 +1,52 @@
 package layerfuse
 
 import (
-	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
-	"fmt"
 	"io"
-	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/reyoung/afs/pkg/layerformat"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 // NewRoot builds a read-only inode tree backed by layerformat.Reader.
-func NewRoot(r *layerformat.Reader) *DirNode {
-	t := buildTree(r, rootOptions{})
-	return &DirNode{tree: t, relPath: ""}
+func NewRoot(r *layerformat.Reader) (*DirNode, *FuseStats) {
+	stats := &FuseStats{}
+	t := buildTree(r, nil, stats)
+	return &DirNode{tree: t, relPath: ""}, stats
 }
 
-// NewRootWithTempDir builds a read-only inode tree and uses tempDir to spill
-// decompressed file payloads, avoiding full-file memory buffering.
-func NewRootWithTempDir(r *layerformat.Reader, tempDir string) *DirNode {
-	t := buildTree(r, rootOptions{tempDir: tempDir})
-	return &DirNode{tree: t, relPath: ""}
-}
-
-// NewRootWithOptions builds a read-only inode tree and supports spill cache knobs.
-func NewRootWithOptions(r *layerformat.Reader, tempDir string, noSpillCache bool) *DirNode {
-	t := buildTree(r, rootOptions{
-		tempDir:      tempDir,
-		noSpillCache: noSpillCache,
-	})
-	return &DirNode{tree: t, relPath: ""}
-}
-
-// NewRootWithSharedCache builds a read-only inode tree and enables shared spill cache.
-func NewRootWithSharedCache(r *layerformat.Reader, tempDir string, noSpillCache bool, layerDigest string, sharedCache SharedSpillCache) *DirNode {
-	t := buildTree(r, rootOptions{
-		tempDir:      tempDir,
-		noSpillCache: noSpillCache,
-		layerDigest:  layerDigest,
-		sharedCache:  sharedCache,
-	})
-	return &DirNode{tree: t, relPath: ""}
+// NewRootWithPageCache builds a read-only inode tree with page cache support.
+func NewRootWithPageCache(r *layerformat.Reader, store *pagecache.Store) (*DirNode, *FuseStats) {
+	stats := &FuseStats{}
+	t := buildTree(r, store, stats)
+	return &DirNode{tree: t, relPath: ""}, stats
 }
 
 type tree struct {
-	reader       *layerformat.Reader
-	entries      map[string]layerformat.Entry
-	children     map[string][]string
-	kinds        map[string]uint32
-	tempDir      string
-	noSpillCache bool
-	layerDigest  string
-	sharedCache  SharedSpillCache
+	reader   *layerformat.Reader
+	store    *pagecache.Store
+	stats    *FuseStats
+	entries  map[string]layerformat.Entry
+	children map[string][]string
+	kinds    map[string]uint32
 }
 
-type rootOptions struct {
-	tempDir      string
-	noSpillCache bool
-	layerDigest  string
-	sharedCache  SharedSpillCache
-}
-
-type SharedSpillCache interface {
-	Prepare(digest string, filePath string, fill func(w io.Writer) (int64, error)) (cachePath string, size int64, err error)
-}
-
-func buildTree(r *layerformat.Reader, opts rootOptions) *tree {
+func buildTree(r *layerformat.Reader, store *pagecache.Store, stats *FuseStats) *tree {
 	t := &tree{
-		reader:       r,
-		entries:      make(map[string]layerformat.Entry),
-		children:     make(map[string][]string),
-		kinds:        make(map[string]uint32),
-		tempDir:      strings.TrimSpace(opts.tempDir),
-		noSpillCache: opts.noSpillCache,
-		layerDigest:  strings.TrimSpace(opts.layerDigest),
-		sharedCache:  opts.sharedCache,
+		reader:   r,
+		store:    store,
+		stats:    stats,
+		entries:  make(map[string]layerformat.Entry),
+		children: make(map[string][]string),
+		kinds:    make(map[string]uint32),
 	}
 	seenChild := make(map[string]map[string]struct{})
 
@@ -163,6 +123,8 @@ var _ = (fs.NodeReaddirer)((*DirNode)(nil))
 var _ = (fs.NodeGetattrer)((*DirNode)(nil))
 
 func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { d.tree.stats.LookupCount.Add(1); d.tree.stats.LookupNanos.Add(time.Since(t0).Nanoseconds()) }()
 	if strings.Contains(name, "/") || name == "" {
 		return nil, syscall.ENOENT
 	}
@@ -184,6 +146,8 @@ func (d *DirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (
 }
 
 func (d *DirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { d.tree.stats.ReaddirCount.Add(1); d.tree.stats.ReaddirNanos.Add(time.Since(t0).Nanoseconds()) }()
 	names := d.tree.children[d.relPath]
 	out := make([]fuse.DirEntry, 0, len(names))
 	for _, name := range names {
@@ -201,6 +165,8 @@ func (d *DirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (d *DirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	t0 := time.Now()
+	defer func() { d.tree.stats.GetattrCount.Add(1); d.tree.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFDIR | 0o555)
 	if d.relPath != "" {
 		if e, ok := d.tree.entries[d.relPath]; ok {
@@ -216,44 +182,32 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 		node := &DirNode{tree: d.tree, relPath: e.Path}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR})
 	case layerformat.EntryTypeSymlink:
-		node := &SymlinkNode{entry: e}
+		node := &SymlinkNode{entry: e, stats: d.tree.stats}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
 	default:
-		node := &FileNode{
-			entry:        e,
-			reader:       d.tree.reader,
-			tempDir:      d.tree.tempDir,
-			noSpillCache: d.tree.noSpillCache,
-			layerDigest:  d.tree.layerDigest,
-			sharedCache:  d.tree.sharedCache,
+		section, err := d.tree.reader.OpenFileSection(e.Path)
+		if err != nil {
+			// Should not happen for valid archives; return a stub node.
+			section = layerformat.FileSection{}
 		}
-		// For AFSLYR02, set up direct section for random reads without spill files.
-		if d.tree.reader.FormatVersion() == layerformat.FormatV2 && e.Type == layerformat.EntryTypeFile {
-			if section, err := d.tree.reader.OpenFileSection(e.Path); err == nil {
-				node.directSection = &section
-			}
+		node := &FileNode{
+			entry:   e,
+			section: section,
+			store:   d.tree.store,
+			stats:   d.tree.stats,
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
 }
 
-// FileNode is a read-only regular file.
+// FileNode is a read-only regular file backed by a direct archive section.
+// When store is set, reads go through the in-process page cache.
 type FileNode struct {
 	fs.Inode
-	entry        layerformat.Entry
-	reader       *layerformat.Reader
-	tempDir      string
-	noSpillCache bool
-	layerDigest  string
-	sharedCache  SharedSpillCache
-
-	once sync.Once
-	file *os.File
-	size int64
-	err  error
-
-	// directSection is set for AFSLYR02 plain payloads to enable direct archive reads.
-	directSection *layerformat.FileSection
+	entry   layerformat.Entry
+	section layerformat.FileSection
+	store   *pagecache.Store
+	stats   *FuseStats
 }
 
 var _ = (fs.NodeOpener)((*FileNode)(nil))
@@ -261,6 +215,8 @@ var _ = (fs.NodeReader)((*FileNode)(nil))
 var _ = (fs.NodeGetattrer)((*FileNode)(nil))
 
 func (f *FileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { f.stats.OpenCount.Add(1); f.stats.OpenNanos.Add(time.Since(t0).Nanoseconds()) }()
 	accessMode := flags & uint32(syscall.O_ACCMODE)
 	if accessMode == syscall.O_WRONLY || accessMode == syscall.O_RDWR {
 		return nil, 0, syscall.EROFS
@@ -272,203 +228,71 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 }
 
 func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	// AFSLYR02 direct read path: read from archive without spill file.
-	if f.directSection != nil {
-		fileSize := f.directSection.Size
-		if off >= fileSize {
-			return fuse.ReadResultData(nil), 0
-		}
-		remain := fileSize - off
-		if remain > int64(len(dest)) {
-			remain = int64(len(dest))
-		}
-		if remain <= 0 {
-			return fuse.ReadResultData(nil), 0
-		}
-		buf := dest[:remain]
-		n, err := f.directSection.ReadAt(buf, off)
-		if err != nil && err != io.EOF {
-			return nil, syscall.EIO
-		}
-		return fuse.ReadResultData(buf[:n]), 0
-	}
-
-	// AFSLYR01 spill file path.
-	if errno := f.ensurePrepared(); errno != 0 {
-		return nil, errno
-	}
-	if off >= f.size {
+	t0 := time.Now()
+	defer func() {
+		f.stats.ReadCount.Add(1)
+		f.stats.ReadNanos.Add(time.Since(t0).Nanoseconds())
+	}()
+	fileSize := f.section.Size
+	if off >= fileSize {
 		return fuse.ReadResultData(nil), 0
 	}
-	remain := int(f.size - off)
-	if remain > len(dest) {
-		remain = len(dest)
+	remain := fileSize - off
+	if remain > int64(len(dest)) {
+		remain = int64(len(dest))
 	}
 	if remain <= 0 {
 		return fuse.ReadResultData(nil), 0
 	}
-	// Let the kernel read directly from spill fd to avoid per-read copy/allocation.
-	return fuse.ReadResultFd(f.file.Fd(), off, remain), 0
+	buf := dest[:remain]
+
+	// If page cache store is available, use ReadThrough for in-process caching.
+	if f.store != nil && f.entry.Digest != "" {
+		n, err := f.store.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
+		if err != nil && err != io.EOF {
+			return nil, syscall.EIO
+		}
+		f.stats.ReadBytes.Add(int64(n))
+		return fuse.ReadResultData(buf[:n]), 0
+	}
+
+	// Direct read (no page cache).
+	n, err := f.section.ReadAt(buf, off)
+	if err != nil && err != io.EOF {
+		return nil, syscall.EIO
+	}
+	f.stats.ReadBytes.Add(int64(n))
+	return fuse.ReadResultData(buf[:n]), 0
 }
 
 func (f *FileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	t0 := time.Now()
+	defer func() { f.stats.GetattrCount.Add(1); f.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFREG | f.entry.Mode)
-	if f.directSection != nil {
-		out.Size = uint64(f.directSection.Size)
-	} else if f.entry.UncompressedSize > 0 {
-		out.Size = uint64(f.entry.UncompressedSize)
-	} else {
-		if errno := f.ensurePrepared(); errno != 0 {
-			return errno
-		}
-		out.Size = uint64(f.size)
-	}
+	out.Size = uint64(f.section.Size)
 	setAttrTimes(out, f.entry.ModTimeUnix)
 	return 0
-}
-
-func (f *FileNode) ensurePrepared() syscall.Errno {
-	f.once.Do(func() {
-		f.file, f.size, f.err = f.prepareTempFile()
-	})
-	if f.err != nil {
-		return syscall.EIO
-	}
-	return 0
-}
-
-func (f *FileNode) prepareTempFile() (*os.File, int64, error) {
-	if !f.noSpillCache && f.sharedCache != nil && f.layerDigest != "" {
-		p, size, err := f.sharedCache.Prepare(f.layerDigest, f.entry.Path, func(w io.Writer) (int64, error) {
-			bw := bufio.NewWriterSize(w, 1<<20)
-			n, copyErr := f.reader.CopyFile(f.entry.Path, bw)
-			if copyErr != nil {
-				return n, copyErr
-			}
-			if flushErr := bw.Flush(); flushErr != nil {
-				return n, flushErr
-			}
-			return n, nil
-		})
-		if err == nil {
-			fd, openErr := os.Open(p)
-			if openErr != nil {
-				// Shared cache entry can be evicted between Prepare and Open.
-				// Fall back to local spill path instead of surfacing transient open errors.
-			} else {
-				return fd, size, nil
-			}
-		}
-	}
-
-	tmpDir := f.tempDir
-	if tmpDir == "" {
-		tmpDir = filepath.Join(os.TempDir(), "afs-fuse-spill")
-	}
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return nil, 0, fmt.Errorf("create temp dir: %w", err)
-	}
-
-	if f.noSpillCache {
-		return f.prepareTempFileNoCache(tmpDir)
-	}
-
-	finalPath := filepath.Join(tmpDir, spillFileName(f.entry))
-	if st, err := os.Stat(finalPath); err == nil {
-		fd, err := os.Open(finalPath)
-		if err != nil {
-			return nil, 0, err
-		}
-		return fd, st.Size(), nil
-	}
-
-	unlock := lockSpillPath(finalPath)
-	defer unlock()
-	if st, err := os.Stat(finalPath); err == nil {
-		fd, err := os.Open(finalPath)
-		if err != nil {
-			return nil, 0, err
-		}
-		return fd, st.Size(), nil
-	}
-
-	tmp, err := os.CreateTemp(tmpDir, "afs-file-*")
-	if err != nil {
-		return nil, 0, fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	n, err := f.copyToTemp(tmp)
-	if err != nil {
-		return nil, 0, err
-	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return nil, 0, err
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return nil, 0, fmt.Errorf("seek temp file: %w", err)
-	}
-	return tmp, n, nil
-}
-
-func (f *FileNode) prepareTempFileNoCache(tmpDir string) (*os.File, int64, error) {
-	tmp, err := os.CreateTemp(tmpDir, "afs-file-*")
-	if err != nil {
-		return nil, 0, fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		if err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	n, err := f.copyToTemp(tmp)
-	if err != nil {
-		return nil, 0, err
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return nil, 0, fmt.Errorf("seek temp file: %w", err)
-	}
-	// Keep only fd-backed temp storage; avoid on-disk spill file accumulation.
-	if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, 0, err
-	}
-	return tmp, n, nil
-}
-
-func (f *FileNode) copyToTemp(tmp *os.File) (int64, error) {
-	w := bufio.NewWriterSize(tmp, 1<<20)
-	n, err := f.reader.CopyFile(f.entry.Path, w)
-	if err != nil {
-		return n, err
-	}
-	if err := w.Flush(); err != nil {
-		return n, err
-	}
-	return n, nil
 }
 
 // SymlinkNode is a read-only symlink.
 type SymlinkNode struct {
 	fs.Inode
 	entry layerformat.Entry
+	stats *FuseStats
 }
 
 var _ = (fs.NodeReadlinker)((*SymlinkNode)(nil))
 var _ = (fs.NodeGetattrer)((*SymlinkNode)(nil))
 
 func (s *SymlinkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { s.stats.ReadlinkCount.Add(1); s.stats.ReadlinkNanos.Add(time.Since(t0).Nanoseconds()) }()
 	return []byte(s.entry.SymlinkTarget), 0
 }
 
 func (s *SymlinkNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	t0 := time.Now()
+	defer func() { s.stats.GetattrCount.Add(1); s.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
 	out.Mode = uint32(syscall.S_IFLNK | 0o777)
 	out.Size = uint64(len(s.entry.SymlinkTarget))
 	setAttrTimes(out, s.entry.ModTimeUnix)
@@ -506,26 +330,4 @@ func setEntryOutAttr(out *fuse.EntryOut, e layerformat.Entry) {
 		out.Mtime = ts
 		out.Ctime = ts
 	}
-}
-
-var (
-	spillLocksMu sync.Mutex
-	spillLocks   = make(map[string]*sync.Mutex)
-)
-
-func lockSpillPath(path string) func() {
-	spillLocksMu.Lock()
-	l, ok := spillLocks[path]
-	if !ok {
-		l = &sync.Mutex{}
-		spillLocks[path] = l
-	}
-	spillLocksMu.Unlock()
-	l.Lock()
-	return l.Unlock
-}
-
-func spillFileName(e layerformat.Entry) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|%d", e.Path, e.UncompressedSize, e.CompressedOffset, e.CompressedSize)))
-	return hex.EncodeToString(sum[:]) + ".spill"
 }

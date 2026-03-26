@@ -6,10 +6,24 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+// reapMu protects against the child reaper racing with exec.Cmd.Wait()
+// (e.g. fusermount3 started by go-fuse). FUSE mount holds RLock during
+// subprocess creation+wait; the reaper holds full Lock while calling Wait4(-1).
+var reapMu sync.RWMutex
+
+// HoldReaper returns a function that, when called, releases the reaper hold.
+// While held, the child reaper will not call Wait4, preventing it from
+// stealing child processes that other goroutines are waiting on.
+func HoldReaper() func() {
+	reapMu.RLock()
+	return reapMu.RUnlock
+}
 
 func StartChildReaper(logger func(string, ...any)) func() {
 	if logger == nil {
@@ -29,9 +43,13 @@ func StartChildReaper(logger func(string, ...any)) func() {
 		for {
 			select {
 			case <-sigCh:
+				reapMu.Lock()
 				reapChildren(logger)
+				reapMu.Unlock()
 			case <-done:
+				reapMu.Lock()
 				reapChildren(logger)
+				reapMu.Unlock()
 				return
 			}
 		}

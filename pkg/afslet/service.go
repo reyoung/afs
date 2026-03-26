@@ -26,6 +26,8 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsmount"
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/layerformat"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 const (
@@ -37,8 +39,6 @@ const (
 )
 
 type Config struct {
-	MountBinary                 string
-	MountInProcess              bool
 	RuncBinary                  string
 	RuncNoPivot                 bool
 	RuncNoNewKeyring            bool
@@ -52,23 +52,16 @@ type Config struct {
 	TempDir                     string
 	LimitCPUCores               int64
 	LimitMemoryMB               int64
-	SharedSpillCacheEnabled     bool
-	SharedSpillCacheDir         string
-	SharedSpillCacheSock        string
-	SharedSpillCacheMaxBytes    int64
-	SharedSpillCacheBinaryPath  string
-	SharedSpillCachePprofListen string
 	LayerMountConcurrency       int
 	MountPprofListen            string
 	FUSEMaxReadAheadBytes       int64
-	FormatVersion               int
+	PageCacheStore              *pagecache.Store
+	TOCCache                    *layerformat.TOCCache
 }
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountBinary                 string
-	mountInProcess              bool
 	mountRunner                 func(context.Context, afsmount.Config) error
 	runcBinary                  string
 	runcNoPivot                 bool
@@ -87,23 +80,16 @@ type Service struct {
 	usedCPUCores                int64
 	usedMemoryMB                int64
 	runningContainers           int64
-	sharedSpillCacheEnabled     bool
-	sharedSpillCacheDir         string
-	sharedSpillCacheSock        string
-	sharedSpillCacheMaxBytes    int64
-	sharedSpillCacheBinaryPath  string
-	sharedSpillCachePprofListen string
 	layerMountConcurrency       int
 	mountPprofListen            string
 	fuseMaxReadAheadBytes       int64
-	formatVersion               int
+	pageCacheStore              *pagecache.Store
+	tocCache                    *layerformat.TOCCache
 	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountBinary:                 strings.TrimSpace(cfg.MountBinary),
-		mountInProcess:              cfg.MountInProcess,
 		mountRunner:                 afsmount.Run,
 		runcBinary:                  strings.TrimSpace(cfg.RuncBinary),
 		runcNoPivot:                 cfg.RuncNoPivot,
@@ -118,19 +104,11 @@ func NewService(cfg Config) *Service {
 		tempDir:                     strings.TrimSpace(cfg.TempDir),
 		limitCPUCores:               cfg.LimitCPUCores,
 		limitMemoryMB:               cfg.LimitMemoryMB,
-		sharedSpillCacheEnabled:     cfg.SharedSpillCacheEnabled,
-		sharedSpillCacheDir:         strings.TrimSpace(cfg.SharedSpillCacheDir),
-		sharedSpillCacheSock:        strings.TrimSpace(cfg.SharedSpillCacheSock),
-		sharedSpillCacheMaxBytes:    cfg.SharedSpillCacheMaxBytes,
-		sharedSpillCacheBinaryPath:  strings.TrimSpace(cfg.SharedSpillCacheBinaryPath),
-		sharedSpillCachePprofListen: strings.TrimSpace(cfg.SharedSpillCachePprofListen),
 		layerMountConcurrency:       cfg.LayerMountConcurrency,
 		mountPprofListen:            strings.TrimSpace(cfg.MountPprofListen),
 		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
-		formatVersion:               cfg.FormatVersion,
-	}
-	if s.mountBinary == "" {
-		s.mountBinary = "afs_mount"
+		pageCacheStore:              cfg.PageCacheStore,
+		tocCache:                    cfg.TOCCache,
 	}
 	if s.runcBinary == "" {
 		s.runcBinary = "afs_runc"
@@ -143,9 +121,6 @@ func NewService(cfg Config) *Service {
 	}
 	if s.limitMemoryMB <= 0 {
 		s.limitMemoryMB = defaultMemoryMB
-	}
-	if s.sharedSpillCacheMaxBytes <= 0 {
-		s.sharedSpillCacheMaxBytes = 10 << 30
 	}
 	if s.layerMountConcurrency <= 0 {
 		s.layerMountConcurrency = 1
@@ -467,159 +442,65 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 
 	mountCfg := afsmount.Config{
-		Mountpoint:                  sess.mountpoint,
-		WorkDir:                     sess.workDir,
-		ExtraDir:                    sess.extraDir,
-		MountProcDev:                false,
-		Image:                       image,
-		Tag:                         tag,
-		DiscoveryAddr:               discoveryAddr,
-		NodeID:                      strings.TrimSpace(start.GetNodeId()),
-		PlatformOS:                  strings.TrimSpace(start.GetPlatformOs()),
-		PlatformArch:                strings.TrimSpace(start.GetPlatformArch()),
-		PlatformVariant:             strings.TrimSpace(start.GetPlatformVariant()),
-		ForceLocalFetch:             start.GetForceLocalFetch(),
-		SharedSpillCacheEnabled:     s.sharedSpillCacheEnabled,
-		SharedSpillCacheDir:         s.sharedSpillCacheDir,
-		SharedSpillCacheSock:        s.sharedSpillCacheSock,
-		SharedSpillCacheMaxBytes:    s.sharedSpillCacheMaxBytes,
-		SharedSpillCacheBinaryPath:  s.sharedSpillCacheBinaryPath,
-		SharedSpillCachePprofListen: s.sharedSpillCachePprofListen,
-		LayerMountConcurrency:       s.layerMountConcurrency,
-		PprofListen:                 s.mountPprofListen,
-		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
-		FormatVersion:               s.formatVersion,
+		Mountpoint:            sess.mountpoint,
+		WorkDir:               sess.workDir,
+		ExtraDir:              sess.extraDir,
+		MountProcDev:          false,
+		Image:                 image,
+		Tag:                   tag,
+		DiscoveryAddr:         discoveryAddr,
+		NodeID:                strings.TrimSpace(start.GetNodeId()),
+		PlatformOS:            strings.TrimSpace(start.GetPlatformOs()),
+		PlatformArch:          strings.TrimSpace(start.GetPlatformArch()),
+		PlatformVariant:       strings.TrimSpace(start.GetPlatformVariant()),
+		ForceLocalFetch:       start.GetForceLocalFetch(),
+		LayerMountConcurrency: s.layerMountConcurrency,
+		PprofListen:           s.mountPprofListen,
+		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
+		PageCacheStore:          s.pageCacheStore,
+		HoldReaper:              HoldReaper,
+		TOCCache:                s.tocCache,
 	}
-	mountArgs := []string{
-		"-mountpoint", sess.mountpoint,
-		"-work-dir", sess.workDir,
-		"-extra-dir", sess.extraDir,
-		"-mount-proc-dev=false",
-		"-image", image,
-	}
-	if strings.TrimSpace(tag) != "" {
-		mountArgs = append(mountArgs, "-tag", tag)
-	}
-	if discoveryAddr != "" {
-		mountArgs = append(mountArgs, "-discovery-addr", discoveryAddr)
-	}
-	if start.GetForceLocalFetch() {
-		mountArgs = append(mountArgs, "-force-local-fetch")
-	}
-	if mountCfg.NodeID != "" {
-		mountArgs = append(mountArgs, "-node-id", mountCfg.NodeID)
-	}
-	if mountCfg.PlatformOS != "" {
-		mountArgs = append(mountArgs, "-platform-os", mountCfg.PlatformOS)
-	}
-	if mountCfg.PlatformArch != "" {
-		mountArgs = append(mountArgs, "-platform-arch", mountCfg.PlatformArch)
-	}
-	if mountCfg.PlatformVariant != "" {
-		mountArgs = append(mountArgs, "-platform-variant", mountCfg.PlatformVariant)
-	}
-	if s.sharedSpillCacheEnabled {
-		mountArgs = append(mountArgs, "-shared-spill-cache")
-		if s.sharedSpillCacheDir != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-dir", s.sharedSpillCacheDir)
-		}
-		if s.sharedSpillCacheSock != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-sock", s.sharedSpillCacheSock)
-		}
-		if s.sharedSpillCacheMaxBytes > 0 {
-			mountArgs = append(mountArgs, "-shared-spill-cache-max-bytes", strconv.FormatInt(s.sharedSpillCacheMaxBytes, 10))
-		}
-		if s.sharedSpillCacheBinaryPath != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-binary", s.sharedSpillCacheBinaryPath)
-		}
-		if s.sharedSpillCachePprofListen != "" {
-			mountArgs = append(mountArgs, "-shared-spill-cache-pprof-listen", s.sharedSpillCachePprofListen)
-		}
-	}
-	if s.layerMountConcurrency > 0 {
-		mountArgs = append(mountArgs, "-layer-mount-concurrency", strconv.Itoa(s.layerMountConcurrency))
-	}
-	if s.mountPprofListen != "" {
-		mountArgs = append(mountArgs, "-pprof-listen", s.mountPprofListen)
-	}
-	if fuseMaxReadAheadBytes > 0 {
-		mountArgs = append(mountArgs, "-fuse-max-read-ahead", strconv.FormatInt(fuseMaxReadAheadBytes, 10))
-	}
-
 	mountWait := make(chan error, 1)
-	var mountReady <-chan struct{}
-	var mountStdout *processLogWriter
-	var mountStderr *processLogWriter
+	readyCh := make(chan struct{}, 1)
+	mountReady := (<-chan struct{})(readyCh)
 	stopMount := func() {}
 	var stopMountOnce sync.Once
 	stopMountSafe := func() { stopMountOnce.Do(stopMount) }
 	mountStart := time.Now()
 
-	if s.mountInProcess {
-		readyCh := make(chan struct{}, 1)
-		mountReady = readyCh
-		mountCfg.OnReady = func() {
-			select {
-			case readyCh <- struct{}{}:
-			default:
+	mountCfg.OnReady = func() {
+		select {
+		case readyCh <- struct{}{}:
+		default:
+		}
+	}
+	mountCtx, cancelMount := context.WithCancel(ctx)
+	mountDone := make(chan struct{})
+	var mountErr error
+	go func() {
+		mountErr = s.mountRunner(mountCtx, mountCfg)
+		select {
+		case mountWait <- mountErr:
+		default:
+		}
+		close(mountDone)
+	}()
+	stopMount = func() {
+		cancelMount()
+		select {
+		case <-mountDone:
+			if mountErr != nil && !errors.Is(mountErr, context.Canceled) && logf != nil {
+				logf("mount", fmt.Sprintf("in-process mount exited: %v", mountErr))
+			}
+		case <-time.After(10 * time.Second):
+			if logf != nil {
+				logf("mount", "in-process mount stop timeout")
 			}
 		}
-		mountCtx, cancelMount := context.WithCancel(ctx)
-		mountDone := make(chan struct{})
-		var mountErr error
-		go func() {
-			mountErr = s.mountRunner(mountCtx, mountCfg)
-			select {
-			case mountWait <- mountErr:
-			default:
-			}
-			close(mountDone)
-		}()
-		stopMount = func() {
-			cancelMount()
-			select {
-			case <-mountDone:
-				if mountErr != nil && !errors.Is(mountErr, context.Canceled) && logf != nil {
-					logf("mount", fmt.Sprintf("in-process mount exited: %v", mountErr))
-				}
-			case <-time.After(10 * time.Second):
-				if logf != nil {
-					logf("mount", "in-process mount stop timeout")
-				}
-			}
-		}
-		if logf != nil {
-			logf("mount", fmt.Sprintf("started in-process mount for image=%s tag=%s", image, tag))
-		}
-	} else {
-		mountProc := s.newManagedCommand(s.mountBinary, mountArgs...)
-		mountStdout = newProcessLogWriter("mount:stdout", logf)
-		mountStderr = newProcessLogWriter("mount:stderr", logf)
-		defer mountStdout.Flush()
-		defer mountStderr.Flush()
-		mountProc.cmd.Stdout = mountStdout
-		mountProc.cmd.Stderr = mountStderr
-		if err := mountProc.start(); err != nil {
-			return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("start afs_mount: %v", err)}
-		}
-		watchContextCancellation(ctx, mountProc, 5*time.Second, "mount", logf)
-		stopMount = func() { _ = terminateProcess(mountProc, 5*time.Second) }
-		if logf != nil {
-			logf("mount", fmt.Sprintf("started: %s %s", s.mountBinary, strings.Join(mountArgs, " ")))
-		}
-		go func() {
-			if err := mountProc.wait(); err != nil {
-				select {
-				case mountWait <- err:
-				default:
-				}
-				return
-			}
-			select {
-			case mountWait <- nil:
-			default:
-			}
-		}()
+	}
+	if logf != nil {
+		logf("mount", fmt.Sprintf("started in-process mount for image=%s tag=%s", image, tag))
 	}
 
 	waitMountReadyStart := time.Now()
@@ -629,22 +510,12 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		}
 	}
 	var readyErr error
-	if mountReady != nil {
-		readyErr = waitForInProcessMountReady(mountWait, mountReady, 120*time.Second, progressLogf)
-	} else {
-		readyErr = waitForMountReady(sess.mountpoint, mountWait, 120*time.Second, progressLogf)
-	}
+	readyErr = waitForInProcessMountReady(mountWait, mountReady, 120*time.Second, progressLogf)
 	if readyErr != nil {
 		if logf != nil {
 			logf("mount", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=wait_mount_ready ms=%d ok=false", time.Since(waitMountReadyStart).Milliseconds()))
 		}
 		stopMountSafe()
-		if mountStdout != nil && mountStderr != nil {
-			combined := strings.TrimSpace(mountStdout.String() + "\n" + mountStderr.String())
-			if combined != "" {
-				readyErr = fmt.Errorf("%w: %s", readyErr, combined)
-			}
-		}
 		return commandResult{Success: false, ExitCode: -1, Err: fmt.Sprintf("mount not ready: %v", readyErr)}
 	}
 	if logf != nil {

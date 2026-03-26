@@ -15,7 +15,7 @@ func TestConvertOCILayerSupportsDockerLayerMediaType(t *testing.T) {
 	if out.Len() < 8 {
 		t.Fatalf("converted output too short: %d", out.Len())
 	}
-	if got := string(out.Bytes()[:8]); got != "AFSLYR01" {
+	if got := string(out.Bytes()[:8]); got != "AFSLYR02" {
 		t.Fatalf("unexpected archive magic: %q", got)
 	}
 }
