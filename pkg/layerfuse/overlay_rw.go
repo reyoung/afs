@@ -18,8 +18,9 @@ import (
 
 // WritableFileHandle is a file handle backed by a real *os.File in the upper dir.
 type WritableFileHandle struct {
-	f     *os.File
-	stats *FuseStats
+	f      *os.File
+	append bool // true if opened with O_APPEND
+	stats  *FuseStats
 }
 
 var _ = (fs.FileReader)((*WritableFileHandle)(nil))
@@ -45,15 +46,14 @@ func (h *WritableFileHandle) Read(ctx context.Context, dest []byte, off int64) (
 }
 
 func (h *WritableFileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
-	// Try WriteAt first; fall back to Seek+Write for O_APPEND files
-	// (Go's os.File.WriteAt errors on O_APPEND files).
-	n, err := h.f.WriteAt(data, off)
-	if err != nil && strings.Contains(err.Error(), "O_APPEND") {
-		// O_APPEND mode: use Write (kernel manages offset)
+	var n int
+	var err error
+	if h.append {
 		n, err = h.f.Write(data)
+	} else {
+		n, err = h.f.WriteAt(data, off)
 	}
 	if err != nil {
-		log.Printf("WritableFileHandle.Write FAIL: off=%d len=%d n=%d err=%v file=%s", off, len(data), n, err, h.f.Name())
 		return uint32(n), syscall.EIO
 	}
 	return uint32(n), 0
@@ -115,8 +115,7 @@ func (n *WritableFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandl
 		log.Printf("WritableFileNode.Open FAIL: path=%s flags=0x%x goFlags=0x%x err=%v", n.realPath, flags, goFlags, err)
 		return nil, 0, syscall.EIO
 	}
-	log.Printf("WritableFileNode.Open OK: path=%s flags=0x%x goFlags=0x%x", n.realPath, flags, goFlags)
-	return &WritableFileHandle{f: f, stats: n.stats}, 0, 0
+	return &WritableFileHandle{f: f, append: goFlags&syscall.O_APPEND != 0, stats: n.stats}, 0, 0
 }
 
 func (n *WritableFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -250,7 +249,7 @@ func (d *WritableDirNode) Create(ctx context.Context, name string, flags uint32,
 	node := &WritableFileNode{realPath: childReal, stats: d.stats}
 	child := d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	d.AddChild(name, child, true)
-	fh := &WritableFileHandle{f: f, stats: d.stats}
+	fh := &WritableFileHandle{f: f, append: flags&uint32(syscall.O_APPEND) != 0, stats: d.stats}
 	return child, fh, 0, 0
 }
 
@@ -374,7 +373,7 @@ func (d *OverlayDirNode) Create(ctx context.Context, name string, flags uint32, 
 	node := &WritableFileNode{realPath: realPath, stats: d.tree.stats}
 	child := d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	d.AddChild(name, child, true)
-	fh := &WritableFileHandle{f: f, stats: d.tree.stats}
+	fh := &WritableFileHandle{f: f, append: flags&uint32(syscall.O_APPEND) != 0, stats: d.tree.stats}
 	return child, fh, 0, 0
 }
 

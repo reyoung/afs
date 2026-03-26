@@ -115,8 +115,7 @@ func copyExtraDirToUpper(extraDir, upperDir string) {
 			return nil
 		}
 		defer dst.Close()
-		n, _ := io.Copy(dst, src)
-		log.Printf("copyExtraDirToUpper: copied %s -> %s (%d bytes, mode=%o)", rel, target, n, info.Mode())
+		_, _ = io.Copy(dst, src)
 		return nil
 	})
 }
