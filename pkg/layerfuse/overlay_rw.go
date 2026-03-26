@@ -45,8 +45,15 @@ func (h *WritableFileHandle) Read(ctx context.Context, dest []byte, off int64) (
 }
 
 func (h *WritableFileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
+	// Try WriteAt first; fall back to Seek+Write for O_APPEND files
+	// (Go's os.File.WriteAt errors on O_APPEND files).
 	n, err := h.f.WriteAt(data, off)
+	if err != nil && strings.Contains(err.Error(), "O_APPEND") {
+		// O_APPEND mode: use Write (kernel manages offset)
+		n, err = h.f.Write(data)
+	}
 	if err != nil {
+		log.Printf("WritableFileHandle.Write FAIL: off=%d len=%d n=%d err=%v file=%s", off, len(data), n, err, h.f.Name())
 		return uint32(n), syscall.EIO
 	}
 	return uint32(n), 0

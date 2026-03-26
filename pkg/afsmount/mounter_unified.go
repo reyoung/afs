@@ -123,9 +123,9 @@ func (m *UnifiedRWMounter) Mount(ctx context.Context, cfg MountConfig) (*MountRe
 
 	// Use shorter timeouts for RW mode since the kernel may invalidate
 	// cached entries when writes occur.
-	entryTimeout := 5 * time.Second
-	attrTimeout := 5 * time.Second
-	negativeTimeout := 1 * time.Second
+	entryTimeout := 30 * time.Second
+	attrTimeout := 30 * time.Second
+	negativeTimeout := 5 * time.Second
 
 	var releaseReaper func()
 	if cfg.HoldReaper != nil {
