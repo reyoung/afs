@@ -70,7 +70,7 @@ type Config struct {
 	PageCacheStore              *pagecache.Store
 	HoldReaper                  func() func()
 	TOCCache                    *layerformat.TOCCache
-	MountMode                   string // "per-layer" (default), "unified", or "unified-rw"
+	MountMode                   string // "unified-rw" (default), "per-layer", or "unified" (default), "unified", or "unified-rw"
 }
 
 type config struct {
@@ -247,7 +247,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		cfg.grpcInsecure = true
 	}
 	if cfg.mountMode == "" {
-		cfg.mountMode = "per-layer"
+		cfg.mountMode = "unified-rw"
 	}
 
 	if cfg.mountpoint == "" {
