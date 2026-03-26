@@ -3,6 +3,7 @@ package layerfuse
 import (
 	"context"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -78,6 +79,7 @@ func NewOverlayRootRW(layers []OverlayLayer, store *pagecache.Store, upperDir st
 
 // copyExtraDirToUpper recursively copies files from extraDir into the upper dir.
 func copyExtraDirToUpper(extraDir, upperDir string) {
+	log.Printf("copyExtraDirToUpper: extraDir=%s upperDir=%s", extraDir, upperDir)
 	_ = filepath.Walk(extraDir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -103,15 +105,18 @@ func copyExtraDirToUpper(extraDir, upperDir string) {
 		_ = os.MkdirAll(filepath.Dir(target), 0o755)
 		src, openErr := os.Open(p)
 		if openErr != nil {
+			log.Printf("copyExtraDirToUpper: failed to open %s: %v", p, openErr)
 			return nil
 		}
 		defer src.Close()
 		dst, createErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
 		if createErr != nil {
+			log.Printf("copyExtraDirToUpper: failed to create %s: %v", target, createErr)
 			return nil
 		}
 		defer dst.Close()
-		_, _ = io.Copy(dst, src)
+		n, _ := io.Copy(dst, src)
+		log.Printf("copyExtraDirToUpper: copied %s -> %s (%d bytes, mode=%o)", rel, target, n, info.Mode())
 		return nil
 	})
 }
@@ -291,10 +296,16 @@ func (d *OverlayDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	// RW mode: check upper dir first (files created/modified at runtime).
 	if d.tree.upperDir != "" {
 		if c := d.GetChild(name); c != nil {
+			// Re-stat upper file to fill EntryOut (size, mode, etc.)
+			realPath := d.tree.upperPath(childPath)
+			if info, statErr := os.Lstat(realPath); statErr == nil {
+				fillEntryOutFromFileInfo(out, info)
+			}
 			return c, 0
 		}
-		if child := d.lookupInUpper(ctx, name, childPath); child != nil {
+		if child, info := d.lookupInUpper(ctx, name, childPath); child != nil {
 			d.AddChild(name, child, true)
+			fillEntryOutFromFileInfo(out, info)
 			return child, 0
 		}
 	}

@@ -2,6 +2,7 @@ package layerfuse
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +38,7 @@ func (h *WritableFileHandle) Read(ctx context.Context, dest []byte, off int64) (
 		return fuse.ReadResultData(dest[:n]), 0
 	}
 	if err != nil {
+		log.Printf("WritableFileHandle.Read: off=%d len=%d n=%d err=%v file=%s", off, len(dest), n, err, h.f.Name())
 		return fuse.ReadResultData(nil), 0
 	}
 	return fuse.ReadResultData(nil), 0
@@ -93,17 +95,40 @@ type WritableFileNode struct {
 }
 
 var _ = (fs.NodeOpener)((*WritableFileNode)(nil))
+var _ = (fs.NodeReader)((*WritableFileNode)(nil))
 var _ = (fs.NodeGetattrer)((*WritableFileNode)(nil))
 var _ = (fs.NodeSetattrer)((*WritableFileNode)(nil))
 
 func (n *WritableFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	t0 := time.Now()
 	defer func() { n.stats.OpenCount.Add(1); n.stats.OpenNanos.Add(time.Since(t0).Nanoseconds()) }()
-	f, err := os.OpenFile(n.realPath, int(flags)&(syscall.O_ACCMODE|syscall.O_APPEND|syscall.O_TRUNC), 0)
+	goFlags := int(flags) & (syscall.O_ACCMODE | syscall.O_APPEND | syscall.O_TRUNC)
+	f, err := os.OpenFile(n.realPath, goFlags, 0)
 	if err != nil {
+		log.Printf("WritableFileNode.Open FAIL: path=%s flags=0x%x goFlags=0x%x err=%v", n.realPath, flags, goFlags, err)
 		return nil, 0, syscall.EIO
 	}
+	log.Printf("WritableFileNode.Open OK: path=%s flags=0x%x goFlags=0x%x", n.realPath, flags, goFlags)
 	return &WritableFileHandle{f: f, stats: n.stats}, 0, 0
+}
+
+func (n *WritableFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	t0 := time.Now()
+	defer func() { n.stats.ReadCount.Add(1); n.stats.ReadNanos.Add(time.Since(t0).Nanoseconds()) }()
+	f, err := os.Open(n.realPath)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	defer f.Close()
+	n2, readErr := f.ReadAt(dest, off)
+	if n2 > 0 {
+		n.stats.ReadBytes.Add(int64(n2))
+		return fuse.ReadResultData(dest[:n2]), 0
+	}
+	if readErr != nil {
+		return fuse.ReadResultData(nil), 0
+	}
+	return fuse.ReadResultData(nil), 0
 }
 
 func (n *WritableFileNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -178,6 +203,7 @@ func (d *WritableDirNode) Lookup(ctx context.Context, name string, out *fuse.Ent
 	if err != nil {
 		return nil, syscall.ENOENT
 	}
+	fillEntryOutFromFileInfo(out, st)
 	childRel := name
 	if d.relPath != "" {
 		childRel = d.relPath + "/" + name
@@ -584,11 +610,39 @@ func (t *overlayTree) existsInUpper(relPath string) bool {
 
 func fillAttrFromFileInfo(out *fuse.AttrOut, info os.FileInfo) {
 	out.Size = uint64(info.Size())
-	out.Mode = uint32(info.Mode())
+	out.Mode = fileInfoToFuseMode(info)
+	out.Nlink = 1
+	if info.IsDir() {
+		out.Nlink = 2
+	}
 	ts := uint64(info.ModTime().Unix())
 	out.Atime = ts
 	out.Mtime = ts
 	out.Ctime = ts
+}
+
+func fillEntryOutFromFileInfo(out *fuse.EntryOut, info os.FileInfo) {
+	out.Size = uint64(info.Size())
+	out.Mode = fileInfoToFuseMode(info)
+	out.Nlink = 1
+	if info.IsDir() {
+		out.Nlink = 2
+	}
+	ts := uint64(info.ModTime().Unix())
+	out.Atime = ts
+	out.Mtime = ts
+	out.Ctime = ts
+}
+
+func fileInfoToFuseMode(info os.FileInfo) uint32 {
+	perm := uint32(info.Mode().Perm())
+	if info.IsDir() {
+		return syscall.S_IFDIR | perm
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return syscall.S_IFLNK | 0o777
+	}
+	return syscall.S_IFREG | perm
 }
 
 func newRWSymlinkEntry(name, parentRel, target string) layerformat.Entry {
@@ -610,18 +664,18 @@ func joinRelPath(parent, name string) string {
 
 // lookupInUpper checks the upper dir for a child and returns an appropriate inode.
 // Returns nil if the child does not exist in the upper dir.
-func (d *OverlayDirNode) lookupInUpper(ctx context.Context, name, childRel string) *fs.Inode {
+func (d *OverlayDirNode) lookupInUpper(ctx context.Context, name, childRel string) (*fs.Inode, os.FileInfo) {
 	if d.tree.upperDir == "" {
-		return nil
+		return nil, nil
 	}
 	realPath := d.tree.upperPath(childRel)
 	info, err := os.Lstat(realPath)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	if info.IsDir() {
 		node := &WritableDirNode{realPath: realPath, tree: d.tree, relPath: childRel, stats: d.tree.stats}
-		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR})
+		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR}), info
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, _ := os.Readlink(realPath)
@@ -629,10 +683,10 @@ func (d *OverlayDirNode) lookupInUpper(ctx context.Context, name, childRel strin
 			entry: newRWSymlinkEntry(name, d.relPath, target),
 			stats: d.tree.stats,
 		}
-		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
+		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK}), info
 	}
 	node := &WritableFileNode{realPath: realPath, stats: d.tree.stats}
-	return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
+	return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG}), info
 }
 
 // readUpperDirEntries returns directory entries from the upper dir for the given relPath.
