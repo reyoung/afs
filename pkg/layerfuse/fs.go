@@ -6,6 +6,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,6 +35,7 @@ type tree struct {
 	reader   *layerformat.Reader
 	store    *pagecache.Store
 	stats    *FuseStats
+	openless atomic.Bool
 	entries  map[string]layerformat.Entry
 	children map[string][]string
 	kinds    map[string]uint32
@@ -192,10 +194,11 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 			section = layerformat.FileSection{}
 		}
 		node := &FileNode{
-			entry:   e,
-			section: section,
-			store:   d.tree.store,
-			stats:   d.tree.stats,
+			entry:    e,
+			section:  section,
+			store:    d.tree.store,
+			stats:    d.tree.stats,
+			openless: &d.tree.openless,
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
@@ -205,10 +208,11 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 // When store is set, reads go through the in-process page cache.
 type FileNode struct {
 	fs.Inode
-	entry   layerformat.Entry
-	section layerformat.FileSection
-	store   *pagecache.Store
-	stats   *FuseStats
+	entry    layerformat.Entry
+	section  layerformat.FileSection
+	store    *pagecache.Store
+	stats    *FuseStats
+	openless *atomic.Bool
 }
 
 var _ = (fs.NodeOpener)((*FileNode)(nil))
@@ -225,7 +229,14 @@ func (f *FileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if flags&uint32(syscall.O_APPEND) != 0 || flags&uint32(syscall.O_TRUNC) != 0 {
 		return nil, 0, syscall.EROFS
 	}
+	if f.openless != nil && f.openless.Load() {
+		return nil, 0, syscall.ENOSYS
+	}
 	return nil, fuse.FOPEN_KEEP_CACHE, 0
+}
+
+func (d *DirNode) SetOpenless(enabled bool) {
+	d.tree.openless.Store(enabled)
 }
 
 func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {

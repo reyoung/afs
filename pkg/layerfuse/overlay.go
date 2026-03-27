@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ type overlayEntry struct {
 type overlayTree struct {
 	store    *pagecache.Store
 	stats    *FuseStats
+	openless atomic.Bool
 	entries  map[string]overlayEntry
 	children map[string][]string
 	kinds    map[string]uint32
@@ -386,10 +388,11 @@ func (d *OverlayDirNode) newChildNode(ctx context.Context, oe overlayEntry) *fs.
 			section = layerformat.FileSection{}
 		}
 		node := &OverlayFileNode{
-			entry:   e,
-			section: section,
-			store:   d.tree.store,
-			stats:   d.tree.stats,
+			entry:    e,
+			section:  section,
+			store:    d.tree.store,
+			stats:    d.tree.stats,
+			openless: &d.tree.openless,
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
@@ -398,10 +401,11 @@ func (d *OverlayDirNode) newChildNode(ctx context.Context, oe overlayEntry) *fs.
 // OverlayFileNode is a read-only regular file in the unified overlay filesystem.
 type OverlayFileNode struct {
 	fs.Inode
-	entry   layerformat.Entry
-	section layerformat.FileSection
-	store   *pagecache.Store
-	stats   *FuseStats
+	entry    layerformat.Entry
+	section  layerformat.FileSection
+	store    *pagecache.Store
+	stats    *FuseStats
+	openless *atomic.Bool
 }
 
 var _ = (fs.NodeOpener)((*OverlayFileNode)(nil))
@@ -419,7 +423,14 @@ func (f *OverlayFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle
 	if flags&uint32(syscall.O_APPEND) != 0 || flags&uint32(syscall.O_TRUNC) != 0 {
 		return nil, 0, syscall.EROFS
 	}
+	if f.openless != nil && f.openless.Load() {
+		return nil, 0, syscall.ENOSYS
+	}
 	return nil, fuse.FOPEN_KEEP_CACHE, 0
+}
+
+func (d *OverlayDirNode) SetOpenless(enabled bool) {
+	d.tree.openless.Store(enabled)
 }
 
 func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {

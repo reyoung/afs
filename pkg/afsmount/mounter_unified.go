@@ -70,6 +70,12 @@ func (m *UnifiedMounter) Mount(ctx context.Context, cfg MountConfig) (*MountResu
 		return nil, fmt.Errorf("mount unified fuse: %w", err)
 	}
 	logTiming("unified_fuse_mount", mountStarted)
+	if server.KernelSettings().Flags64()&fuse.CAP_NO_OPEN_SUPPORT != 0 {
+		root.SetOpenless(true)
+		log.Printf("unified overlay open-less enabled: kernel_flags=%#x", server.KernelSettings().Flags64())
+	} else {
+		log.Printf("unified overlay open-less not supported: kernel_flags=%#x", server.KernelSettings().Flags64())
+	}
 	log.Printf("unified overlay mounted at %s with %d layers", mountDir, len(cfg.Layers))
 
 	cleanup := func() {

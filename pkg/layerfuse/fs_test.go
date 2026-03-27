@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -187,5 +188,55 @@ func TestFileNodeGetattr(t *testing.T) {
 	}
 	if out.Size != uint64(len(content)) {
 		t.Fatalf("Getattr() Size=%d, want %d", out.Size, len(content))
+	}
+}
+
+func TestFileNodeOpenKeepsCacheByDefault(t *testing.T) {
+	t.Parallel()
+
+	node := &FileNode{stats: &FuseStats{}}
+	_, flags, errno := node.Open(context.TODO(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("Open() errno = %d", errno)
+	}
+	if flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatalf("Open() flags = %#x, want %#x", flags, fuse.FOPEN_KEEP_CACHE)
+	}
+}
+
+func TestFileNodeOpenlessReturnsENOSYS(t *testing.T) {
+	t.Parallel()
+
+	var openless atomic.Bool
+	openless.Store(true)
+	node := &FileNode{
+		stats:    &FuseStats{},
+		openless: &openless,
+	}
+	_, flags, errno := node.Open(context.TODO(), syscall.O_RDONLY)
+	if errno != syscall.ENOSYS {
+		t.Fatalf("Open() errno = %d, want %d", errno, syscall.ENOSYS)
+	}
+	if flags != 0 {
+		t.Fatalf("Open() flags = %#x, want 0", flags)
+	}
+}
+
+func TestOverlayFileNodeOpenlessReturnsENOSYS(t *testing.T) {
+	t.Parallel()
+
+	var openless atomic.Bool
+	openless.Store(true)
+	node := &OverlayFileNode{
+		entry:    layerformat.Entry{Path: "test.txt"},
+		stats:    &FuseStats{},
+		openless: &openless,
+	}
+	_, flags, errno := node.Open(context.TODO(), syscall.O_RDONLY)
+	if errno != syscall.ENOSYS {
+		t.Fatalf("Open() errno = %d, want %d", errno, syscall.ENOSYS)
+	}
+	if flags != 0 {
+		t.Fatalf("Open() flags = %#x, want 0", flags)
 	}
 }
