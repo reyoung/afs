@@ -6,6 +6,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"debug/elf"
 	"fmt"
 	"io"
 	"os"
@@ -154,6 +156,99 @@ func mountOverlayRO(t *testing.T, layers []testLayer) string {
 	return mountDir
 }
 
+func createTestELFPayload(t *testing.T) []byte {
+	t.Helper()
+	const (
+		ehdrSize = 64
+		phdrSize = 56
+		loadOff  = 0x1000
+	)
+
+	buf := make([]byte, loadOff+16)
+	copy(buf[0:4], []byte{0x7f, 'E', 'L', 'F'})
+	buf[4] = byte(elf.ELFCLASS64)
+	buf[5] = byte(elf.ELFDATA2LSB)
+	buf[6] = byte(elf.EV_CURRENT)
+	buf[7] = byte(elf.ELFOSABI_NONE)
+
+	put16 := func(off int, v uint16) { buf[off] = byte(v); buf[off+1] = byte(v >> 8) }
+	put32 := func(off int, v uint32) {
+		buf[off] = byte(v)
+		buf[off+1] = byte(v >> 8)
+		buf[off+2] = byte(v >> 16)
+		buf[off+3] = byte(v >> 24)
+	}
+	put64 := func(off int, v uint64) {
+		put32(off, uint32(v))
+		put32(off+4, uint32(v>>32))
+	}
+
+	put16(16, uint16(elf.ET_DYN))
+	put16(18, uint16(elf.EM_X86_64))
+	put32(20, uint32(elf.EV_CURRENT))
+	put64(24, 0)
+	put64(32, ehdrSize)
+	put64(40, 0)
+	put32(48, 0)
+	put16(52, ehdrSize)
+	put16(54, phdrSize)
+	put16(56, 1)
+	put16(58, 0)
+	put16(60, 0)
+	put16(62, 0)
+
+	ph := ehdrSize
+	put32(ph+0, uint32(elf.PT_LOAD))
+	put32(ph+4, uint32(elf.PF_R))
+	put64(ph+8, loadOff)
+	put64(ph+16, 0)
+	put64(ph+24, 0)
+	put64(ph+32, 16)
+	put64(ph+40, 16)
+	put64(ph+48, 0x1000)
+
+	copy(buf[loadOff:], []byte("ELFTESTPAYLOAD!!"))
+	return buf
+}
+
+func mountCatalogWithImage(t *testing.T, imageName string, layers []testLayer) (string, *CatalogRootNode) {
+	t.Helper()
+	skipIfNoFuse(t)
+
+	root := NewCatalogRoot()
+	mountDir := t.TempDir()
+	server, err := fs.Mount(mountDir, root, &fs.Options{
+		MountOptions: fuse.MountOptions{
+			AllowOther:           false,
+			Debug:                false,
+			EnableSymlinkCaching: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("catalog FUSE mount: %v", err)
+	}
+	t.Cleanup(func() {
+		server.Unmount()
+	})
+	server.WaitMount()
+
+	overlayLayers := make([]OverlayLayer, len(layers))
+	for i, l := range layers {
+		overlayLayers[i] = OverlayLayer{
+			Reader: createTestLayerReader(t, l),
+			Digest: fmt.Sprintf("test-layer-%d", i),
+		}
+	}
+	child, _ := NewOverlayRoot(overlayLayers, nil, nil)
+	if err := child.BindSharedELF(context.Background(), root); err != nil {
+		t.Fatalf("BindSharedELF: %v", err)
+	}
+	if _, err := root.AddImage(context.Background(), imageName, child); err != nil {
+		t.Fatalf("AddImage: %v", err)
+	}
+	return mountDir, root
+}
+
 // mountOverlayRW mounts a read-write overlay from the given layers and extra files.
 func mountOverlayRW(t *testing.T, layers []testLayer, extraFiles map[string]string) string {
 	t.Helper()
@@ -223,6 +318,46 @@ func TestOverlayMerge_UpperLayerOverridesLower(t *testing.T) {
 	}
 	if string(data) != "from-upper" {
 		t.Fatalf("got %q, want %q", string(data), "from-upper")
+	}
+}
+
+func TestCatalogSharedELFUsesSameInodeAsImagePath(t *testing.T) {
+	skipIfNoFuse(t)
+
+	elfPayload := createTestELFPayload(t)
+	mountDir, _ := mountCatalogWithImage(t, "img-test", []testLayer{
+		{
+			dirs: []string{"usr", "usr/lib"},
+			files: map[string]string{
+			"usr/lib/libdemo.so": string(elfPayload),
+		},
+		},
+	})
+
+	imagePath := filepath.Join(mountDir, "img-test", "usr", "lib", "libdemo.so")
+	imageInfo, err := os.Lstat(imagePath)
+	if err != nil {
+		t.Fatalf("Lstat image ELF: %v", err)
+	}
+
+	reader := createTestLayerReader(t, testLayer{
+		dirs: []string{"usr", "usr/lib"},
+		files: map[string]string{
+			"usr/lib/libdemo.so": string(elfPayload),
+		},
+	})
+	entry, err := reader.Stat("usr/lib/libdemo.so")
+	if err != nil {
+		t.Fatalf("Stat ELF entry: %v", err)
+	}
+	sharedPath := filepath.Join(mountDir, ELFCacheDirName, sharedELFEntryName(entry))
+	cacheInfo, err := os.Lstat(sharedPath)
+	if err != nil {
+		t.Fatalf("Lstat shared ELF cache path: %v", err)
+	}
+
+	if !os.SameFile(imageInfo, cacheInfo) {
+		t.Fatalf("image ELF and shared ELF cache should point to same inode: image=%s cache=%s", imagePath, sharedPath)
 	}
 }
 

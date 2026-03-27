@@ -44,6 +44,7 @@ type overlayTree struct {
 	entries  map[string]overlayEntry
 	children map[string][]string
 	kinds    map[string]uint32
+	shared   map[string]*fs.Inode
 
 	// RW support fields (only used when upperDir != "").
 	upperDir string              // writable upper directory (empty = read-only mode)
@@ -132,6 +133,7 @@ func buildOverlayTree(layers []OverlayLayer, store *pagecache.Store, elfStore *f
 		entries:  make(map[string]overlayEntry),
 		children: make(map[string][]string),
 		kinds:    make(map[string]uint32),
+		shared:   make(map[string]*fs.Inode),
 	}
 
 	// Track opaque directories per layer. When we see .wh..wh..opq in a dir,
@@ -378,6 +380,9 @@ func (d *OverlayDirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fus
 
 func (d *OverlayDirNode) newChildNode(ctx context.Context, oe overlayEntry) *fs.Inode {
 	e := oe.entry
+	if shared := d.tree.shared[e.Path]; shared != nil {
+		return shared
+	}
 	switch e.Type {
 	case layerformat.EntryTypeDir:
 		node := &OverlayDirNode{tree: d.tree, relPath: e.Path}
@@ -400,6 +405,38 @@ func (d *OverlayDirNode) newChildNode(ctx context.Context, oe overlayEntry) *fs.
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	}
+}
+
+func (d *OverlayDirNode) BindSharedELF(ctx context.Context, root *CatalogRootNode) error {
+	if root == nil {
+		return nil
+	}
+	paths := make([]string, 0, len(d.tree.entries))
+	for p, oe := range d.tree.entries {
+		e := oe.entry
+		if e.Type != layerformat.EntryTypeFile || e.ContentKind != layerformat.ContentKindELF || e.Digest == "" || oe.reader == nil {
+			continue
+		}
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		if d.tree.shared[p] != nil {
+			continue
+		}
+		oe := d.tree.entries[p]
+		section, err := oe.reader.OpenFileSection(p)
+		if err != nil {
+			return err
+		}
+		cacheName := sharedELFEntryName(oe.entry)
+		inode, err := root.AddELF(ctx, cacheName, oe.entry, section, d.tree.elfStore, d.tree.openless.Load())
+		if err != nil {
+			return err
+		}
+		d.tree.shared[p] = inode
+	}
+	return nil
 }
 
 // OverlayFileNode is a read-only regular file in the unified overlay filesystem.

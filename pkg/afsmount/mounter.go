@@ -2,6 +2,7 @@ package afsmount
 
 import (
 	"context"
+	"time"
 
 	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/layerformat"
@@ -29,14 +30,18 @@ type LayerInfo struct {
 
 // MountConfig holds all configuration needed to mount layers.
 type MountConfig struct {
-	Layers     []LayerInfo
-	WorkDir    string // working directory for mount temps
-	Debug      bool
-	ReadAhead  int64
-	PageCache  *pagecache.Store
-	ELFCache   *filecache.Store
-	TOCCache   *layerformat.TOCCache
-	HoldReaper func() func()
+	ImageName              string
+	Layers                 []LayerInfo
+	WorkDir                string // working directory for mount temps
+	SharedRoot             string
+	SharedCatalogMaxImages int
+	SharedCatalogIdleTTL   time.Duration
+	Debug                  bool
+	ReadAhead              int64
+	PageCache              *pagecache.Store
+	ELFCache               *filecache.Store
+	TOCCache               *layerformat.TOCCache
+	HoldReaper             func() func()
 
 	ExtraDir    string
 	WritableDir string

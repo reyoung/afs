@@ -40,63 +40,69 @@ const (
 )
 
 type Config struct {
-	Mountpoint            string
-	Debug                 bool
-	MountProcDev          bool
-	ExtraDir              string
-	DiscoveryAddr         string
-	GRPCTimeout           time.Duration
-	GRPCMaxChunk          int
-	FUSEMaxReadAheadBytes int64
-	GRPCInsecure          bool
-	NodeID                string
-	Image                 string
-	Tag                   string
-	PlatformOS            string
-	PlatformArch          string
-	PlatformVariant       string
-	ForceLocalFetch       bool
-	PullTimeout           time.Duration
-	WorkDir               string
-	KeepWorkDir           bool
-	LayerMountConcurrency int
-	PprofListen           string
-	OnReady               func()
-	PageCacheStore        *pagecache.Store
-	ELFCacheStore         *filecache.Store
-	HoldReaper            func() func()
-	TOCCache              *layerformat.TOCCache
-	MountMode             string // only "unified-koverlay" is supported
+	Mountpoint             string
+	SharedMountRoot        string
+	Debug                  bool
+	MountProcDev           bool
+	ExtraDir               string
+	DiscoveryAddr          string
+	GRPCTimeout            time.Duration
+	GRPCMaxChunk           int
+	FUSEMaxReadAheadBytes  int64
+	SharedCatalogMaxImages int
+	SharedCatalogIdleTTL   time.Duration
+	GRPCInsecure           bool
+	NodeID                 string
+	Image                  string
+	Tag                    string
+	PlatformOS             string
+	PlatformArch           string
+	PlatformVariant        string
+	ForceLocalFetch        bool
+	PullTimeout            time.Duration
+	WorkDir                string
+	KeepWorkDir            bool
+	LayerMountConcurrency  int
+	PprofListen            string
+	OnReady                func()
+	PageCacheStore         *pagecache.Store
+	ELFCacheStore          *filecache.Store
+	HoldReaper             func() func()
+	TOCCache               *layerformat.TOCCache
+	MountMode              string // only "unified-koverlay" is supported
 }
 
 type config struct {
-	mountpoint            string
-	debug                 bool
-	mountProcDev          bool
-	extraDir              string
-	discoveryAddr         string
-	grpcTimeout           time.Duration
-	grpcMaxChunk          int
-	fuseMaxReadAheadBytes int64
-	grpcInsecure          bool
-	nodeID                string
-	image                 string
-	tag                   string
-	platformOS            string
-	platformArch          string
-	platformVariant       string
-	forceLocalFetch       bool
-	pullTimeout           time.Duration
-	workDir               string
-	keepWorkDir           bool
-	layerMountConcurrency int
-	pprofListen           string
-	onReady               func()
-	pageCacheStore        *pagecache.Store
-	elfCacheStore         *filecache.Store
-	holdReaper            func() func()
-	tocCache              *layerformat.TOCCache
-	mountMode             string
+	mountpoint             string
+	sharedMountRoot        string
+	debug                  bool
+	mountProcDev           bool
+	extraDir               string
+	discoveryAddr          string
+	grpcTimeout            time.Duration
+	grpcMaxChunk           int
+	fuseMaxReadAheadBytes  int64
+	sharedCatalogMaxImages int
+	sharedCatalogIdleTTL   time.Duration
+	grpcInsecure           bool
+	nodeID                 string
+	image                  string
+	tag                    string
+	platformOS             string
+	platformArch           string
+	platformVariant        string
+	forceLocalFetch        bool
+	pullTimeout            time.Duration
+	workDir                string
+	keepWorkDir            bool
+	layerMountConcurrency  int
+	pprofListen            string
+	onReady                func()
+	pageCacheStore         *pagecache.Store
+	elfCacheStore          *filecache.Store
+	holdReaper             func() func()
+	tocCache               *layerformat.TOCCache
+	mountMode              string
 }
 
 type serviceInfo struct {
@@ -188,33 +194,36 @@ func Run(ctx context.Context, userCfg Config) error {
 
 func normalizeConfig(userCfg Config) (config, error) {
 	cfg := config{
-		mountpoint:            strings.TrimSpace(userCfg.Mountpoint),
-		debug:                 userCfg.Debug,
-		mountProcDev:          userCfg.MountProcDev,
-		extraDir:              strings.TrimSpace(userCfg.ExtraDir),
-		discoveryAddr:         strings.TrimSpace(userCfg.DiscoveryAddr),
-		grpcTimeout:           userCfg.GRPCTimeout,
-		grpcMaxChunk:          userCfg.GRPCMaxChunk,
-		fuseMaxReadAheadBytes: userCfg.FUSEMaxReadAheadBytes,
-		grpcInsecure:          userCfg.GRPCInsecure,
-		nodeID:                strings.TrimSpace(userCfg.NodeID),
-		image:                 strings.TrimSpace(userCfg.Image),
-		tag:                   strings.TrimSpace(userCfg.Tag),
-		platformOS:            strings.TrimSpace(userCfg.PlatformOS),
-		platformArch:          strings.TrimSpace(userCfg.PlatformArch),
-		platformVariant:       strings.TrimSpace(userCfg.PlatformVariant),
-		forceLocalFetch:       userCfg.ForceLocalFetch,
-		pullTimeout:           userCfg.PullTimeout,
-		workDir:               strings.TrimSpace(userCfg.WorkDir),
-		keepWorkDir:           userCfg.KeepWorkDir,
-		layerMountConcurrency: userCfg.LayerMountConcurrency,
-		pprofListen:           strings.TrimSpace(userCfg.PprofListen),
-		onReady:               userCfg.OnReady,
-		pageCacheStore:        userCfg.PageCacheStore,
-		elfCacheStore:         userCfg.ELFCacheStore,
-		holdReaper:            userCfg.HoldReaper,
-		tocCache:              userCfg.TOCCache,
-		mountMode:             strings.TrimSpace(userCfg.MountMode),
+		mountpoint:             strings.TrimSpace(userCfg.Mountpoint),
+		sharedMountRoot:        strings.TrimSpace(userCfg.SharedMountRoot),
+		debug:                  userCfg.Debug,
+		mountProcDev:           userCfg.MountProcDev,
+		extraDir:               strings.TrimSpace(userCfg.ExtraDir),
+		discoveryAddr:          strings.TrimSpace(userCfg.DiscoveryAddr),
+		grpcTimeout:            userCfg.GRPCTimeout,
+		grpcMaxChunk:           userCfg.GRPCMaxChunk,
+		fuseMaxReadAheadBytes:  userCfg.FUSEMaxReadAheadBytes,
+		sharedCatalogMaxImages: userCfg.SharedCatalogMaxImages,
+		sharedCatalogIdleTTL:   userCfg.SharedCatalogIdleTTL,
+		grpcInsecure:           userCfg.GRPCInsecure,
+		nodeID:                 strings.TrimSpace(userCfg.NodeID),
+		image:                  strings.TrimSpace(userCfg.Image),
+		tag:                    strings.TrimSpace(userCfg.Tag),
+		platformOS:             strings.TrimSpace(userCfg.PlatformOS),
+		platformArch:           strings.TrimSpace(userCfg.PlatformArch),
+		platformVariant:        strings.TrimSpace(userCfg.PlatformVariant),
+		forceLocalFetch:        userCfg.ForceLocalFetch,
+		pullTimeout:            userCfg.PullTimeout,
+		workDir:                strings.TrimSpace(userCfg.WorkDir),
+		keepWorkDir:            userCfg.KeepWorkDir,
+		layerMountConcurrency:  userCfg.LayerMountConcurrency,
+		pprofListen:            strings.TrimSpace(userCfg.PprofListen),
+		onReady:                userCfg.OnReady,
+		pageCacheStore:         userCfg.PageCacheStore,
+		elfCacheStore:          userCfg.ELFCacheStore,
+		holdReaper:             userCfg.HoldReaper,
+		tocCache:               userCfg.TOCCache,
+		mountMode:              strings.TrimSpace(userCfg.MountMode),
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -247,6 +256,12 @@ func normalizeConfig(userCfg Config) (config, error) {
 	if cfg.mountMode == "" {
 		cfg.mountMode = "unified-koverlay"
 	}
+	if cfg.sharedCatalogMaxImages <= 0 {
+		cfg.sharedCatalogMaxImages = defaultSharedCatalogMaxImages
+	}
+	if cfg.sharedCatalogIdleTTL <= 0 {
+		cfg.sharedCatalogIdleTTL = defaultSharedCatalogIdleTTL
+	}
 	if cfg.mountMode != "unified-koverlay" {
 		return config{}, fmt.Errorf("unsupported -mount-mode %q", cfg.mountMode)
 	}
@@ -261,6 +276,9 @@ func normalizeConfig(userCfg Config) (config, error) {
 		if err := ensureMountpoint(cfg.extraDir); err != nil {
 			return config{}, fmt.Errorf("invalid -extra-dir: %w", err)
 		}
+	}
+	if cfg.sharedMountRoot == "" {
+		cfg.sharedMountRoot = defaultSharedMountRoot(cfg.workDir)
 	}
 	return cfg, nil
 }
@@ -392,8 +410,26 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 				},
 				FindLayerServices: func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]layerreader.ServiceInfo, error) {
 					services, err := findLayerServicesCached(ctx, discoveryAddr, digest, timeout, insecureTransport)
+					if err == nil && len(services) > 0 {
+						return toLayerReaderServices(services), nil
+					}
+					log.Printf("layer service lookup needs reconcile: image=%s tag=%s digest=%s endpoint=%s err=%v services=%d", cfg.image, cfg.tag, digest, chosen.endpoint, err, len(services))
+					reconcileStarted := time.Now()
+					if _, recErr := pullImageFromService(ctx, chosen.endpoint, cfg, cfg.forceLocalFetch); recErr != nil {
+						logTiming("reconcile_image_for_layer_service", reconcileStarted, "digest="+digest, "endpoint="+chosen.endpoint, "ok=false")
+						if err != nil {
+							return nil, fmt.Errorf("find layer services for %s: %w (reconcile failed: %v)", digest, err, recErr)
+						}
+						return nil, fmt.Errorf("find layer services for %s returned no providers and reconcile failed: %w", digest, recErr)
+					}
+					logTiming("reconcile_image_for_layer_service", reconcileStarted, "digest="+digest, "endpoint="+chosen.endpoint, "ok=true")
+					sharedLayerSvcCache.delete(layerServiceCacheKey(discoveryAddr, digest))
+					services, err = findLayerServicesCached(ctx, discoveryAddr, digest, timeout, insecureTransport)
 					if err != nil {
-						return nil, err
+						return nil, fmt.Errorf("find layer services for %s after reconcile: %w", digest, err)
+					}
+					if len(services) == 0 {
+						return nil, fmt.Errorf("find layer services for %s returned no providers after reconcile", digest)
 					}
 					return toLayerReaderServices(services), nil
 				},
@@ -445,16 +481,20 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	mounter := &UnifiedMounter{}
 
 	mountCfg := MountConfig{
-		Layers:      layerInfos,
-		WorkDir:     workDir,
-		Debug:       cfg.debug,
-		ReadAhead:   cfg.fuseMaxReadAheadBytes,
-		PageCache:   cacheStore,
-		ELFCache:    cfg.elfCacheStore,
-		TOCCache:    cfg.tocCache,
-		HoldReaper:  cfg.holdReaper,
-		ExtraDir:    cfg.extraDir,
-		WritableDir: filepath.Join(workDir, "writable-upper"),
+		ImageName:              imageCatalogName(cfg.image, cfg.tag, layerInfos, cfg.platformOS, cfg.platformArch, cfg.platformVariant),
+		Layers:                 layerInfos,
+		WorkDir:                workDir,
+		SharedRoot:             cfg.sharedMountRoot,
+		SharedCatalogMaxImages: cfg.sharedCatalogMaxImages,
+		SharedCatalogIdleTTL:   cfg.sharedCatalogIdleTTL,
+		Debug:                  cfg.debug,
+		ReadAhead:              cfg.fuseMaxReadAheadBytes,
+		PageCache:              cacheStore,
+		ELFCache:               cfg.elfCacheStore,
+		TOCCache:               cfg.tocCache,
+		HoldReaper:             cfg.holdReaper,
+		ExtraDir:               cfg.extraDir,
+		WritableDir:            filepath.Join(workDir, "writable-upper"),
 	}
 	mountResult, err := mounter.Mount(ctx, mountCfg)
 	if err != nil {
@@ -630,7 +670,9 @@ func findLayerServicesCached(parentCtx context.Context, discoveryAddr, digest st
 	}
 	out = dedupeServiceInfos(out)
 	logTiming("discovery_find_layer_services", findLayerSvcStarted, "digest="+digest, "services="+strconv.Itoa(len(out)), "ok=true")
-	sharedLayerSvcCache.put(cacheKey, out)
+	if len(out) > 0 {
+		sharedLayerSvcCache.put(cacheKey, out)
+	}
 	return append([]serviceInfo(nil), out...), nil
 }
 
@@ -755,6 +797,12 @@ func (c *layerServiceCache) put(key string, services []serviceInfo) {
 		expireAt: time.Now().Add(layerSvcCacheTTL),
 		services: append([]serviceInfo(nil), services...),
 	}
+}
+
+func (c *layerServiceCache) delete(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
 }
 
 func (c *layerServiceCache) pruneLocked() {

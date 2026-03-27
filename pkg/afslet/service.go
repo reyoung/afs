@@ -40,26 +40,29 @@ const (
 )
 
 type Config struct {
-	RuncBinary            string
-	RuncNoPivot           bool
-	RuncNoNewKeyring      bool
-	RuncNoCgroupNS        bool
-	RuncNoPIDNS           bool
-	RuncNoIPCNS           bool
-	RuncNoUTSNS           bool
-	UseSudo               bool
-	TarChunk              int
-	DefaultDiscovery      string
-	TempDir               string
-	LimitCPUCores         int64
-	LimitMemoryMB         int64
-	LayerMountConcurrency int
-	MountPprofListen      string
-	FUSEMaxReadAheadBytes int64
-	PageCacheStore        *pagecache.Store
-	ELFCacheStore         *filecache.Store
-	TOCCache              *layerformat.TOCCache
-	MountMode             string
+	RuncBinary             string
+	RuncNoPivot            bool
+	RuncNoNewKeyring       bool
+	RuncNoCgroupNS         bool
+	RuncNoPIDNS            bool
+	RuncNoIPCNS            bool
+	RuncNoUTSNS            bool
+	UseSudo                bool
+	TarChunk               int
+	DefaultDiscovery       string
+	TempDir                string
+	LimitCPUCores          int64
+	LimitMemoryMB          int64
+	LayerMountConcurrency  int
+	MountPprofListen       string
+	FUSEMaxReadAheadBytes  int64
+	SharedCatalogMaxImages int
+	SharedCatalogIdleTTL   time.Duration
+	PageCacheStore         *pagecache.Store
+	ELFCacheStore          *filecache.Store
+	TOCCache               *layerformat.TOCCache
+	MountMode              string
+	SharedMountRoot        string
 }
 
 type Service struct {
@@ -86,36 +89,42 @@ type Service struct {
 	layerMountConcurrency     int
 	mountPprofListen          string
 	fuseMaxReadAheadBytes     int64
+	sharedCatalogMaxImages    int
+	sharedCatalogIdleTTL      time.Duration
 	pageCacheStore            *pagecache.Store
 	elfCacheStore             *filecache.Store
 	tocCache                  *layerformat.TOCCache
 	mountMode                 string
+	sharedMountRoot           string
 	resolveImageRuntimeConfig func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountRunner:           afsmount.Run,
-		runcBinary:            strings.TrimSpace(cfg.RuncBinary),
-		runcNoPivot:           cfg.RuncNoPivot,
-		runcNoNewKeyring:      cfg.RuncNoNewKeyring,
-		runcNoCgroupNS:        cfg.RuncNoCgroupNS,
-		runcNoPIDNS:           cfg.RuncNoPIDNS,
-		runcNoIPCNS:           cfg.RuncNoIPCNS,
-		runcNoUTSNS:           cfg.RuncNoUTSNS,
-		useSudo:               cfg.UseSudo,
-		tarChunk:              cfg.TarChunk,
-		defaultDiscovery:      strings.TrimSpace(cfg.DefaultDiscovery),
-		tempDir:               strings.TrimSpace(cfg.TempDir),
-		limitCPUCores:         cfg.LimitCPUCores,
-		limitMemoryMB:         cfg.LimitMemoryMB,
-		layerMountConcurrency: cfg.LayerMountConcurrency,
-		mountPprofListen:      strings.TrimSpace(cfg.MountPprofListen),
-		fuseMaxReadAheadBytes: cfg.FUSEMaxReadAheadBytes,
-		pageCacheStore:        cfg.PageCacheStore,
-		elfCacheStore:         cfg.ELFCacheStore,
-		tocCache:              cfg.TOCCache,
-		mountMode:             strings.TrimSpace(cfg.MountMode),
+		mountRunner:            afsmount.Run,
+		runcBinary:             strings.TrimSpace(cfg.RuncBinary),
+		runcNoPivot:            cfg.RuncNoPivot,
+		runcNoNewKeyring:       cfg.RuncNoNewKeyring,
+		runcNoCgroupNS:         cfg.RuncNoCgroupNS,
+		runcNoPIDNS:            cfg.RuncNoPIDNS,
+		runcNoIPCNS:            cfg.RuncNoIPCNS,
+		runcNoUTSNS:            cfg.RuncNoUTSNS,
+		useSudo:                cfg.UseSudo,
+		tarChunk:               cfg.TarChunk,
+		defaultDiscovery:       strings.TrimSpace(cfg.DefaultDiscovery),
+		tempDir:                strings.TrimSpace(cfg.TempDir),
+		limitCPUCores:          cfg.LimitCPUCores,
+		limitMemoryMB:          cfg.LimitMemoryMB,
+		layerMountConcurrency:  cfg.LayerMountConcurrency,
+		mountPprofListen:       strings.TrimSpace(cfg.MountPprofListen),
+		fuseMaxReadAheadBytes:  cfg.FUSEMaxReadAheadBytes,
+		sharedCatalogMaxImages: cfg.SharedCatalogMaxImages,
+		sharedCatalogIdleTTL:   cfg.SharedCatalogIdleTTL,
+		pageCacheStore:         cfg.PageCacheStore,
+		elfCacheStore:          cfg.ELFCacheStore,
+		tocCache:               cfg.TOCCache,
+		mountMode:              strings.TrimSpace(cfg.MountMode),
+		sharedMountRoot:        strings.TrimSpace(cfg.SharedMountRoot),
 	}
 	if s.runcBinary == "" {
 		s.runcBinary = "afs_runc"
@@ -449,26 +458,29 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	}
 
 	mountCfg := afsmount.Config{
-		Mountpoint:            sess.mountpoint,
-		WorkDir:               sess.workDir,
-		ExtraDir:              sess.extraDir,
-		MountProcDev:          false,
-		Image:                 image,
-		Tag:                   tag,
-		DiscoveryAddr:         discoveryAddr,
-		NodeID:                strings.TrimSpace(start.GetNodeId()),
-		PlatformOS:            strings.TrimSpace(start.GetPlatformOs()),
-		PlatformArch:          strings.TrimSpace(start.GetPlatformArch()),
-		PlatformVariant:       strings.TrimSpace(start.GetPlatformVariant()),
-		ForceLocalFetch:       start.GetForceLocalFetch(),
-		LayerMountConcurrency: s.layerMountConcurrency,
-		PprofListen:           s.mountPprofListen,
-		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
-		PageCacheStore:        s.pageCacheStore,
-		ELFCacheStore:         s.elfCacheStore,
-		HoldReaper:            HoldReaper,
-		TOCCache:              s.tocCache,
-		MountMode:             s.mountMode,
+		Mountpoint:             sess.mountpoint,
+		SharedMountRoot:        s.sharedMountRoot,
+		WorkDir:                sess.workDir,
+		ExtraDir:               sess.extraDir,
+		MountProcDev:           false,
+		Image:                  image,
+		Tag:                    tag,
+		DiscoveryAddr:          discoveryAddr,
+		NodeID:                 strings.TrimSpace(start.GetNodeId()),
+		PlatformOS:             strings.TrimSpace(start.GetPlatformOs()),
+		PlatformArch:           strings.TrimSpace(start.GetPlatformArch()),
+		PlatformVariant:        strings.TrimSpace(start.GetPlatformVariant()),
+		ForceLocalFetch:        start.GetForceLocalFetch(),
+		LayerMountConcurrency:  s.layerMountConcurrency,
+		PprofListen:            s.mountPprofListen,
+		FUSEMaxReadAheadBytes:  fuseMaxReadAheadBytes,
+		SharedCatalogMaxImages: s.sharedCatalogMaxImages,
+		SharedCatalogIdleTTL:   s.sharedCatalogIdleTTL,
+		PageCacheStore:         s.pageCacheStore,
+		ELFCacheStore:          s.elfCacheStore,
+		HoldReaper:             HoldReaper,
+		TOCCache:               s.tocCache,
+		MountMode:              s.mountMode,
 	}
 	mountWait := make(chan error, 1)
 	readyCh := make(chan struct{}, 1)

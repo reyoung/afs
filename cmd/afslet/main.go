@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +43,8 @@ func main() {
 	var layerMountConcurrency int
 	var mountPprofListen string
 	var fuseMaxReadAhead string
+	var sharedCatalogMaxImages int
+	var sharedCatalogIdleTTL time.Duration
 	var pprofListen string
 	var pageCacheDir string
 	var pageCacheMaxSize string
@@ -67,6 +71,8 @@ func main() {
 	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
 	flag.StringVar(&mountPprofListen, "mount-pprof-listen", "", "optional HTTP listen address for mount pprof")
 	flag.StringVar(&fuseMaxReadAhead, "fuse-max-read-ahead", "8M", "max FUSE read-ahead bytes, e.g. 8M, 16M, 32MiB")
+	flag.IntVar(&sharedCatalogMaxImages, "shared-catalog-max-images", 64, "max idle+active image directories kept in shared FUSE catalog")
+	flag.DurationVar(&sharedCatalogIdleTTL, "shared-catalog-idle-ttl", 10*time.Minute, "idle TTL before evicting an unused image directory from shared FUSE catalog")
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
 	flag.StringVar(&pageCacheDir, "page-cache-dir", "", "directory for on-disk page cache (empty=disabled)")
 	flag.StringVar(&pageCacheMaxSize, "page-cache-max-size", "8GB", "max size for on-disk page cache, e.g. 8GB, 16GiB")
@@ -120,26 +126,29 @@ func main() {
 	}
 
 	svc := afslet.NewService(afslet.Config{
-		RuncBinary:            runcBinary,
-		RuncNoPivot:           runcNoPivot,
-		RuncNoNewKeyring:      runcNoNewKeyring,
-		RuncNoCgroupNS:        runcNoCgroupNS,
-		RuncNoPIDNS:           runcNoPIDNS,
-		RuncNoIPCNS:           runcNoIPCNS,
-		RuncNoUTSNS:           runcNoUTSNS,
-		UseSudo:               useSudo,
-		TarChunk:              tarChunk,
-		DefaultDiscovery:      defaultDiscoveryAddr,
-		TempDir:               tempDir,
-		LimitCPUCores:         limitCPUCores,
-		LimitMemoryMB:         limitMemoryMB,
-		LayerMountConcurrency: layerMountConcurrency,
-		MountPprofListen:      mountPprofListen,
-		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
-		PageCacheStore:        pageCacheStore,
-		ELFCacheStore:         elfCacheStore,
-		TOCCache:              layerformat.NewTOCCache(256),
-		MountMode:             mountMode,
+		RuncBinary:             runcBinary,
+		RuncNoPivot:            runcNoPivot,
+		RuncNoNewKeyring:       runcNoNewKeyring,
+		RuncNoCgroupNS:         runcNoCgroupNS,
+		RuncNoPIDNS:            runcNoPIDNS,
+		RuncNoIPCNS:            runcNoIPCNS,
+		RuncNoUTSNS:            runcNoUTSNS,
+		UseSudo:                useSudo,
+		TarChunk:               tarChunk,
+		DefaultDiscovery:       defaultDiscoveryAddr,
+		TempDir:                tempDir,
+		SharedMountRoot:        sharedMountRoot(tempDir),
+		LimitCPUCores:          limitCPUCores,
+		LimitMemoryMB:          limitMemoryMB,
+		LayerMountConcurrency:  layerMountConcurrency,
+		MountPprofListen:       mountPprofListen,
+		FUSEMaxReadAheadBytes:  fuseMaxReadAheadBytes,
+		SharedCatalogMaxImages: sharedCatalogMaxImages,
+		SharedCatalogIdleTTL:   sharedCatalogIdleTTL,
+		PageCacheStore:         pageCacheStore,
+		ELFCacheStore:          elfCacheStore,
+		TOCCache:               layerformat.NewTOCCache(256),
+		MountMode:              mountMode,
 	})
 
 	grpcServer := grpc.NewServer()
@@ -177,4 +186,11 @@ func main() {
 		defer cancel()
 		_ = shutdownPprof(ctx)
 	}
+}
+
+func sharedMountRoot(tempDir string) string {
+	if strings.TrimSpace(tempDir) == "" {
+		return ""
+	}
+	return filepath.Join(tempDir, "shared-catalog")
 }

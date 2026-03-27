@@ -91,6 +91,8 @@ services:
       AFSLET_ELF_CACHE_MAX_SIZE: ${AFSLET_ELF_CACHE_MAX_SIZE:-1GB}
       AFSLET_ELF_CACHE_MAX_FILE_SIZE: ${AFSLET_ELF_CACHE_MAX_FILE_SIZE:-32MB}
       AFSLET_MOUNT_MODE: ${AFSLET_MOUNT_MODE:-unified-koverlay}
+      AFSLET_SHARED_CATALOG_MAX_IMAGES: ${AFSLET_SHARED_CATALOG_MAX_IMAGES:-64}
+      AFSLET_SHARED_CATALOG_IDLE_TTL: ${AFSLET_SHARED_CATALOG_IDLE_TTL:-10m}
     entrypoint: ["/bin/bash", "-lc"]
     command:
       - |
@@ -112,6 +114,8 @@ services:
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
           -mount-mode=$${AFSLET_MOUNT_MODE:-unified-koverlay} \
+          -shared-catalog-max-images "$${AFSLET_SHARED_CATALOG_MAX_IMAGES:-64}" \
+          -shared-catalog-idle-ttl "$${AFSLET_SHARED_CATALOG_IDLE_TTL:-10m}" \
           -pprof-listen=:6062 \
           -graceful-timeout=15s \
           "$${PAGE_CACHE_ARGS[@]}" \
