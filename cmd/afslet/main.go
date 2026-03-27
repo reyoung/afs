@@ -66,7 +66,7 @@ func main() {
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
 	flag.StringVar(&pageCacheDir, "page-cache-dir", "", "directory for on-disk page cache (empty=disabled)")
 	flag.StringVar(&pageCacheMaxSize, "page-cache-max-size", "8GB", "max size for on-disk page cache, e.g. 8GB, 16GiB")
-	flag.StringVar(&mountMode, "mount-mode", "unified-rw", "mount mode: per-layer or unified")
+	flag.StringVar(&mountMode, "mount-mode", "unified-koverlay", "mount mode: unified-koverlay")
 	flag.Parse()
 
 	fuseMaxReadAheadBytes, err := bytesize.Parse(fuseMaxReadAhead)
@@ -95,25 +95,25 @@ func main() {
 	}
 
 	svc := afslet.NewService(afslet.Config{
-		RuncBinary:                  runcBinary,
-		RuncNoPivot:                 runcNoPivot,
-		RuncNoNewKeyring:            runcNoNewKeyring,
-		RuncNoCgroupNS:              runcNoCgroupNS,
-		RuncNoPIDNS:                 runcNoPIDNS,
-		RuncNoIPCNS:                 runcNoIPCNS,
-		RuncNoUTSNS:                 runcNoUTSNS,
-		UseSudo:                     useSudo,
-		TarChunk:                    tarChunk,
-		DefaultDiscovery:            defaultDiscoveryAddr,
-		TempDir:                     tempDir,
-		LimitCPUCores:               limitCPUCores,
-		LimitMemoryMB:               limitMemoryMB,
-		LayerMountConcurrency:       layerMountConcurrency,
-		MountPprofListen:            mountPprofListen,
-		FUSEMaxReadAheadBytes:       fuseMaxReadAheadBytes,
-		PageCacheStore:              pageCacheStore,
-		TOCCache:                    layerformat.NewTOCCache(256),
-		MountMode:                   mountMode,
+		RuncBinary:            runcBinary,
+		RuncNoPivot:           runcNoPivot,
+		RuncNoNewKeyring:      runcNoNewKeyring,
+		RuncNoCgroupNS:        runcNoCgroupNS,
+		RuncNoPIDNS:           runcNoPIDNS,
+		RuncNoIPCNS:           runcNoIPCNS,
+		RuncNoUTSNS:           runcNoUTSNS,
+		UseSudo:               useSudo,
+		TarChunk:              tarChunk,
+		DefaultDiscovery:      defaultDiscoveryAddr,
+		TempDir:               tempDir,
+		LimitCPUCores:         limitCPUCores,
+		LimitMemoryMB:         limitMemoryMB,
+		LayerMountConcurrency: layerMountConcurrency,
+		MountPprofListen:      mountPprofListen,
+		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
+		PageCacheStore:        pageCacheStore,
+		TOCCache:              layerformat.NewTOCCache(256),
+		MountMode:             mountMode,
 	})
 
 	grpcServer := grpc.NewServer()

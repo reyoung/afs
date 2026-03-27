@@ -3,24 +3,20 @@ package afsmount
 import (
 	"context"
 
-	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerformat"
+	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 // MountResult holds a mounted filesystem ready for runc.
 type MountResult struct {
-	// LayerDirs is the list of read-only layer directories (for per-layer mode).
-	// For unified mode, this contains a single directory.
+	// LayerDirs is the list of read-only layer directories used as lowerdirs.
 	LayerDirs []string
 	// Cleanup unmounts everything and releases resources. Must be called exactly once.
 	Cleanup func()
-	// Stats holds per-layer or unified FUSE statistics.
+	// Stats holds FUSE statistics for the mounted lower filesystem.
 	Stats []*layerfuse.FuseStats
-	// DirectMount is true when the mounter mounted directly at the final
-	// rootfs mountpoint with write support, so the caller can skip fuse-overlayfs.
-	DirectMount bool
 }
 
 // LayerInfo describes a single OCI layer for mounting.
@@ -40,10 +36,8 @@ type MountConfig struct {
 	TOCCache   *layerformat.TOCCache
 	HoldReaper func() func()
 
-	// Fields for unified-rw mode.
-	Mountpoint  string // final rootfs mount point (for direct mount modes)
-	ExtraDir    string // extra files directory
-	WritableDir string // writable upper dir path
+	ExtraDir    string
+	WritableDir string
 }
 
 // Mounter prepares a read-only rootfs from a set of OCI layers.

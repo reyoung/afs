@@ -1,7 +1,6 @@
 package afsmount
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -14,11 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	fusefs "github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -26,7 +23,6 @@ import (
 	"github.com/reyoung/afs/pkg/discoverypb"
 	"github.com/reyoung/afs/pkg/grpcclientcache"
 	"github.com/reyoung/afs/pkg/layerformat"
-	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
 	"github.com/reyoung/afs/pkg/layerstorepb"
 	"github.com/reyoung/afs/pkg/pagecache"
@@ -40,8 +36,6 @@ const (
 	imageResolveCacheMaxEntries = 256
 	layerSvcCacheTTL            = 5 * time.Second
 	layerSvcCacheMaxEntries     = 2048
-	unionMountReadyTimeout      = 120 * time.Second
-	unionMountReadyPollInterval = 1 * time.Millisecond
 )
 
 type Config struct {
@@ -70,7 +64,7 @@ type Config struct {
 	PageCacheStore        *pagecache.Store
 	HoldReaper            func() func()
 	TOCCache              *layerformat.TOCCache
-	MountMode             string // "unified-rw" (default), "per-layer", or "unified" (default), "unified", or "unified-rw"
+	MountMode             string // only "unified-koverlay" is supported
 }
 
 type config struct {
@@ -247,7 +241,10 @@ func normalizeConfig(userCfg Config) (config, error) {
 		cfg.grpcInsecure = true
 	}
 	if cfg.mountMode == "" {
-		cfg.mountMode = "unified-rw"
+		cfg.mountMode = "unified-koverlay"
+	}
+	if cfg.mountMode != "unified-koverlay" {
+		return config{}, fmt.Errorf("unsupported -mount-mode %q", cfg.mountMode)
 	}
 
 	if cfg.mountpoint == "" {
@@ -438,16 +435,10 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	}
 	logTiming("layer_readers_prepare_total", layerReadersStarted, "layers="+strconv.Itoa(len(layers)))
 
-	// Choose mounter based on config.
-	var mounter Mounter
-	switch cfg.mountMode {
-	case "unified":
-		mounter = &UnifiedMounter{}
-	case "unified-rw":
-		mounter = &UnifiedRWMounter{}
-	default:
-		mounter = &PerLayerMounter{Concurrency: cfg.layerMountConcurrency}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("mount-mode %q requires linux", cfg.mountMode)
 	}
+	mounter := &UnifiedMounter{}
 
 	mountCfg := MountConfig{
 		Layers:      layerInfos,
@@ -457,7 +448,6 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		PageCache:   cacheStore,
 		TOCCache:    cfg.tocCache,
 		HoldReaper:  cfg.holdReaper,
-		Mountpoint:  cfg.mountpoint,
 		ExtraDir:    cfg.extraDir,
 		WritableDir: filepath.Join(workDir, "writable-upper"),
 	}
@@ -473,149 +463,23 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	}
 	defer mountResult.Cleanup()
 
-	// DirectMount: the mounter already mounted at cfg.mountpoint with write support.
-	// Skip fuse-overlayfs entirely; just mount extra filesystems and wait.
-	if mountResult.DirectMount {
-		mountExtraFSStarted := time.Now()
-		extraMountTargets, err := mountExtraFilesystems(runtime.GOOS, cfg.mountpoint, cfg.mountProcDev)
-		if err != nil {
-			return err
-		}
-		logTiming("mount_extra_filesystems", mountExtraFSStarted, "targets="+strconv.Itoa(len(extraMountTargets)))
-		defer func() {
-			if err := unmountExtraFilesystems(runtime.GOOS, extraMountTargets); err != nil {
-				log.Printf("unmount extra filesystems failed: %v", err)
-			}
-		}()
-
-		if cfg.onReady != nil {
-			safeInvokeReadyCallback(cfg.onReady)
-		}
-
-		// Block until context is cancelled.
-		<-ctx.Done()
-		return nil
-	}
-
 	layerDirs := mountResult.LayerDirs
 
-	var writableLayerDir string
-	var writableWorkDir string
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		writableLayerDir = filepath.Join(workDir, "writable-upper")
-		mkdirWritableUpperStarted := time.Now()
-		if err := os.MkdirAll(writableLayerDir, 0o755); err != nil {
-			return fmt.Errorf("create writable upper dir: %w", err)
-		}
-		logTiming("prepare_writable_upper_dir", mkdirWritableUpperStarted)
+	writableLayerDir := filepath.Join(workDir, "writable-upper")
+	mkdirWritableUpperStarted := time.Now()
+	if err := os.MkdirAll(writableLayerDir, 0o755); err != nil {
+		return fmt.Errorf("create writable upper dir: %w", err)
 	}
-	if runtime.GOOS == "linux" {
-		writableWorkDir = filepath.Join(workDir, "writable-work")
-		mkdirWritableWorkStarted := time.Now()
-		if err := os.MkdirAll(writableWorkDir, 0o755); err != nil {
-			return fmt.Errorf("create writable work dir: %w", err)
-		}
-		logTiming("prepare_writable_work_dir", mkdirWritableWorkStarted)
-	}
+	logTiming("prepare_writable_upper_dir", mkdirWritableUpperStarted)
 
-	buildUnionCmdStarted := time.Now()
-	unionCmd, err := buildUnionMountCommand(runtime.GOOS, layerDirs, cfg.mountpoint, writableLayerDir, writableWorkDir, cfg.extraDir)
-	if err != nil {
-		return err
+	writableWorkDir := filepath.Join(workDir, "writable-work")
+	mkdirWritableWorkStarted := time.Now()
+	if err := os.MkdirAll(writableWorkDir, 0o755); err != nil {
+		return fmt.Errorf("create writable work dir: %w", err)
 	}
-	logTiming("build_union_mount_command", buildUnionCmdStarted)
-	log.Printf("starting union mount command: %s %s", unionCmd.Path, strings.Join(unionCmd.Args[1:], " "))
-	unionCmd.Stdout = os.Stdout
-	unionCmd.Stderr = os.Stderr
-	startUnionCmdStarted := time.Now()
-	if err := unionCmd.Start(); err != nil {
-		return fmt.Errorf("start union mount: %w", err)
-	}
-	logTiming("start_union_mount_process", startUnionCmdStarted)
-	mountExtraFSStarted := time.Now()
-	extraMountTargets, err := mountExtraFilesystems(runtime.GOOS, cfg.mountpoint, cfg.mountProcDev)
-	if err != nil {
-		_ = unionCmd.Process.Signal(syscall.SIGTERM)
-		_ = tryUnmountUnion(runtime.GOOS, cfg.mountpoint)
-		return err
-	}
-	logTiming("mount_extra_filesystems", mountExtraFSStarted, "targets="+strconv.Itoa(len(extraMountTargets)))
-	defer func() {
-		if err := unmountExtraFilesystems(runtime.GOOS, extraMountTargets); err != nil {
-			log.Printf("unmount extra filesystems failed: %v", err)
-		}
-	}()
+	logTiming("prepare_writable_work_dir", mkdirWritableWorkStarted)
 
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- unionCmd.Wait() }()
-	stopUnion := func(reason string) {
-		stopUnionStarted := time.Now()
-		log.Printf("stopping union mount (%s)", reason)
-		unmountExtraFSStarted := time.Now()
-		if err := unmountExtraFilesystems(runtime.GOOS, extraMountTargets); err != nil {
-			log.Printf("explicit extra unmount failed: %v", err)
-		}
-		logTiming("stop_unmount_extra_filesystems", unmountExtraFSStarted, "targets="+strconv.Itoa(len(extraMountTargets)))
-		unmountUnionStarted := time.Now()
-		if err := tryUnmountUnion(runtime.GOOS, cfg.mountpoint); err != nil {
-			log.Printf("explicit union unmount failed: %v", err)
-		} else {
-			log.Printf("union mount unmounted: %s", cfg.mountpoint)
-		}
-		logTiming("stop_unmount_union", unmountUnionStarted)
-		_ = unionCmd.Process.Signal(syscall.SIGTERM)
-		waitUnionExitStarted := time.Now()
-		waitForExit := func(timeout time.Duration) (error, bool) {
-			timer := time.NewTimer(timeout)
-			defer timer.Stop()
-			select {
-			case err := <-waitCh:
-				return err, true
-			case <-timer.C:
-				return nil, false
-			}
-		}
-		if err, exited := waitForExit(5 * time.Second); exited {
-			if err != nil {
-				log.Printf("union mount exited with error: %v", err)
-			}
-		} else {
-			if killErr := unionCmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-				log.Printf("force kill union mount failed: %v", killErr)
-			}
-			if err, killedExited := waitForExit(2 * time.Second); killedExited {
-				if err != nil {
-					log.Printf("union mount exited with error after kill: %v", err)
-				}
-			} else {
-				log.Printf("union mount did not report exit after SIGKILL")
-			}
-		}
-		logTiming("stop_wait_union_exit", waitUnionExitStarted)
-		logTiming("stop_union_total", stopUnionStarted)
-	}
-	if cfg.onReady != nil {
-		readyWaitStarted := time.Now()
-		if err := waitForUnionMountReady(ctx, cfg.mountpoint, waitCh, unionMountReadyTimeout, nil); err != nil {
-			logTiming("wait_union_mount_ready", readyWaitStarted, "ok=false")
-			stopUnion("ready wait failed")
-			return err
-		}
-		logTiming("wait_union_mount_ready", readyWaitStarted, "ok=true")
-		safeInvokeReadyCallback(cfg.onReady)
-	}
-
-	select {
-	case <-ctx.Done():
-		stopUnion(ctx.Err().Error())
-		return nil
-	case err := <-waitCh:
-		if err != nil {
-			return fmt.Errorf("union mount exited: %w", err)
-		}
-	}
-
-	return nil
+	return runKernelOverlayUnion(ctx, cfg.mountpoint, layerDirs, writableLayerDir, writableWorkDir, cfg.extraDir, cfg.mountProcDev, cfg.onReady)
 }
 
 func pullImageWithDiscovery(ctx context.Context, imageProviders []serviceInfo, allServices []serviceInfo, cfg config) (serviceInfo, *layerstorepb.PullImageResponse, error) {
@@ -935,173 +799,6 @@ func toLayerReaderServices(in []serviceInfo) []layerreader.ServiceInfo {
 	return out
 }
 
-func waitForUnionMountReady(ctx context.Context, mountpoint string, waitCh <-chan error, timeout time.Duration, readyFn func(string) (bool, error)) error {
-	if readyFn == nil {
-		readyFn = isUnionMountReady
-	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(unionMountReadyPollInterval)
-	defer ticker.Stop()
-	var lastReadyErr error
-	for {
-		if err, exited := tryReadUnionWait(waitCh); exited {
-			if err != nil {
-				return fmt.Errorf("union mount exited before ready callback: %w", err)
-			}
-			return fmt.Errorf("union mount exited before ready callback")
-		}
-
-		ready, err := readyFn(mountpoint)
-		if err == nil && ready {
-			return nil
-		}
-		if err != nil {
-			lastReadyErr = err
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		case <-deadline.C:
-			if lastReadyErr != nil {
-				return fmt.Errorf("timeout waiting for union mount ready: %w", lastReadyErr)
-			}
-			return fmt.Errorf("timeout waiting for union mount ready")
-		}
-	}
-}
-
-func tryReadUnionWait(waitCh <-chan error) (error, bool) {
-	select {
-	case err := <-waitCh:
-		return err, true
-	default:
-		return nil, false
-	}
-}
-
-func isUnionMountReady(mountpoint string) (bool, error) {
-	if runtime.GOOS == "linux" {
-		mounted, err := isMountedLinux(mountpoint)
-		if err != nil {
-			return false, err
-		}
-		if !mounted {
-			return false, nil
-		}
-	}
-	if _, err := os.Stat(mountpoint); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func isMountedLinux(mountpoint string) (bool, error) {
-	f, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		fields := strings.Fields(s.Text())
-		if len(fields) < 5 {
-			continue
-		}
-		if unescapeMountInfoField(fields[4]) == mountpoint {
-			return true, nil
-		}
-	}
-	if err := s.Err(); err != nil {
-		return false, err
-	}
-	return false, nil
-}
-
-func unescapeMountInfoField(v string) string {
-	replacer := strings.NewReplacer("\\040", " ", "\\011", "\t", "\\012", "\n", "\\134", "\\")
-	return replacer.Replace(v)
-}
-
-func tryUnmountUnion(goos string, mountpoint string) error {
-	var errs []string
-	for _, argv := range unmountCandidates(goos, mountpoint) {
-		if len(argv) == 0 {
-			continue
-		}
-		cmd := exec.Command(argv[0], argv[1:]...)
-		log.Printf("trying unmount command: %s", strings.Join(argv, " "))
-		if out, err := cmd.CombinedOutput(); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v (%s)", strings.Join(argv, " "), err, strings.TrimSpace(string(out))))
-			continue
-		}
-		log.Printf("unmount command succeeded: %s", strings.Join(argv, " "))
-		return nil
-	}
-	if len(errs) == 0 {
-		return fmt.Errorf("no unmount command candidates for os=%s", goos)
-	}
-	return errors.New(strings.Join(errs, "; "))
-}
-
-func unmountCandidates(goos string, mountpoint string) [][]string {
-	switch goos {
-	case "linux":
-		return [][]string{{"fusermount3", "-u", mountpoint}, {"fusermount", "-u", mountpoint}, {"umount", mountpoint}}
-	case "darwin":
-		return [][]string{{"umount", mountpoint}, {"diskutil", "unmount", "force", mountpoint}}
-	default:
-		return [][]string{{"umount", mountpoint}}
-	}
-}
-
-func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDigest string, debug bool, fuseMaxReadAheadBytes int64, cacheStore *pagecache.Store, holdReaper func() func()) (*fuse.Server, *layerfuse.FuseStats, error) {
-	var root *layerfuse.DirNode
-	var fuseStats *layerfuse.FuseStats
-	if cacheStore != nil {
-		root, fuseStats = layerfuse.NewRootWithPageCache(reader, cacheStore)
-	} else {
-		root, fuseStats = layerfuse.NewRoot(reader)
-	}
-	entryTimeout := 30 * time.Second
-	attrTimeout := 30 * time.Second
-	negativeTimeout := 5 * time.Second
-	// Hold the child reaper while fusefs.Mount spawns fusermount3 subprocess.
-	// Without this, the reaper's Wait4(-1) can steal the fusermount3 child
-	// before go-fuse's exec.Cmd.Wait() runs, causing "waitid: no child processes".
-	var releaseReaper func()
-	if holdReaper != nil {
-		releaseReaper = holdReaper()
-	}
-	server, err := fusefs.Mount(mountpoint, root, &fusefs.Options{
-		EntryTimeout:    &entryTimeout,
-		AttrTimeout:     &attrTimeout,
-		NegativeTimeout: &negativeTimeout,
-		MountOptions: fuse.MountOptions{
-			Debug:                debug,
-			FsName:               fmt.Sprintf("afslyr:%s", source),
-			Name:                 "afslyr",
-			Options:              []string{"ro", "exec"},
-			MaxWrite:             1 << 20,
-			MaxReadAhead:         int(fuseMaxReadAheadBytes),
-			EnableSymlinkCaching: true,
-		},
-	})
-	if releaseReaper != nil {
-		releaseReaper()
-	}
-	if err != nil {
-		if strings.Contains(err.Error(), "no FUSE mount utility found") {
-			return nil, nil, fmt.Errorf("mount fuse: %w (hint: install FUSE runtime)", err)
-		}
-		return nil, nil, fmt.Errorf("mount fuse: %w", err)
-	}
-	return server, fuseStats, nil
-}
-
 func mountExtraFilesystems(goos string, mountpoint string, enabled bool) ([]string, error) {
 	specs := extraMountSpecs(goos, mountpoint, enabled)
 	if len(specs) == 0 {
@@ -1196,47 +893,86 @@ func resolveWorkDir(workDir string) (dir string, autoCreated bool, err error) {
 	return workDir, false, nil
 }
 
-func buildUnionMountCommand(goos string, layerDirs []string, mountpoint string, writableUpper string, writableWork string, extraDir string) (*exec.Cmd, error) {
+func buildLinuxOverlayOptions(layerDirs []string, writableUpper string, writableWork string, extraDir string) ([]string, error) {
 	if len(layerDirs) == 0 {
 		return nil, fmt.Errorf("no layer directories to compose")
 	}
 	extraDir = strings.TrimSpace(extraDir)
 	ordered := reverseCopy(layerDirs)
-	if goos == "linux" {
-		if extraDir != "" {
-			ordered = append([]string{extraDir}, ordered...)
-		}
-		lower := strings.Join(ordered, ":")
-		opts := []string{"lowerdir=" + lower, "exec"}
-		if strings.TrimSpace(writableUpper) != "" {
-			if strings.TrimSpace(writableWork) == "" {
-				return nil, fmt.Errorf("writable work dir is required for linux upperdir")
-			}
-			opts = append(opts, "upperdir="+writableUpper, "workdir="+writableWork)
-		}
-		return exec.Command("fuse-overlayfs", "-f", "-o", strings.Join(opts, ","), mountpoint), nil
+	if extraDir != "" {
+		ordered = append([]string{extraDir}, ordered...)
 	}
-	if goos == "darwin" {
-		branches := make([]string, 0, len(ordered)+1)
-		if strings.TrimSpace(writableUpper) != "" {
-			branches = append(branches, writableUpper+"=RW")
+	opts := []string{"lowerdir=" + strings.Join(ordered, ":")}
+	if strings.TrimSpace(writableUpper) != "" {
+		if strings.TrimSpace(writableWork) == "" {
+			return nil, fmt.Errorf("writable work dir is required for linux upperdir")
 		}
-		if extraDir != "" {
-			branches = append(branches, extraDir+"=RO")
-		}
-		for _, dir := range ordered {
-			branches = append(branches, dir+"=RO")
-		}
-		binary := "unionfs-fuse"
-		if _, err := exec.LookPath(binary); err != nil {
-			if _, altErr := exec.LookPath("unionfs"); altErr != nil {
-				return nil, fmt.Errorf("unionfs-fuse not found (also tried unionfs)")
-			}
-			binary = "unionfs"
-		}
-		return exec.Command(binary, "-f", "-o", "cow,exec", strings.Join(branches, ":"), mountpoint), nil
+		opts = append(opts, "upperdir="+writableUpper, "workdir="+writableWork)
 	}
-	return nil, fmt.Errorf("unsupported OS %s; only linux and darwin are supported", goos)
+	return opts, nil
+}
+
+func mountLinuxOverlayUnion(layerDirs []string, mountpoint string, writableUpper string, writableWork string, extraDir string) error {
+	opts, err := buildLinuxOverlayOptions(layerDirs, writableUpper, writableWork, extraDir)
+	if err != nil {
+		return err
+	}
+	if err := unix.Mount("overlay", mountpoint, "overlay", 0, strings.Join(opts, ",")); err != nil {
+		return fmt.Errorf("mount kernel overlay at %s: %w", mountpoint, err)
+	}
+	return nil
+}
+
+func unmountLinuxOverlayUnion(mountpoint string) error {
+	if err := unix.Unmount(mountpoint, 0); err != nil {
+		return fmt.Errorf("unmount kernel overlay at %s: %w", mountpoint, err)
+	}
+	return nil
+}
+
+func runKernelOverlayUnion(ctx context.Context, mountpoint string, layerDirs []string, writableUpper string, writableWork string, extraDir string, mountProcDev bool, onReady func()) error {
+	mountStarted := time.Now()
+	if err := mountLinuxOverlayUnion(layerDirs, mountpoint, writableUpper, writableWork, extraDir); err != nil {
+		return err
+	}
+	logTiming("kernel_overlay_mount", mountStarted)
+	log.Printf("kernel overlay mounted at %s with %d lowers (upper=%s)", mountpoint, len(layerDirs), writableUpper)
+
+	mountExtraFSStarted := time.Now()
+	extraMountTargets, err := mountExtraFilesystems(runtime.GOOS, mountpoint, mountProcDev)
+	if err != nil {
+		_ = unmountLinuxOverlayUnion(mountpoint)
+		return err
+	}
+	logTiming("mount_extra_filesystems", mountExtraFSStarted, "targets="+strconv.Itoa(len(extraMountTargets)))
+	defer func() {
+		if err := unmountExtraFilesystems(runtime.GOOS, extraMountTargets); err != nil {
+			log.Printf("unmount extra filesystems failed: %v", err)
+		}
+	}()
+
+	if onReady != nil {
+		safeInvokeReadyCallback(onReady)
+	}
+
+	<-ctx.Done()
+	stopUnionStarted := time.Now()
+	log.Printf("stopping kernel overlay mount (%s)", ctx.Err())
+	unmountExtraFSStarted := time.Now()
+	if err := unmountExtraFilesystems(runtime.GOOS, extraMountTargets); err != nil {
+		log.Printf("explicit extra unmount failed: %v", err)
+	}
+	extraMountTargets = nil
+	logTiming("stop_unmount_extra_filesystems", unmountExtraFSStarted)
+	unmountUnionStarted := time.Now()
+	if err := unmountLinuxOverlayUnion(mountpoint); err != nil {
+		log.Printf("explicit union unmount failed: %v", err)
+	} else {
+		log.Printf("kernel overlay unmounted: %s", mountpoint)
+	}
+	logTiming("stop_unmount_union", unmountUnionStarted)
+	logTiming("stop_union_total", stopUnionStarted)
+	return nil
 }
 
 func reverseCopy(in []string) []string {
