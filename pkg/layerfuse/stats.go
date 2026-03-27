@@ -31,6 +31,8 @@ type FuseStats struct {
 	hotMu            sync.Mutex
 	lookupHotPaths   map[string]int64
 	openHotPaths     map[string]int64
+	readHotPaths     map[string]int64
+	readHotPathBytes map[string]int64
 	readlinkHotPaths map[string]int64
 }
 
@@ -54,6 +56,22 @@ func (s *FuseStats) RecordLookupPath(path string) {
 
 func (s *FuseStats) RecordOpenPath(path string) {
 	s.recordHotPath(&s.openHotPaths, path)
+}
+
+func (s *FuseStats) RecordReadPath(path string, bytes int64) {
+	if hotPathLimit() == 0 || path == "" {
+		return
+	}
+	s.hotMu.Lock()
+	defer s.hotMu.Unlock()
+	if s.readHotPaths == nil {
+		s.readHotPaths = make(map[string]int64)
+	}
+	if s.readHotPathBytes == nil {
+		s.readHotPathBytes = make(map[string]int64)
+	}
+	s.readHotPaths[path]++
+	s.readHotPathBytes[path] += bytes
 }
 
 func (s *FuseStats) RecordReadlinkPath(path string) {
@@ -83,6 +101,8 @@ func (s *FuseStats) logHotPaths(prefix string) {
 
 	s.logOneHotPathSet(prefix, "lookup", s.lookupHotPaths, limit)
 	s.logOneHotPathSet(prefix, "open", s.openHotPaths, limit)
+	s.logOneHotPathSet(prefix, "read", s.readHotPaths, limit)
+	s.logOneHotPathBytes(prefix, "read", s.readHotPathBytes, limit)
 	s.logOneHotPathSet(prefix, "readlink", s.readlinkHotPaths, limit)
 }
 
@@ -112,6 +132,34 @@ func (s *FuseStats) logOneHotPathSet(prefix, op string, paths map[string]int64, 
 		parts = append(parts, fmt.Sprintf("%s:%d", item.path, item.count))
 	}
 	log.Printf("%s FUSE hot %s paths: %s", prefix, op, strings.Join(parts, ", "))
+}
+
+func (s *FuseStats) logOneHotPathBytes(prefix, op string, paths map[string]int64, limit int) {
+	if len(paths) == 0 {
+		return
+	}
+	type hotPath struct {
+		path  string
+		bytes int64
+	}
+	items := make([]hotPath, 0, len(paths))
+	for path, bytes := range paths {
+		items = append(items, hotPath{path: path, bytes: bytes})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].bytes == items[j].bytes {
+			return items[i].path < items[j].path
+		}
+		return items[i].bytes > items[j].bytes
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%s:%s", item.path, fmtBytes(item.bytes)))
+	}
+	log.Printf("%s FUSE hot %s bytes: %s", prefix, op, strings.Join(parts, ", "))
 }
 
 func hotPathLimit() int {

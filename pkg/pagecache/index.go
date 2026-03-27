@@ -11,7 +11,6 @@ type CacheEntry struct {
 	SlabIndex int
 	SlabClass int
 	DataSize  uint32
-	RefCount  int32
 }
 
 // PageIndex is a thread-safe in-memory index mapping page keys to cache entries.
@@ -48,67 +47,6 @@ func (idx *PageIndex) Delete(key pageKey) {
 	idx.mu.Lock()
 	delete(idx.entries, key)
 	idx.mu.Unlock()
-}
-
-// Acquire increments the refcount for the given key and returns the entry.
-// While an entry is acquired, it must not be evicted.
-func (idx *PageIndex) Acquire(key pageKey) (*CacheEntry, bool) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	entry, ok := idx.entries[key]
-	if !ok {
-		return nil, false
-	}
-	entry.RefCount++
-	return entry, true
-}
-
-// Release decrements the refcount for the given key.
-func (idx *PageIndex) Release(key pageKey) bool {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	entry, ok := idx.entries[key]
-	if !ok {
-		return false
-	}
-	if entry.RefCount > 0 {
-		entry.RefCount--
-	}
-	return true
-}
-
-// DeleteIfUnpinned removes the entry only when no active references remain.
-func (idx *PageIndex) DeleteIfUnpinned(key pageKey) (*CacheEntry, bool) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	entry, ok := idx.entries[key]
-	if !ok {
-		return nil, false
-	}
-	if entry.RefCount > 0 {
-		return nil, false
-	}
-	delete(idx.entries, key)
-	return entry, true
-}
-
-// IsPinned reports whether the entry currently has active references.
-func (idx *PageIndex) IsPinned(key pageKey) bool {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	entry, ok := idx.entries[key]
-	return ok && entry.RefCount > 0
-}
-
-// RefCountForKey reports the current refcount for tests and debugging.
-func (idx *PageIndex) RefCountForKey(key pageKey) int32 {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	entry, ok := idx.entries[key]
-	if !ok {
-		return 0
-	}
-	return entry.RefCount
 }
 
 // Len returns the number of entries in the index.

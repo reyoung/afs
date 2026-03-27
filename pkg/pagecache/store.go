@@ -117,88 +117,20 @@ func (s *Store) ReadThrough(underlying io.ReaderAt, digest string, fileSize int6
 	return totalRead, nil
 }
 
-// AcquireReadFD returns a pinned fd-backed range for a cached single-page read.
-// The caller must invoke Release on the returned handle after the kernel has
-// consumed the read result. If the requested range is not fully cache-resident
-// in a single page, it returns (nil, false).
-func (s *Store) AcquireReadFD(digest string, fileSize int64, off int64, maxLen int) (*PinnedReadFD, bool) {
-	if s == nil || digest == "" || maxLen <= 0 || off < 0 || off >= fileSize {
-		return nil, false
-	}
-
-	remain := fileSize - off
-	if remain > int64(maxLen) {
-		remain = int64(maxLen)
-	}
-	if remain <= 0 {
-		return nil, false
-	}
-
-	pageSize := choosePageSize(fileSize)
-	pageID := uint64(off / int64(pageSize))
-	pageOffset := int(off % int64(pageSize))
-	if pageOffset+int(remain) > pageSize {
-		return nil, false
-	}
-
-	key := MakePageKey(digest, pageID)
-	entry, ok := s.index.Acquire(key)
-	if !ok {
-		return nil, false
-	}
-
-	if pageOffset >= int(entry.DataSize) {
-		s.index.Release(key)
-		return nil, false
-	}
-
-	size := int(remain)
-	available := int(entry.DataSize) - pageOffset
-	if size > available {
-		size = available
-	}
-	if size <= 0 {
-		s.index.Release(key)
-		return nil, false
-	}
-
-	f, err := s.getChunkFD(entry.ChunkID)
-	if err != nil {
-		s.index.Release(key)
-		return nil, false
-	}
-
-	s.hitCount.Add(1)
-	s.eviction.Access(key)
-
-	offset := s.slab.SlabOffset(entry.SlabClass, entry.SlabIndex) + int64(pageOffset)
-	return &PinnedReadFD{
-		FD:     f.Fd(),
-		Offset: offset,
-		Size:   size,
-		releaseFn: func() {
-			s.index.Release(key)
-		},
-	}, true
-}
-
 // readPage reads a slice from a single page, using cache when possible.
 func (s *Store) readPage(underlying io.ReaderAt, digest string, fileSize int64, pageSize int, pageID uint64, pageOffset int, dst []byte) (int, error) {
 	key := MakePageKey(digest, pageID)
 
 	// Try cache hit
-	entry, ok := s.index.Acquire(key)
+	entry, ok := s.index.Get(key)
 	if ok {
-		defer s.index.Release(key)
-		if pageOffset < int(entry.DataSize) {
-			s.hitCount.Add(1)
-			s.eviction.Access(key)
+		s.hitCount.Add(1)
+		s.eviction.Access(key)
 
-			offset := s.slab.SlabOffset(entry.SlabClass, entry.SlabIndex) + int64(pageOffset)
-			n, err := s.preadChunk(entry.ChunkID, dst, offset)
-			if err == nil {
-				return n, nil
-			}
+		offset := s.slab.SlabOffset(entry.SlabClass, entry.SlabIndex) + int64(pageOffset)
+		n, err := s.preadChunk(entry.ChunkID, dst, offset)
+		if err == nil {
+			return n, nil
 		}
 		// pread failed (shouldn't happen), fall through to miss
 	}
@@ -276,25 +208,26 @@ func (s *Store) putPage(key pageKey, data []byte) {
 
 // evictEntry removes an entry from the cache.
 func (s *Store) evictEntry(key pageKey) {
-	entry, ok := s.index.DeleteIfUnpinned(key)
+	entry, ok := s.index.Get(key)
 	if !ok {
 		return
 	}
 	s.slab.Free(entry.ChunkID, entry.SlabIndex)
+	s.index.Delete(key)
 }
 
 // allocateWithEviction tries to make space by evicting entries.
 func (s *Store) allocateWithEviction(slabClass int) (uint32, int, error) {
 	for attempts := 0; attempts < 64; attempts++ {
-		victim := s.eviction.FindVictim(s.index.IsPinned)
+		victim := s.eviction.FindVictim(func(key pageKey) bool {
+			return false
+		})
 		if victim == nil {
 			break
 		}
 
 		s.evictEntry(*victim)
-		if _, ok := s.index.Get(*victim); !ok {
-			s.eviction.Remove(*victim)
-		}
+		s.eviction.Remove(*victim)
 
 		chunkID, slabIndex, err := s.slab.Allocate(slabClass)
 		if err == nil {

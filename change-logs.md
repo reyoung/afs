@@ -70,7 +70,6 @@ Latest integration result (same command and dataset):
 - Added `afs_mount` flag:
   - `-no-spill-cache` to disable on-disk spill-file reuse for decompressed payloads.
 - Optimized layer FUSE read path:
-  - `pkg/layerfuse/fs.go` now serves reads via `fuse.ReadResultFd(...)` to avoid per-read userspace copy/allocation in `FileNode.Read`.
   - spill write path now uses `bufio.NewWriterSize(..., 1<<20)` for smoother large writes.
   - `no-spill-cache` mode keeps fd-backed temp storage and removes temp path, so cache files do not accumulate.
 - Tuned layer FUSE mount options in `cmd/afs_mount/main.go`:

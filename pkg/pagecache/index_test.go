@@ -143,39 +143,3 @@ func TestPageIndex_ConcurrentAccess(t *testing.T) {
 		t.Fatalf("expected 100 entries, got %d", idx.Len())
 	}
 }
-
-func TestPageIndex_AcquireReleaseAndDeleteIfUnpinned(t *testing.T) {
-	idx := NewPageIndex()
-	key := MakePageKey("digest", 7)
-	idx.Put(key, &CacheEntry{ChunkID: 1})
-
-	entry, ok := idx.Acquire(key)
-	if !ok {
-		t.Fatal("Acquire() miss, want hit")
-	}
-	if entry.RefCount != 1 {
-		t.Fatalf("RefCount after Acquire = %d, want 1", entry.RefCount)
-	}
-
-	if _, ok := idx.DeleteIfUnpinned(key); ok {
-		t.Fatal("DeleteIfUnpinned() succeeded while entry pinned")
-	}
-	if !idx.IsPinned(key) {
-		t.Fatal("IsPinned() = false, want true")
-	}
-
-	if !idx.Release(key) {
-		t.Fatal("Release() = false, want true")
-	}
-	if got := idx.RefCountForKey(key); got != 0 {
-		t.Fatalf("RefCount after Release = %d, want 0", got)
-	}
-
-	deleted, ok := idx.DeleteIfUnpinned(key)
-	if !ok {
-		t.Fatal("DeleteIfUnpinned() miss after Release")
-	}
-	if deleted.ChunkID != 1 {
-		t.Fatalf("deleted ChunkID = %d, want 1", deleted.ChunkID)
-	}
-}

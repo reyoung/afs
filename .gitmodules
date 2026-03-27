@@ -1,4 +1,0 @@
-[submodule "third_party_go_fuse"]
-	path = third_party_go_fuse
-	url = https://github.com/reyoung/go-fuse.git
-	branch = master

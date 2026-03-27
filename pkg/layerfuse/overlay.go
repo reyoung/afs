@@ -453,15 +453,12 @@ func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byt
 	buf := dest[:remain]
 
 	if f.store != nil && f.entry.Digest != "" {
-		if readFD, ok := f.store.AcquireReadFD(f.entry.Digest, fileSize, off, len(buf)); ok {
-			f.stats.ReadBytes.Add(int64(readFD.Size))
-			return fuse.ReadResultFdWithDone(readFD.FD, readFD.Offset, readFD.Size, readFD.Release), 0
-		}
 		n, err := f.store.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
 		if err != nil && err != io.EOF {
 			return nil, syscall.EIO
 		}
 		f.stats.ReadBytes.Add(int64(n))
+		f.stats.RecordReadPath(f.entry.Path, int64(n))
 		return fuse.ReadResultData(buf[:n]), 0
 	}
 
@@ -470,6 +467,7 @@ func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byt
 		return nil, syscall.EIO
 	}
 	f.stats.ReadBytes.Add(int64(n))
+	f.stats.RecordReadPath(f.entry.Path, int64(n))
 	return fuse.ReadResultData(buf[:n]), 0
 }
 
