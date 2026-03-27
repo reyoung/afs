@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"reflect"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/reyoung/afs/pkg/layerformat"
+	"github.com/reyoung/afs/pkg/pagecache"
 )
 
 func TestSetAttrTimes(t *testing.T) {
@@ -238,5 +240,59 @@ func TestOverlayFileNodeOpenlessReturnsENOSYS(t *testing.T) {
 	}
 	if flags != 0 {
 		t.Fatalf("Open() flags = %#x, want 0", flags)
+	}
+}
+
+func TestFileNodeReadUsesReadResultFdOnWarmSinglePageHit(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("warm-read-fd"), 1024)
+	reader := newReaderWithSingleFile(t, "warm.bin", payload)
+	section, err := reader.OpenFileSection("warm.bin")
+	if err != nil {
+		t.Fatalf("OpenFileSection() error = %v", err)
+	}
+
+	store, err := pagecache.NewStore(t.TempDir(), 8*pagecache.ChunkSize)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	const digest = "sha256:warm-read-fd"
+	warmDest := make([]byte, 4096)
+	if _, err := store.ReadThrough(&section, digest, section.Size, warmDest, 0); err != nil {
+		t.Fatalf("ReadThrough() error = %v", err)
+	}
+
+	node := &FileNode{
+		entry: layerformat.Entry{
+			Path:   "warm.bin",
+			Type:   layerformat.EntryTypeFile,
+			Mode:   0o644,
+			Digest: digest,
+		},
+		section: section,
+		store:   store,
+		stats:   &FuseStats{},
+	}
+
+	dest := make([]byte, 4096)
+	res, errno := node.Read(context.Background(), nil, dest, 0)
+	if errno != 0 {
+		t.Fatalf("Read() errno = %d", errno)
+	}
+	defer res.Done()
+
+	if got := reflect.TypeOf(res).String(); got != "*fuse.readResultFd" {
+		t.Fatalf("Read() type = %s, want *fuse.readResultFd", got)
+	}
+
+	data, status := res.Bytes(dest)
+	if status != fuse.OK {
+		t.Fatalf("ReadResult status = %v", status)
+	}
+	if !bytes.Equal(data, payload[:len(data)]) {
+		t.Fatal("Read() returned unexpected bytes")
 	}
 }

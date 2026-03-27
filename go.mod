@@ -2,6 +2,8 @@ module github.com/reyoung/afs
 
 go 1.25.3
 
+replace github.com/hanwen/go-fuse/v2 => ./third_party_go_fuse
+
 require (
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	go.etcd.io/bbolt v1.4.3
