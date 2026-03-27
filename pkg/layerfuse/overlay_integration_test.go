@@ -134,7 +134,7 @@ func mountOverlayRO(t *testing.T, layers []testLayer) string {
 		}
 	}
 
-	root, _ := NewOverlayRoot(overlayLayers, nil)
+	root, _ := NewOverlayRoot(overlayLayers, nil, nil)
 	mountDir := t.TempDir()
 
 	server, err := fs.Mount(mountDir, root, &fs.Options{

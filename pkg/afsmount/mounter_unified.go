@@ -34,7 +34,7 @@ func (m *UnifiedMounter) Mount(ctx context.Context, cfg MountConfig) (*MountResu
 	}
 
 	buildStarted := time.Now()
-	root, fuseStats := layerfuse.NewOverlayRoot(overlayLayers, cfg.PageCache)
+	root, fuseStats := layerfuse.NewOverlayRoot(overlayLayers, cfg.PageCache, cfg.ELFCache)
 	logTiming("unified_overlay_build", buildStarted, "layers="+fmt.Sprintf("%d", len(cfg.Layers)))
 
 	entryTimeout := 30 * time.Second
@@ -80,6 +80,9 @@ func (m *UnifiedMounter) Mount(ctx context.Context, cfg MountConfig) (*MountResu
 
 	cleanup := func() {
 		fuseStats.Log("unified")
+		if cfg.ELFCache != nil {
+			cfg.ELFCache.Log("unified")
+		}
 		_ = server.Unmount()
 		server.Wait()
 		for _, li := range cfg.Layers {

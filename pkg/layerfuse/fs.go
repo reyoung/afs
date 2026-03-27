@@ -13,6 +13,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/pagecache"
 )
@@ -20,20 +21,27 @@ import (
 // NewRoot builds a read-only inode tree backed by layerformat.Reader.
 func NewRoot(r *layerformat.Reader) (*DirNode, *FuseStats) {
 	stats := &FuseStats{}
-	t := buildTree(r, nil, stats)
+	t := buildTree(r, nil, nil, stats)
 	return &DirNode{tree: t, relPath: ""}, stats
 }
 
 // NewRootWithPageCache builds a read-only inode tree with page cache support.
 func NewRootWithPageCache(r *layerformat.Reader, store *pagecache.Store) (*DirNode, *FuseStats) {
 	stats := &FuseStats{}
-	t := buildTree(r, store, stats)
+	t := buildTree(r, store, nil, stats)
+	return &DirNode{tree: t, relPath: ""}, stats
+}
+
+func NewRootWithCaches(r *layerformat.Reader, pageStore *pagecache.Store, elfStore *filecache.Store) (*DirNode, *FuseStats) {
+	stats := &FuseStats{}
+	t := buildTree(r, pageStore, elfStore, stats)
 	return &DirNode{tree: t, relPath: ""}, stats
 }
 
 type tree struct {
 	reader   *layerformat.Reader
 	store    *pagecache.Store
+	elfStore *filecache.Store
 	stats    *FuseStats
 	openless atomic.Bool
 	entries  map[string]layerformat.Entry
@@ -41,10 +49,11 @@ type tree struct {
 	kinds    map[string]uint32
 }
 
-func buildTree(r *layerformat.Reader, store *pagecache.Store, stats *FuseStats) *tree {
+func buildTree(r *layerformat.Reader, store *pagecache.Store, elfStore *filecache.Store, stats *FuseStats) *tree {
 	t := &tree{
 		reader:   r,
 		store:    store,
+		elfStore: elfStore,
 		stats:    stats,
 		entries:  make(map[string]layerformat.Entry),
 		children: make(map[string][]string),
@@ -197,6 +206,7 @@ func (d *DirNode) newChildNode(ctx context.Context, e layerformat.Entry) *fs.Ino
 			entry:    e,
 			section:  section,
 			store:    d.tree.store,
+			elfStore: d.tree.elfStore,
 			stats:    d.tree.stats,
 			openless: &d.tree.openless,
 		}
@@ -211,6 +221,7 @@ type FileNode struct {
 	entry    layerformat.Entry
 	section  layerformat.FileSection
 	store    *pagecache.Store
+	elfStore *filecache.Store
 	stats    *FuseStats
 	openless *atomic.Bool
 }
@@ -257,6 +268,16 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 		return fuse.ReadResultData(nil), 0
 	}
 	buf := dest[:remain]
+
+	if f.elfStore != nil && f.entry.ContentKind == layerformat.ContentKindELF && f.entry.Digest != "" {
+		n, err := f.elfStore.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
+		if err != nil && err != io.EOF {
+			return nil, syscall.EIO
+		}
+		f.stats.ReadBytes.Add(int64(n))
+		f.stats.RecordReadPath(f.entry.Path, int64(n))
+		return fuse.ReadResultData(buf[:n]), 0
+	}
 
 	// If page cache store is available, use ReadThrough for in-process caching.
 	if f.store != nil && f.entry.Digest != "" {

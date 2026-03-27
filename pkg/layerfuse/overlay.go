@@ -17,6 +17,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/pagecache"
 )
@@ -37,6 +38,7 @@ type overlayEntry struct {
 // overlayTree holds the merged state of all layers.
 type overlayTree struct {
 	store    *pagecache.Store
+	elfStore *filecache.Store
 	stats    *FuseStats
 	openless atomic.Bool
 	entries  map[string]overlayEntry
@@ -55,9 +57,9 @@ type overlayTree struct {
 // - ".wh.NAME" whiteout files delete NAME from lower layers
 // - ".wh..wh..opq" opaque markers hide all lower layer entries in that directory
 // - Whiteout files themselves are not exposed
-func NewOverlayRoot(layers []OverlayLayer, store *pagecache.Store) (*OverlayDirNode, *FuseStats) {
+func NewOverlayRoot(layers []OverlayLayer, store *pagecache.Store, elfStore *filecache.Store) (*OverlayDirNode, *FuseStats) {
 	stats := &FuseStats{}
-	t := buildOverlayTree(layers, store, stats)
+	t := buildOverlayTree(layers, store, elfStore, stats)
 	return &OverlayDirNode{tree: t, relPath: ""}, stats
 }
 
@@ -66,7 +68,7 @@ func NewOverlayRoot(layers []OverlayLayer, store *pagecache.Store) (*OverlayDirN
 // extraDir, if non-empty, is scanned and its contents are added to the merged tree.
 func NewOverlayRootRW(layers []OverlayLayer, store *pagecache.Store, upperDir string, extraDir string) (*OverlayDirNode, *FuseStats) {
 	stats := &FuseStats{}
-	t := buildOverlayTree(layers, store, stats)
+	t := buildOverlayTree(layers, store, nil, stats)
 	t.upperDir = upperDir
 	t.deleted = make(map[string]struct{})
 
@@ -122,9 +124,10 @@ func copyExtraDirToUpper(extraDir, upperDir string) {
 	})
 }
 
-func buildOverlayTree(layers []OverlayLayer, store *pagecache.Store, stats *FuseStats) *overlayTree {
+func buildOverlayTree(layers []OverlayLayer, store *pagecache.Store, elfStore *filecache.Store, stats *FuseStats) *overlayTree {
 	t := &overlayTree{
 		store:    store,
+		elfStore: elfStore,
 		stats:    stats,
 		entries:  make(map[string]overlayEntry),
 		children: make(map[string][]string),
@@ -391,6 +394,7 @@ func (d *OverlayDirNode) newChildNode(ctx context.Context, oe overlayEntry) *fs.
 			entry:    e,
 			section:  section,
 			store:    d.tree.store,
+			elfStore: d.tree.elfStore,
 			stats:    d.tree.stats,
 			openless: &d.tree.openless,
 		}
@@ -404,6 +408,7 @@ type OverlayFileNode struct {
 	entry    layerformat.Entry
 	section  layerformat.FileSection
 	store    *pagecache.Store
+	elfStore *filecache.Store
 	stats    *FuseStats
 	openless *atomic.Bool
 }
@@ -451,6 +456,16 @@ func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byt
 		return fuse.ReadResultData(nil), 0
 	}
 	buf := dest[:remain]
+
+	if f.elfStore != nil && f.entry.ContentKind == layerformat.ContentKindELF && f.entry.Digest != "" {
+		n, err := f.elfStore.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
+		if err != nil && err != io.EOF {
+			return nil, syscall.EIO
+		}
+		f.stats.ReadBytes.Add(int64(n))
+		f.stats.RecordReadPath(f.entry.Path, int64(n))
+		return fuse.ReadResultData(buf[:n]), 0
+	}
 
 	if f.store != nil && f.entry.Digest != "" {
 		n, err := f.store.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)

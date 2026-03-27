@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
+	"debug/elf"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,13 @@ const (
 	EntryTypeSymlink EntryType = "symlink"
 )
 
+type ContentKind uint8
+
+const (
+	ContentKindUnknown ContentKind = 0
+	ContentKindELF     ContentKind = 1
+)
+
 // Entry is one object in archive metadata.
 type Entry struct {
 	Path             string       `json:"path"`
@@ -50,6 +58,7 @@ type Entry struct {
 	PayloadCodec     PayloadCodec `json:"payload_codec,omitempty"`
 	PayloadOffset    int64        `json:"payload_offset,omitempty"`
 	PayloadSize      int64        `json:"payload_size,omitempty"`
+	ContentKind      ContentKind  `json:"k,omitempty"`
 }
 
 func (e Entry) ModTime() time.Time {
@@ -132,6 +141,7 @@ func ConvertTarGzipToArchive(layerTarGzip io.Reader, out io.Writer) error {
 			}
 			sum := sha256.Sum256(payload)
 			base.Digest = "sha256:" + hex.EncodeToString(sum[:])
+			base.ContentKind = detectContentKind(normalized, payload)
 			dataOffset += int64(len(payload))
 			entries = append(entries, base)
 			dataChunks = append(dataChunks, payload)
@@ -224,6 +234,7 @@ func resolveHardlinks(entries []Entry, pending map[int]hardlinkRef, entryIndexBy
 			entries[idx].PayloadCodec = target.PayloadCodec
 			entries[idx].PayloadOffset = target.PayloadOffset
 			entries[idx].PayloadSize = target.PayloadSize
+			entries[idx].ContentKind = target.ContentKind
 			delete(pending, idx)
 			resolved[idx] = struct{}{}
 			return nil
@@ -258,12 +269,10 @@ func NewReader(ra io.ReaderAt) (*Reader, error) {
 		return nil, fmt.Errorf("invalid magic: %q (only AFSLYR02 is supported)", magicStr)
 	}
 	tocLen := binary.LittleEndian.Uint64(hdr[magicLen:])
-	tocBytes := make([]byte, tocLen)
-	if _, err := ra.ReadAt(tocBytes, int64(fixedHdrSize)); err != nil {
-		return nil, fmt.Errorf("read toc: %w", err)
-	}
 	var t toc
-	if err := json.Unmarshal(tocBytes, &t); err != nil {
+	tocReader := io.NewSectionReader(ra, int64(fixedHdrSize), int64(tocLen))
+	dec := json.NewDecoder(tocReader)
+	if err := dec.Decode(&t); err != nil {
 		return nil, fmt.Errorf("decode toc: %w", err)
 	}
 	entriesByP := make(map[string]Entry, len(t.Entries))
@@ -271,6 +280,55 @@ func NewReader(ra io.ReaderAt) (*Reader, error) {
 		entriesByP[e.Path] = e
 	}
 	return &Reader{ra: ra, toc: t, entriesByP: entriesByP, dataStart: int64(fixedHdrSize) + int64(tocLen)}, nil
+}
+
+func detectContentKind(filePath string, payload []byte) ContentKind {
+	if len(payload) < 4 {
+		return ContentKindUnknown
+	}
+	if payload[0] != 0x7f || payload[1] != 'E' || payload[2] != 'L' || payload[3] != 'F' {
+		return ContentKindUnknown
+	}
+
+	f, err := elf.NewFile(bytesReaderAt(payload))
+	if err != nil {
+		return ContentKindELF
+	}
+	defer f.Close()
+
+	hasInterp := false
+	for _, prog := range f.Progs {
+		if prog.Type == elf.PT_INTERP {
+			hasInterp = true
+			break
+		}
+	}
+	switch f.Type {
+	case elf.ET_EXEC:
+		return ContentKindELF
+	case elf.ET_DYN:
+		if hasInterp {
+			return ContentKindELF
+		}
+		return ContentKindELF
+	}
+	if strings.Contains(path.Base(filePath), ".so") {
+		return ContentKindELF
+	}
+	return ContentKindELF
+}
+
+type bytesReaderAt []byte
+
+func (b bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= int64(len(b)) {
+		return 0, io.EOF
+	}
+	n := copy(p, b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 // NewReaderCached is like NewReader but uses a TOC cache keyed by layer digest.

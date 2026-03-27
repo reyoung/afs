@@ -87,6 +87,9 @@ services:
       <<: *afs-runtime-env
       AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
       AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-false}
+      AFS_ELF_CACHE_ENABLED: ${AFS_ELF_CACHE_ENABLED:-true}
+      AFSLET_ELF_CACHE_MAX_SIZE: ${AFSLET_ELF_CACHE_MAX_SIZE:-1GB}
+      AFSLET_ELF_CACHE_MAX_FILE_SIZE: ${AFSLET_ELF_CACHE_MAX_FILE_SIZE:-32MB}
       AFSLET_MOUNT_MODE: ${AFSLET_MOUNT_MODE:-unified-koverlay}
     entrypoint: ["/bin/bash", "-lc"]
     command:
@@ -95,6 +98,10 @@ services:
         PAGE_CACHE_ARGS=()
         if [[ "$${AFS_PAGE_CACHE_ENABLED:-false}" == "true" ]]; then
           PAGE_CACHE_ARGS+=(-page-cache-dir /var/cache/afs-page-cache -page-cache-max-size 8GB)
+        fi
+        ELF_CACHE_ARGS=()
+        if [[ "$${AFS_ELF_CACHE_ENABLED:-true}" == "true" ]]; then
+          ELF_CACHE_ARGS+=(-elf-cache-dir /var/cache/afs-elf-cache -elf-cache-max-size "$${AFSLET_ELF_CACHE_MAX_SIZE:-1GB}" -elf-cache-max-file-size "$${AFSLET_ELF_CACHE_MAX_FILE_SIZE:-32MB}")
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
@@ -107,11 +114,13 @@ services:
           -mount-mode=$${AFSLET_MOUNT_MODE:-unified-koverlay} \
           -pprof-listen=:6062 \
           -graceful-timeout=15s \
-          "$${PAGE_CACHE_ARGS[@]}"
+          "$${PAGE_CACHE_ARGS[@]}" \
+          "$${ELF_CACHE_ARGS[@]}"
     volumes:
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
       - afslet_page_cache:/var/cache/afs-page-cache
+      - afslet_elf_cache:/var/cache/afs-elf-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     ports:
       - "61051:61051"
@@ -151,3 +160,4 @@ volumes:
   afslet_tmp:
   afslet_work:
   afslet_page_cache:
+  afslet_elf_cache:

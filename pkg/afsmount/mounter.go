@@ -3,6 +3,7 @@ package afsmount
 import (
 	"context"
 
+	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerfuse"
 	"github.com/reyoung/afs/pkg/layerreader"
@@ -33,6 +34,7 @@ type MountConfig struct {
 	Debug      bool
 	ReadAhead  int64
 	PageCache  *pagecache.Store
+	ELFCache   *filecache.Store
 	TOCCache   *layerformat.TOCCache
 	HoldReaper func() func()
 

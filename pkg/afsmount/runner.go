@@ -21,6 +21,7 @@ import (
 
 	"github.com/reyoung/afs/pkg/debughttp"
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/grpcclientcache"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/layerreader"
@@ -62,6 +63,7 @@ type Config struct {
 	PprofListen           string
 	OnReady               func()
 	PageCacheStore        *pagecache.Store
+	ELFCacheStore         *filecache.Store
 	HoldReaper            func() func()
 	TOCCache              *layerformat.TOCCache
 	MountMode             string // only "unified-koverlay" is supported
@@ -91,6 +93,7 @@ type config struct {
 	pprofListen           string
 	onReady               func()
 	pageCacheStore        *pagecache.Store
+	elfCacheStore         *filecache.Store
 	holdReaper            func() func()
 	tocCache              *layerformat.TOCCache
 	mountMode             string
@@ -208,6 +211,7 @@ func normalizeConfig(userCfg Config) (config, error) {
 		pprofListen:           strings.TrimSpace(userCfg.PprofListen),
 		onReady:               userCfg.OnReady,
 		pageCacheStore:        userCfg.PageCacheStore,
+		elfCacheStore:         userCfg.ELFCacheStore,
 		holdReaper:            userCfg.HoldReaper,
 		tocCache:              userCfg.TOCCache,
 		mountMode:             strings.TrimSpace(userCfg.MountMode),
@@ -446,6 +450,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 		Debug:       cfg.debug,
 		ReadAhead:   cfg.fuseMaxReadAheadBytes,
 		PageCache:   cacheStore,
+		ELFCache:    cfg.elfCacheStore,
 		TOCCache:    cfg.tocCache,
 		HoldReaper:  cfg.holdReaper,
 		ExtraDir:    cfg.extraDir,

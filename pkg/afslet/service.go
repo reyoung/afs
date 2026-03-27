@@ -26,6 +26,7 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/afsmount"
 	"github.com/reyoung/afs/pkg/discoverypb"
+	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/pagecache"
 )
@@ -39,79 +40,82 @@ const (
 )
 
 type Config struct {
-	RuncBinary                  string
-	RuncNoPivot                 bool
-	RuncNoNewKeyring            bool
-	RuncNoCgroupNS              bool
-	RuncNoPIDNS                 bool
-	RuncNoIPCNS                 bool
-	RuncNoUTSNS                 bool
-	UseSudo                     bool
-	TarChunk                    int
-	DefaultDiscovery            string
-	TempDir                     string
-	LimitCPUCores               int64
-	LimitMemoryMB               int64
-	LayerMountConcurrency       int
-	MountPprofListen            string
-	FUSEMaxReadAheadBytes       int64
-	PageCacheStore              *pagecache.Store
-	TOCCache                    *layerformat.TOCCache
-	MountMode                   string
+	RuncBinary            string
+	RuncNoPivot           bool
+	RuncNoNewKeyring      bool
+	RuncNoCgroupNS        bool
+	RuncNoPIDNS           bool
+	RuncNoIPCNS           bool
+	RuncNoUTSNS           bool
+	UseSudo               bool
+	TarChunk              int
+	DefaultDiscovery      string
+	TempDir               string
+	LimitCPUCores         int64
+	LimitMemoryMB         int64
+	LayerMountConcurrency int
+	MountPprofListen      string
+	FUSEMaxReadAheadBytes int64
+	PageCacheStore        *pagecache.Store
+	ELFCacheStore         *filecache.Store
+	TOCCache              *layerformat.TOCCache
+	MountMode             string
 }
 
 type Service struct {
 	afsletpb.UnimplementedAfsletServer
 
-	mountRunner                 func(context.Context, afsmount.Config) error
-	runcBinary                  string
-	runcNoPivot                 bool
-	runcNoNewKeyring            bool
-	runcNoCgroupNS              bool
-	runcNoPIDNS                 bool
-	runcNoIPCNS                 bool
-	runcNoUTSNS                 bool
-	useSudo                     bool
-	tarChunk                    int
-	defaultDiscovery            string
-	tempDir                     string
-	mu                          sync.Mutex
-	limitCPUCores               int64
-	limitMemoryMB               int64
-	usedCPUCores                int64
-	usedMemoryMB                int64
-	runningContainers           int64
-	layerMountConcurrency       int
-	mountPprofListen            string
-	fuseMaxReadAheadBytes       int64
-	pageCacheStore              *pagecache.Store
-	tocCache                    *layerformat.TOCCache
-	mountMode                   string
-	resolveImageRuntimeConfig   func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
+	mountRunner               func(context.Context, afsmount.Config) error
+	runcBinary                string
+	runcNoPivot               bool
+	runcNoNewKeyring          bool
+	runcNoCgroupNS            bool
+	runcNoPIDNS               bool
+	runcNoIPCNS               bool
+	runcNoUTSNS               bool
+	useSudo                   bool
+	tarChunk                  int
+	defaultDiscovery          string
+	tempDir                   string
+	mu                        sync.Mutex
+	limitCPUCores             int64
+	limitMemoryMB             int64
+	usedCPUCores              int64
+	usedMemoryMB              int64
+	runningContainers         int64
+	layerMountConcurrency     int
+	mountPprofListen          string
+	fuseMaxReadAheadBytes     int64
+	pageCacheStore            *pagecache.Store
+	elfCacheStore             *filecache.Store
+	tocCache                  *layerformat.TOCCache
+	mountMode                 string
+	resolveImageRuntimeConfig func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
 
 func NewService(cfg Config) *Service {
 	s := &Service{
-		mountRunner:                 afsmount.Run,
-		runcBinary:                  strings.TrimSpace(cfg.RuncBinary),
-		runcNoPivot:                 cfg.RuncNoPivot,
-		runcNoNewKeyring:            cfg.RuncNoNewKeyring,
-		runcNoCgroupNS:              cfg.RuncNoCgroupNS,
-		runcNoPIDNS:                 cfg.RuncNoPIDNS,
-		runcNoIPCNS:                 cfg.RuncNoIPCNS,
-		runcNoUTSNS:                 cfg.RuncNoUTSNS,
-		useSudo:                     cfg.UseSudo,
-		tarChunk:                    cfg.TarChunk,
-		defaultDiscovery:            strings.TrimSpace(cfg.DefaultDiscovery),
-		tempDir:                     strings.TrimSpace(cfg.TempDir),
-		limitCPUCores:               cfg.LimitCPUCores,
-		limitMemoryMB:               cfg.LimitMemoryMB,
-		layerMountConcurrency:       cfg.LayerMountConcurrency,
-		mountPprofListen:            strings.TrimSpace(cfg.MountPprofListen),
-		fuseMaxReadAheadBytes:       cfg.FUSEMaxReadAheadBytes,
-		pageCacheStore:              cfg.PageCacheStore,
-		tocCache:                    cfg.TOCCache,
-		mountMode:                   strings.TrimSpace(cfg.MountMode),
+		mountRunner:           afsmount.Run,
+		runcBinary:            strings.TrimSpace(cfg.RuncBinary),
+		runcNoPivot:           cfg.RuncNoPivot,
+		runcNoNewKeyring:      cfg.RuncNoNewKeyring,
+		runcNoCgroupNS:        cfg.RuncNoCgroupNS,
+		runcNoPIDNS:           cfg.RuncNoPIDNS,
+		runcNoIPCNS:           cfg.RuncNoIPCNS,
+		runcNoUTSNS:           cfg.RuncNoUTSNS,
+		useSudo:               cfg.UseSudo,
+		tarChunk:              cfg.TarChunk,
+		defaultDiscovery:      strings.TrimSpace(cfg.DefaultDiscovery),
+		tempDir:               strings.TrimSpace(cfg.TempDir),
+		limitCPUCores:         cfg.LimitCPUCores,
+		limitMemoryMB:         cfg.LimitMemoryMB,
+		layerMountConcurrency: cfg.LayerMountConcurrency,
+		mountPprofListen:      strings.TrimSpace(cfg.MountPprofListen),
+		fuseMaxReadAheadBytes: cfg.FUSEMaxReadAheadBytes,
+		pageCacheStore:        cfg.PageCacheStore,
+		elfCacheStore:         cfg.ELFCacheStore,
+		tocCache:              cfg.TOCCache,
+		mountMode:             strings.TrimSpace(cfg.MountMode),
 	}
 	if s.runcBinary == "" {
 		s.runcBinary = "afs_runc"
@@ -460,10 +464,11 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		LayerMountConcurrency: s.layerMountConcurrency,
 		PprofListen:           s.mountPprofListen,
 		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
-		PageCacheStore:          s.pageCacheStore,
-		HoldReaper:              HoldReaper,
-		TOCCache:                s.tocCache,
-		MountMode:               s.mountMode,
+		PageCacheStore:        s.pageCacheStore,
+		ELFCacheStore:         s.elfCacheStore,
+		HoldReaper:            HoldReaper,
+		TOCCache:              s.tocCache,
+		MountMode:             s.mountMode,
 	}
 	mountWait := make(chan error, 1)
 	readyCh := make(chan struct{}, 1)

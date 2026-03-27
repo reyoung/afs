@@ -17,6 +17,7 @@ import (
 	"github.com/reyoung/afs/pkg/afsletpb"
 	"github.com/reyoung/afs/pkg/bytesize"
 	"github.com/reyoung/afs/pkg/debughttp"
+	"github.com/reyoung/afs/pkg/filecache"
 	"github.com/reyoung/afs/pkg/layerformat"
 	"github.com/reyoung/afs/pkg/pagecache"
 )
@@ -43,6 +44,9 @@ func main() {
 	var pprofListen string
 	var pageCacheDir string
 	var pageCacheMaxSize string
+	var elfCacheDir string
+	var elfCacheMaxSize string
+	var elfCacheMaxFileSize string
 	var mountMode string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
@@ -66,6 +70,9 @@ func main() {
 	flag.StringVar(&pprofListen, "pprof-listen", "", "optional HTTP listen address for pprof, e.g. 127.0.0.1:6062")
 	flag.StringVar(&pageCacheDir, "page-cache-dir", "", "directory for on-disk page cache (empty=disabled)")
 	flag.StringVar(&pageCacheMaxSize, "page-cache-max-size", "8GB", "max size for on-disk page cache, e.g. 8GB, 16GiB")
+	flag.StringVar(&elfCacheDir, "elf-cache-dir", "", "directory for on-disk ELF file cache (empty=disabled)")
+	flag.StringVar(&elfCacheMaxSize, "elf-cache-max-size", "1GB", "max total size for ELF file cache")
+	flag.StringVar(&elfCacheMaxFileSize, "elf-cache-max-file-size", "32MB", "max single file size for ELF file cache")
 	flag.StringVar(&mountMode, "mount-mode", "unified-koverlay", "mount mode: unified-koverlay")
 	flag.Parse()
 
@@ -75,6 +82,7 @@ func main() {
 	}
 
 	var pageCacheStore *pagecache.Store
+	var elfCacheStore *filecache.Store
 	if pageCacheDir != "" {
 		maxBytes, parseErr := bytesize.Parse(pageCacheMaxSize)
 		if parseErr != nil {
@@ -87,6 +95,23 @@ func main() {
 		}
 		defer pageCacheStore.Close()
 		log.Printf("page cache store initialized: dir=%s max-size=%s", pageCacheDir, pageCacheMaxSize)
+	}
+	if elfCacheDir != "" {
+		maxBytes, parseErr := bytesize.Parse(elfCacheMaxSize)
+		if parseErr != nil {
+			log.Fatalf("invalid -elf-cache-max-size: %v", parseErr)
+		}
+		maxFileBytes, parseErr := bytesize.Parse(elfCacheMaxFileSize)
+		if parseErr != nil {
+			log.Fatalf("invalid -elf-cache-max-file-size: %v", parseErr)
+		}
+		var storeErr error
+		elfCacheStore, storeErr = filecache.NewStore(elfCacheDir, maxBytes, maxFileBytes)
+		if storeErr != nil {
+			log.Fatalf("init ELF cache store: %v", storeErr)
+		}
+		defer elfCacheStore.Close()
+		log.Printf("ELF cache store initialized: dir=%s max-size=%s max-file-size=%s", elfCacheDir, elfCacheMaxSize, elfCacheMaxFileSize)
 	}
 
 	lis, err := net.Listen("tcp", listenAddr)
@@ -112,6 +137,7 @@ func main() {
 		MountPprofListen:      mountPprofListen,
 		FUSEMaxReadAheadBytes: fuseMaxReadAheadBytes,
 		PageCacheStore:        pageCacheStore,
+		ELFCacheStore:         elfCacheStore,
 		TOCCache:              layerformat.NewTOCCache(256),
 		MountMode:             mountMode,
 	})
