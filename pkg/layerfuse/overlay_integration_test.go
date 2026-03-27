@@ -139,8 +139,9 @@ func mountOverlayRO(t *testing.T, layers []testLayer) string {
 
 	server, err := fs.Mount(mountDir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			AllowOther: false,
-			Debug:      false,
+			AllowOther:           false,
+			Debug:                false,
+			EnableSymlinkCaching: true,
 		},
 	})
 	if err != nil {
@@ -186,8 +187,9 @@ func mountOverlayRW(t *testing.T, layers []testLayer, extraFiles map[string]stri
 
 	server, err := fs.Mount(mountDir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			AllowOther: false,
-			Debug:      false,
+			AllowOther:           false,
+			Debug:                false,
+			EnableSymlinkCaching: true,
 		},
 	})
 	if err != nil {
@@ -661,6 +663,75 @@ func TestOverlayRW_Symlink(t *testing.T) {
 	}
 	if got != "target.txt" {
 		t.Fatalf("Readlink = %q, want %q", got, "target.txt")
+	}
+}
+
+func TestOverlayRW_RecreateUpperSymlinkAfterReadlink(t *testing.T) {
+	skipIfNoFuse(t)
+
+	mnt := mountOverlayRW(t, []testLayer{}, nil)
+
+	if err := os.WriteFile(filepath.Join(mnt, "target1.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatalf("WriteFile target1: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mnt, "target2.txt"), []byte("two"), 0o644); err != nil {
+		t.Fatalf("WriteFile target2: %v", err)
+	}
+
+	link := filepath.Join(mnt, "mylink")
+	if err := os.Symlink("target1.txt", link); err != nil {
+		t.Fatalf("Symlink target1: %v", err)
+	}
+	if got, err := os.Readlink(link); err != nil {
+		t.Fatalf("Readlink target1: %v", err)
+	} else if got != "target1.txt" {
+		t.Fatalf("Readlink = %q, want %q", got, "target1.txt")
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("Remove symlink: %v", err)
+	}
+	if err := os.Symlink("target2.txt", link); err != nil {
+		t.Fatalf("Symlink target2: %v", err)
+	}
+	if got, err := os.Readlink(link); err != nil {
+		t.Fatalf("Readlink target2: %v", err)
+	} else if got != "target2.txt" {
+		t.Fatalf("Readlink = %q, want %q", got, "target2.txt")
+	}
+}
+
+func TestOverlayRW_ReplaceLayerSymlinkAfterReadlink(t *testing.T) {
+	skipIfNoFuse(t)
+
+	layer := testLayer{
+		files: map[string]string{
+			"target1.txt": "one",
+			"target2.txt": "two",
+		},
+		symlinks: map[string]string{
+			"layerlink": "target1.txt",
+		},
+	}
+	mnt := mountOverlayRW(t, []testLayer{layer}, nil)
+
+	link := filepath.Join(mnt, "layerlink")
+	if got, err := os.Readlink(link); err != nil {
+		t.Fatalf("Readlink target1: %v", err)
+	} else if got != "target1.txt" {
+		t.Fatalf("Readlink = %q, want %q", got, "target1.txt")
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("Remove layer symlink: %v", err)
+	}
+	if err := os.Symlink("target2.txt", link); err != nil {
+		t.Fatalf("Symlink target2: %v", err)
+	}
+	if got, err := os.Readlink(link); err != nil {
+		t.Fatalf("Readlink target2: %v", err)
+	} else if got != "target2.txt" {
+		t.Fatalf("Readlink = %q, want %q", got, "target2.txt")
 	}
 }
 

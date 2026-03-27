@@ -45,61 +45,61 @@ const (
 )
 
 type Config struct {
-	Mountpoint                  string
-	Debug                       bool
-	MountProcDev                bool
-	ExtraDir                    string
-	DiscoveryAddr               string
-	GRPCTimeout                 time.Duration
-	GRPCMaxChunk                int
-	FUSEMaxReadAheadBytes       int64
-	GRPCInsecure                bool
-	NodeID                      string
-	Image                       string
-	Tag                         string
-	PlatformOS                  string
-	PlatformArch                string
-	PlatformVariant             string
-	ForceLocalFetch             bool
-	PullTimeout                 time.Duration
-	WorkDir                     string
-	KeepWorkDir                 bool
-	LayerMountConcurrency       int
-	PprofListen                 string
-	OnReady                     func()
-	PageCacheStore              *pagecache.Store
-	HoldReaper                  func() func()
-	TOCCache                    *layerformat.TOCCache
-	MountMode                   string // "unified-rw" (default), "per-layer", or "unified" (default), "unified", or "unified-rw"
+	Mountpoint            string
+	Debug                 bool
+	MountProcDev          bool
+	ExtraDir              string
+	DiscoveryAddr         string
+	GRPCTimeout           time.Duration
+	GRPCMaxChunk          int
+	FUSEMaxReadAheadBytes int64
+	GRPCInsecure          bool
+	NodeID                string
+	Image                 string
+	Tag                   string
+	PlatformOS            string
+	PlatformArch          string
+	PlatformVariant       string
+	ForceLocalFetch       bool
+	PullTimeout           time.Duration
+	WorkDir               string
+	KeepWorkDir           bool
+	LayerMountConcurrency int
+	PprofListen           string
+	OnReady               func()
+	PageCacheStore        *pagecache.Store
+	HoldReaper            func() func()
+	TOCCache              *layerformat.TOCCache
+	MountMode             string // "unified-rw" (default), "per-layer", or "unified" (default), "unified", or "unified-rw"
 }
 
 type config struct {
-	mountpoint                  string
-	debug                       bool
-	mountProcDev                bool
-	extraDir                    string
-	discoveryAddr               string
-	grpcTimeout                 time.Duration
-	grpcMaxChunk                int
-	fuseMaxReadAheadBytes       int64
-	grpcInsecure                bool
-	nodeID                      string
-	image                       string
-	tag                         string
-	platformOS                  string
-	platformArch                string
-	platformVariant             string
-	forceLocalFetch             bool
-	pullTimeout                 time.Duration
-	workDir                     string
-	keepWorkDir                 bool
-	layerMountConcurrency       int
-	pprofListen                 string
-	onReady                     func()
-	pageCacheStore              *pagecache.Store
-	holdReaper                  func() func()
-	tocCache                    *layerformat.TOCCache
-	mountMode                   string
+	mountpoint            string
+	debug                 bool
+	mountProcDev          bool
+	extraDir              string
+	discoveryAddr         string
+	grpcTimeout           time.Duration
+	grpcMaxChunk          int
+	fuseMaxReadAheadBytes int64
+	grpcInsecure          bool
+	nodeID                string
+	image                 string
+	tag                   string
+	platformOS            string
+	platformArch          string
+	platformVariant       string
+	forceLocalFetch       bool
+	pullTimeout           time.Duration
+	workDir               string
+	keepWorkDir           bool
+	layerMountConcurrency int
+	pprofListen           string
+	onReady               func()
+	pageCacheStore        *pagecache.Store
+	holdReaper            func() func()
+	tocCache              *layerformat.TOCCache
+	mountMode             string
 }
 
 type serviceInfo struct {
@@ -191,32 +191,32 @@ func Run(ctx context.Context, userCfg Config) error {
 
 func normalizeConfig(userCfg Config) (config, error) {
 	cfg := config{
-		mountpoint:                  strings.TrimSpace(userCfg.Mountpoint),
-		debug:                       userCfg.Debug,
-		mountProcDev:                userCfg.MountProcDev,
-		extraDir:                    strings.TrimSpace(userCfg.ExtraDir),
-		discoveryAddr:               strings.TrimSpace(userCfg.DiscoveryAddr),
-		grpcTimeout:                 userCfg.GRPCTimeout,
-		grpcMaxChunk:                userCfg.GRPCMaxChunk,
-		fuseMaxReadAheadBytes:       userCfg.FUSEMaxReadAheadBytes,
-		grpcInsecure:                userCfg.GRPCInsecure,
-		nodeID:                      strings.TrimSpace(userCfg.NodeID),
-		image:                       strings.TrimSpace(userCfg.Image),
-		tag:                         strings.TrimSpace(userCfg.Tag),
-		platformOS:                  strings.TrimSpace(userCfg.PlatformOS),
-		platformArch:                strings.TrimSpace(userCfg.PlatformArch),
-		platformVariant:             strings.TrimSpace(userCfg.PlatformVariant),
-		forceLocalFetch:             userCfg.ForceLocalFetch,
-		pullTimeout:                 userCfg.PullTimeout,
-		workDir:                     strings.TrimSpace(userCfg.WorkDir),
-		keepWorkDir:                 userCfg.KeepWorkDir,
-		layerMountConcurrency:       userCfg.LayerMountConcurrency,
-		pprofListen:                 strings.TrimSpace(userCfg.PprofListen),
-		onReady:                     userCfg.OnReady,
-		pageCacheStore:              userCfg.PageCacheStore,
-		holdReaper:                  userCfg.HoldReaper,
-		tocCache:                    userCfg.TOCCache,
-		mountMode:                   strings.TrimSpace(userCfg.MountMode),
+		mountpoint:            strings.TrimSpace(userCfg.Mountpoint),
+		debug:                 userCfg.Debug,
+		mountProcDev:          userCfg.MountProcDev,
+		extraDir:              strings.TrimSpace(userCfg.ExtraDir),
+		discoveryAddr:         strings.TrimSpace(userCfg.DiscoveryAddr),
+		grpcTimeout:           userCfg.GRPCTimeout,
+		grpcMaxChunk:          userCfg.GRPCMaxChunk,
+		fuseMaxReadAheadBytes: userCfg.FUSEMaxReadAheadBytes,
+		grpcInsecure:          userCfg.GRPCInsecure,
+		nodeID:                strings.TrimSpace(userCfg.NodeID),
+		image:                 strings.TrimSpace(userCfg.Image),
+		tag:                   strings.TrimSpace(userCfg.Tag),
+		platformOS:            strings.TrimSpace(userCfg.PlatformOS),
+		platformArch:          strings.TrimSpace(userCfg.PlatformArch),
+		platformVariant:       strings.TrimSpace(userCfg.PlatformVariant),
+		forceLocalFetch:       userCfg.ForceLocalFetch,
+		pullTimeout:           userCfg.PullTimeout,
+		workDir:               strings.TrimSpace(userCfg.WorkDir),
+		keepWorkDir:           userCfg.KeepWorkDir,
+		layerMountConcurrency: userCfg.LayerMountConcurrency,
+		pprofListen:           strings.TrimSpace(userCfg.PprofListen),
+		onReady:               userCfg.OnReady,
+		pageCacheStore:        userCfg.PageCacheStore,
+		holdReaper:            userCfg.HoldReaper,
+		tocCache:              userCfg.TOCCache,
+		mountMode:             strings.TrimSpace(userCfg.MountMode),
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -1081,12 +1081,13 @@ func mountLayerReader(reader *layerformat.Reader, mountpoint, source, layerDiges
 		AttrTimeout:     &attrTimeout,
 		NegativeTimeout: &negativeTimeout,
 		MountOptions: fuse.MountOptions{
-			Debug:        debug,
-			FsName:       fmt.Sprintf("afslyr:%s", source),
-			Name:         "afslyr",
-			Options:      []string{"ro", "exec"},
-			MaxWrite:     1 << 20,
-			MaxReadAhead: int(fuseMaxReadAheadBytes),
+			Debug:                debug,
+			FsName:               fmt.Sprintf("afslyr:%s", source),
+			Name:                 "afslyr",
+			Options:              []string{"ro", "exec"},
+			MaxWrite:             1 << 20,
+			MaxReadAhead:         int(fuseMaxReadAheadBytes),
+			EnableSymlinkCaching: true,
 		},
 	})
 	if releaseReaper != nil {

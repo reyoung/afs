@@ -286,6 +286,7 @@ func (d *OverlayDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	if d.relPath != "" {
 		childPath = d.relPath + "/" + name
 	}
+	d.tree.stats.RecordLookupPath(childPath)
 
 	// RW mode: check deleted set first.
 	if d.tree.upperDir != "" && d.tree.isDeleted(childPath) {
@@ -295,12 +296,18 @@ func (d *OverlayDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	// RW mode: check upper dir first (files created/modified at runtime).
 	if d.tree.upperDir != "" {
 		if c := d.GetChild(name); c != nil {
-			// Re-stat upper file to fill EntryOut (size, mode, etc.)
 			realPath := d.tree.upperPath(childPath)
 			if info, statErr := os.Lstat(realPath); statErr == nil {
 				fillEntryOutFromFileInfo(out, info)
+				if childModeMatchesFileInfo(c, info) {
+					return c, 0
+				}
+				d.RmChild(name)
+				child := d.newUpperChildInode(ctx, name, childPath, realPath, info)
+				d.AddChild(name, child, true)
+				return child, 0
 			}
-			return c, 0
+			d.RmChild(name)
 		}
 		if child, info := d.lookupInUpper(ctx, name, childPath); child != nil {
 			d.AddChild(name, child, true)
@@ -404,6 +411,7 @@ var _ = (fs.NodeGetattrer)((*OverlayFileNode)(nil))
 func (f *OverlayFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	t0 := time.Now()
 	defer func() { f.stats.OpenCount.Add(1); f.stats.OpenNanos.Add(time.Since(t0).Nanoseconds()) }()
+	f.stats.RecordOpenPath(f.entry.Path)
 	accessMode := flags & uint32(syscall.O_ACCMODE)
 	if accessMode == syscall.O_WRONLY || accessMode == syscall.O_RDWR {
 		return nil, 0, syscall.EROFS

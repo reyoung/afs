@@ -98,6 +98,7 @@ func (h *WritableFileHandle) Setattr(ctx context.Context, in *fuse.SetAttrIn, ou
 type WritableFileNode struct {
 	fs.Inode
 	realPath string
+	relPath  string
 	stats    *FuseStats
 }
 
@@ -109,6 +110,7 @@ var _ = (fs.NodeSetattrer)((*WritableFileNode)(nil))
 func (n *WritableFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	t0 := time.Now()
 	defer func() { n.stats.OpenCount.Add(1); n.stats.OpenNanos.Add(time.Since(t0).Nanoseconds()) }()
+	n.stats.RecordOpenPath(n.relPath)
 	goFlags := int(flags) & (syscall.O_ACCMODE | syscall.O_APPEND | syscall.O_TRUNC)
 	f, err := os.OpenFile(n.realPath, goFlags, 0)
 	if err != nil {
@@ -205,17 +207,21 @@ func (d *WritableDirNode) Lookup(ctx context.Context, name string, out *fuse.Ent
 		return nil, syscall.ENOENT
 	}
 	childReal := filepath.Join(d.realPath, name)
+	childRel := name
+	if d.relPath != "" {
+		childRel = d.relPath + "/" + name
+	}
+	d.stats.RecordLookupPath(childRel)
 	st, err := os.Lstat(childReal)
 	if err != nil {
 		return nil, syscall.ENOENT
 	}
 	fillEntryOutFromFileInfo(out, st)
-	childRel := name
-	if d.relPath != "" {
-		childRel = d.relPath + "/" + name
-	}
 	if c := d.GetChild(name); c != nil {
-		return c, 0
+		if childModeMatchesFileInfo(c, st) {
+			return c, 0
+		}
+		d.RmChild(name)
 	}
 	child := d.makeChildInode(ctx, childReal, childRel, st)
 	d.AddChild(name, child, true)
@@ -242,11 +248,15 @@ func (d *WritableDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 
 func (d *WritableDirNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	childReal := filepath.Join(d.realPath, name)
+	childRel := name
+	if d.relPath != "" {
+		childRel = d.relPath + "/" + name
+	}
 	f, err := os.OpenFile(childReal, int(flags)|os.O_CREATE, os.FileMode(mode&0o7777))
 	if err != nil {
 		return nil, nil, 0, syscall.EIO
 	}
-	node := &WritableFileNode{realPath: childReal, stats: d.stats}
+	node := &WritableFileNode{realPath: childReal, relPath: childRel, stats: d.stats}
 	child := d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	d.AddChild(name, child, true)
 	fh := &WritableFileHandle{f: f, append: flags&uint32(syscall.O_APPEND) != 0, stats: d.stats}
@@ -332,7 +342,7 @@ func (d *WritableDirNode) makeChildInode(ctx context.Context, realPath, relPath 
 		}
 		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
 	}
-	node := &WritableFileNode{realPath: realPath, stats: d.stats}
+	node := &WritableFileNode{realPath: realPath, relPath: relPath, stats: d.stats}
 	return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 }
 
@@ -370,7 +380,7 @@ func (d *OverlayDirNode) Create(ctx context.Context, name string, flags uint32, 
 	delete(d.tree.deleted, childRel)
 	d.tree.mu.Unlock()
 
-	node := &WritableFileNode{realPath: realPath, stats: d.tree.stats}
+	node := &WritableFileNode{realPath: realPath, relPath: childRel, stats: d.tree.stats}
 	child := d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	d.AddChild(name, child, true)
 	fh := &WritableFileHandle{f: f, append: flags&uint32(syscall.O_APPEND) != 0, stats: d.tree.stats}
@@ -556,7 +566,7 @@ func (d *OverlayDirNode) Link(ctx context.Context, target fs.InodeEmbedder, name
 	delete(d.tree.deleted, childRel)
 	d.tree.mu.Unlock()
 
-	node := &WritableFileNode{realPath: realPath, stats: d.tree.stats}
+	node := &WritableFileNode{realPath: realPath, relPath: childRel, stats: d.tree.stats}
 	child := d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 	d.AddChild(name, child, true)
 	return child, 0
@@ -651,6 +661,10 @@ func fileInfoToFuseMode(info os.FileInfo) uint32 {
 	return syscall.S_IFREG | perm
 }
 
+func childModeMatchesFileInfo(child *fs.Inode, info os.FileInfo) bool {
+	return child.Mode()&syscall.S_IFMT == fileInfoToFuseMode(info)&syscall.S_IFMT
+}
+
 func newRWSymlinkEntry(name, parentRel, target string) layerformat.Entry {
 	p := joinRelPath(parentRel, name)
 	return layerformat.Entry{
@@ -679,9 +693,13 @@ func (d *OverlayDirNode) lookupInUpper(ctx context.Context, name, childRel strin
 	if err != nil {
 		return nil, nil
 	}
+	return d.newUpperChildInode(ctx, name, childRel, realPath, info), info
+}
+
+func (d *OverlayDirNode) newUpperChildInode(ctx context.Context, name, childRel, realPath string, info os.FileInfo) *fs.Inode {
 	if info.IsDir() {
 		node := &WritableDirNode{realPath: realPath, tree: d.tree, relPath: childRel, stats: d.tree.stats}
-		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR}), info
+		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFDIR})
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, _ := os.Readlink(realPath)
@@ -689,10 +707,10 @@ func (d *OverlayDirNode) lookupInUpper(ctx context.Context, name, childRel strin
 			entry: newRWSymlinkEntry(name, d.relPath, target),
 			stats: d.tree.stats,
 		}
-		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK}), info
+		return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFLNK})
 	}
-	node := &WritableFileNode{realPath: realPath, stats: d.tree.stats}
-	return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG}), info
+	node := &WritableFileNode{realPath: realPath, relPath: childRel, stats: d.tree.stats}
+	return d.NewInode(ctx, node, fs.StableAttr{Mode: syscall.S_IFREG})
 }
 
 // readUpperDirEntries returns directory entries from the upper dir for the given relPath.

@@ -289,6 +289,7 @@ var _ = (fs.NodeGetattrer)((*SymlinkNode)(nil))
 func (s *SymlinkNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 	t0 := time.Now()
 	defer func() { s.stats.ReadlinkCount.Add(1); s.stats.ReadlinkNanos.Add(time.Since(t0).Nanoseconds()) }()
+	s.stats.RecordReadlinkPath(s.entry.Path)
 	return []byte(s.entry.SymlinkTarget), 0
 }
 

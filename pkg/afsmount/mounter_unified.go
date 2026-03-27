@@ -51,12 +51,13 @@ func (m *UnifiedMounter) Mount(ctx context.Context, cfg MountConfig) (*MountResu
 		AttrTimeout:     &attrTimeout,
 		NegativeTimeout: &negativeTimeout,
 		MountOptions: fuse.MountOptions{
-			Debug:        cfg.Debug,
-			FsName:       "afsunified",
-			Name:         "afsunified",
-			Options:      []string{"ro", "exec"},
-			MaxWrite:     1 << 20,
-			MaxReadAhead: int(cfg.ReadAhead),
+			Debug:                cfg.Debug,
+			FsName:               "afsunified",
+			Name:                 "afsunified",
+			Options:              []string{"ro", "exec"},
+			MaxWrite:             1 << 20,
+			MaxReadAhead:         int(cfg.ReadAhead),
+			EnableSymlinkCaching: true,
 		},
 	})
 	if releaseReaper != nil {
@@ -137,13 +138,14 @@ func (m *UnifiedRWMounter) Mount(ctx context.Context, cfg MountConfig) (*MountRe
 		AttrTimeout:     &attrTimeout,
 		NegativeTimeout: &negativeTimeout,
 		MountOptions: fuse.MountOptions{
-			Debug:        cfg.Debug,
-			FsName:       "afsunifiedrw",
-			Name:         "afsunifiedrw",
-			Options:      []string{"exec"},
-			AllowOther:   true,
-			MaxWrite:     1 << 20,
-			MaxReadAhead: int(cfg.ReadAhead),
+			Debug:                cfg.Debug,
+			FsName:               "afsunifiedrw",
+			Name:                 "afsunifiedrw",
+			Options:              []string{"exec"},
+			AllowOther:           true,
+			MaxWrite:             1 << 20,
+			MaxReadAhead:         int(cfg.ReadAhead),
+			EnableSymlinkCaching: true,
 		},
 	})
 	if releaseReaper != nil {

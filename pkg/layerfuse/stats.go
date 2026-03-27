@@ -3,25 +3,35 @@ package layerfuse
 import (
 	"fmt"
 	"log"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // FuseStats tracks per-operation call counts and cumulative durations.
 type FuseStats struct {
-	LookupCount    atomic.Int64
-	LookupNanos    atomic.Int64
-	GetattrCount   atomic.Int64
-	GetattrNanos   atomic.Int64
-	OpenCount      atomic.Int64
-	OpenNanos      atomic.Int64
-	ReadCount      atomic.Int64
-	ReadNanos      atomic.Int64
-	ReadBytes      atomic.Int64
-	ReaddirCount   atomic.Int64
-	ReaddirNanos   atomic.Int64
-	ReadlinkCount  atomic.Int64
-	ReadlinkNanos  atomic.Int64
+	LookupCount   atomic.Int64
+	LookupNanos   atomic.Int64
+	GetattrCount  atomic.Int64
+	GetattrNanos  atomic.Int64
+	OpenCount     atomic.Int64
+	OpenNanos     atomic.Int64
+	ReadCount     atomic.Int64
+	ReadNanos     atomic.Int64
+	ReadBytes     atomic.Int64
+	ReaddirCount  atomic.Int64
+	ReaddirNanos  atomic.Int64
+	ReadlinkCount atomic.Int64
+	ReadlinkNanos atomic.Int64
+
+	hotMu            sync.Mutex
+	lookupHotPaths   map[string]int64
+	openHotPaths     map[string]int64
+	readlinkHotPaths map[string]int64
 }
 
 // Log prints a summary of FUSE operation statistics.
@@ -35,6 +45,85 @@ func (s *FuseStats) Log(prefix string) {
 		s.ReaddirCount.Load(), fmtDur(s.ReaddirNanos.Load()),
 		s.ReadlinkCount.Load(), fmtDur(s.ReadlinkNanos.Load()),
 	)
+	s.logHotPaths(prefix)
+}
+
+func (s *FuseStats) RecordLookupPath(path string) {
+	s.recordHotPath(&s.lookupHotPaths, path)
+}
+
+func (s *FuseStats) RecordOpenPath(path string) {
+	s.recordHotPath(&s.openHotPaths, path)
+}
+
+func (s *FuseStats) RecordReadlinkPath(path string) {
+	s.recordHotPath(&s.readlinkHotPaths, path)
+}
+
+func (s *FuseStats) recordHotPath(dst *map[string]int64, path string) {
+	if hotPathLimit() == 0 || path == "" {
+		return
+	}
+	s.hotMu.Lock()
+	defer s.hotMu.Unlock()
+	if *dst == nil {
+		*dst = make(map[string]int64)
+	}
+	(*dst)[path]++
+}
+
+func (s *FuseStats) logHotPaths(prefix string) {
+	limit := hotPathLimit()
+	if limit == 0 {
+		return
+	}
+
+	s.hotMu.Lock()
+	defer s.hotMu.Unlock()
+
+	s.logOneHotPathSet(prefix, "lookup", s.lookupHotPaths, limit)
+	s.logOneHotPathSet(prefix, "open", s.openHotPaths, limit)
+	s.logOneHotPathSet(prefix, "readlink", s.readlinkHotPaths, limit)
+}
+
+func (s *FuseStats) logOneHotPathSet(prefix, op string, paths map[string]int64, limit int) {
+	if len(paths) == 0 {
+		return
+	}
+	type hotPath struct {
+		path  string
+		count int64
+	}
+	items := make([]hotPath, 0, len(paths))
+	for path, count := range paths {
+		items = append(items, hotPath{path: path, count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].path < items[j].path
+		}
+		return items[i].count > items[j].count
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%s:%d", item.path, item.count))
+	}
+	log.Printf("%s FUSE hot %s paths: %s", prefix, op, strings.Join(parts, ", "))
+}
+
+func hotPathLimit() int {
+	v := os.Getenv("AFS_FUSE_HOT_PATH_LIMIT")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 func fmtDur(nanos int64) string {
