@@ -66,8 +66,8 @@ afslet:
     enabled: true
     weight: 100
   containerPort: 61051
-  mountInProcess: false
-  mountBinary: /usr/local/bin/afs_mount
+  mountMode: unified-koverlay
+  fuseMaxReadAhead: 16M
   runcBinary: /usr/local/bin/afs_runc
   runcNoPivot: true
   runcNoNewKeyring: true
@@ -82,6 +82,19 @@ afslet:
   mountPprofListen: ""
   tempDir: /var/lib/afslet/tmp
   workDir: /var/lib/afslet/work
+  pageCache:
+    enabled: true
+    dir: /var/lib/afslet/page-cache
+    maxSize: 80GB
+    emptyDir:
+      sizeLimit: 80Gi
+  elfCache:
+    enabled: true
+    dir: /var/lib/afslet/elf-cache
+    maxSize: 10GB
+    maxFileSize: 32MB
+    emptyDir:
+      sizeLimit: 10Gi
   layerMountConcurrency: 1
   mountProcDev: false
   limitCPUCores: 4

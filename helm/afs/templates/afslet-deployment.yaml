@@ -51,8 +51,8 @@ spec:
             - /usr/local/bin/afslet
           args:
             - -listen=:{{ .Values.afslet.containerPort }}
-            - -mount-in-process={{ .Values.afslet.mountInProcess }}
-            - -mount-binary={{ .Values.afslet.mountBinary }}
+            - -mount-mode={{ .Values.afslet.mountMode }}
+            - -fuse-max-read-ahead={{ .Values.afslet.fuseMaxReadAhead }}
             - -runc-binary={{ .Values.afslet.runcBinary }}
             - -runc-no-pivot={{ .Values.afslet.runcNoPivot }}
             - -runc-no-new-keyring={{ .Values.afslet.runcNoNewKeyring }}
@@ -74,6 +74,15 @@ spec:
             - -limit-cpu={{ .Values.afslet.limitCPUCores }}
             - -limit-memory-mb={{ .Values.afslet.limitMemoryMB }}
             - -layer-mount-concurrency={{ .Values.afslet.layerMountConcurrency }}
+            {{- if .Values.afslet.pageCache.enabled }}
+            - -page-cache-dir={{ .Values.afslet.pageCache.dir }}
+            - -page-cache-max-size={{ .Values.afslet.pageCache.maxSize }}
+            {{- end }}
+            {{- if .Values.afslet.elfCache.enabled }}
+            - -elf-cache-dir={{ .Values.afslet.elfCache.dir }}
+            - -elf-cache-max-size={{ .Values.afslet.elfCache.maxSize }}
+            - -elf-cache-max-file-size={{ .Values.afslet.elfCache.maxFileSize }}
+            {{- end }}
           env:
             - name: GOMAXPROCS
               valueFrom:
@@ -95,6 +104,14 @@ spec:
               mountPath: {{ .Values.afslet.tempDir }}
             - name: work
               mountPath: {{ .Values.afslet.workDir }}
+            {{- if .Values.afslet.pageCache.enabled }}
+            - name: page-cache
+              mountPath: {{ .Values.afslet.pageCache.dir }}
+            {{- end }}
+            {{- if .Values.afslet.elfCache.enabled }}
+            - name: elf-cache
+              mountPath: {{ .Values.afslet.elfCache.dir }}
+            {{- end }}
             - name: cgroupfs
               mountPath: /sys/fs/cgroup
             - name: fuse-dev
@@ -106,6 +123,16 @@ spec:
           emptyDir: {}
         - name: work
           emptyDir: {}
+        {{- if .Values.afslet.pageCache.enabled }}
+        - name: page-cache
+          emptyDir:
+            {{- toYaml .Values.afslet.pageCache.emptyDir | nindent 12 }}
+        {{- end }}
+        {{- if .Values.afslet.elfCache.enabled }}
+        - name: elf-cache
+          emptyDir:
+            {{- toYaml .Values.afslet.elfCache.emptyDir | nindent 12 }}
+        {{- end }}
         - name: cgroupfs
           hostPath:
             path: /sys/fs/cgroup
