@@ -3,13 +3,9 @@ package layerfuse
 import (
 	"context"
 	"io"
-	"log"
-	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -45,11 +41,6 @@ type overlayTree struct {
 	children map[string][]string
 	kinds    map[string]uint32
 	shared   map[string]*fs.Inode
-
-	// RW support fields (only used when upperDir != "").
-	upperDir string              // writable upper directory (empty = read-only mode)
-	deleted  map[string]struct{} // paths marked as deleted (in-memory whiteout)
-	mu       sync.RWMutex        // protects deleted map and upper dir operations
 }
 
 // NewOverlayRoot creates a single FUSE tree from multiple layers (bottom-to-top order).
@@ -62,67 +53,6 @@ func NewOverlayRoot(layers []OverlayLayer, store *pagecache.Store, elfStore *fil
 	stats := &FuseStats{}
 	t := buildOverlayTree(layers, store, elfStore, stats)
 	return &OverlayDirNode{tree: t, relPath: ""}, stats
-}
-
-// NewOverlayRootRW creates a unified FUSE tree with read-write support.
-// upperDir is the writable upper directory on local disk.
-// extraDir, if non-empty, is scanned and its contents are added to the merged tree.
-func NewOverlayRootRW(layers []OverlayLayer, store *pagecache.Store, upperDir string, extraDir string) (*OverlayDirNode, *FuseStats) {
-	stats := &FuseStats{}
-	t := buildOverlayTree(layers, store, nil, stats)
-	t.upperDir = upperDir
-	t.deleted = make(map[string]struct{})
-
-	// If extraDir is non-empty, scan its contents and copy into upper dir
-	// so they appear in the merged view and are writable.
-	if extraDir != "" {
-		copyExtraDirToUpper(extraDir, upperDir)
-	}
-
-	return &OverlayDirNode{tree: t, relPath: ""}, stats
-}
-
-// copyExtraDirToUpper recursively copies files from extraDir into the upper dir.
-func copyExtraDirToUpper(extraDir, upperDir string) {
-	log.Printf("copyExtraDirToUpper: extraDir=%s upperDir=%s", extraDir, upperDir)
-	_ = filepath.Walk(extraDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, relErr := filepath.Rel(extraDir, p)
-		if relErr != nil || rel == "." {
-			return nil
-		}
-		target := filepath.Join(upperDir, rel)
-		if info.IsDir() {
-			_ = os.MkdirAll(target, info.Mode())
-			return nil
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			link, linkErr := os.Readlink(p)
-			if linkErr == nil {
-				_ = os.MkdirAll(filepath.Dir(target), 0o755)
-				_ = os.Symlink(link, target)
-			}
-			return nil
-		}
-		// Regular file: copy.
-		_ = os.MkdirAll(filepath.Dir(target), 0o755)
-		src, openErr := os.Open(p)
-		if openErr != nil {
-			log.Printf("copyExtraDirToUpper: failed to open %s: %v", p, openErr)
-			return nil
-		}
-		defer src.Close()
-		dst, createErr := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
-		if createErr != nil {
-			log.Printf("copyExtraDirToUpper: failed to create %s: %v", target, createErr)
-			return nil
-		}
-		defer dst.Close()
-		_, _ = io.Copy(dst, src)
-		return nil
-	})
 }
 
 func buildOverlayTree(layers []OverlayLayer, store *pagecache.Store, elfStore *filecache.Store, stats *FuseStats) *overlayTree {
@@ -295,34 +225,6 @@ func (d *OverlayDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 	}
 	d.tree.stats.RecordLookupPath(childPath)
 
-	// RW mode: check deleted set first.
-	if d.tree.upperDir != "" && d.tree.isDeleted(childPath) {
-		return nil, syscall.ENOENT
-	}
-
-	// RW mode: check upper dir first (files created/modified at runtime).
-	if d.tree.upperDir != "" {
-		if c := d.GetChild(name); c != nil {
-			realPath := d.tree.upperPath(childPath)
-			if info, statErr := os.Lstat(realPath); statErr == nil {
-				fillEntryOutFromFileInfo(out, info)
-				if childModeMatchesFileInfo(c, info) {
-					return c, 0
-				}
-				d.RmChild(name)
-				child := d.newUpperChildInode(ctx, name, childPath, realPath, info)
-				d.AddChild(name, child, true)
-				return child, 0
-			}
-			d.RmChild(name)
-		}
-		if child, info := d.lookupInUpper(ctx, name, childPath); child != nil {
-			d.AddChild(name, child, true)
-			fillEntryOutFromFileInfo(out, info)
-			return child, 0
-		}
-	}
-
 	oe, ok := d.tree.entries[childPath]
 	if !ok {
 		return nil, syscall.ENOENT
@@ -339,11 +241,6 @@ func (d *OverlayDirNode) Lookup(ctx context.Context, name string, out *fuse.Entr
 func (d *OverlayDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	t0 := time.Now()
 	defer func() { d.tree.stats.ReaddirCount.Add(1); d.tree.stats.ReaddirNanos.Add(time.Since(t0).Nanoseconds()) }()
-
-	// RW mode: merge upper dir entries with layer entries.
-	if d.tree.upperDir != "" {
-		return fs.NewListDirStream(d.mergedReaddir()), 0
-	}
 
 	names := d.tree.children[d.relPath]
 	out := make([]fuse.DirEntry, 0, len(names))
@@ -364,12 +261,8 @@ func (d *OverlayDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Err
 func (d *OverlayDirNode) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	t0 := time.Now()
 	defer func() { d.tree.stats.GetattrCount.Add(1); d.tree.stats.GetattrNanos.Add(time.Since(t0).Nanoseconds()) }()
-	dirMode := uint32(0o555)
-	if d.tree.upperDir != "" {
-		dirMode = 0o755
-	}
-	out.Mode = uint32(syscall.S_IFDIR) | dirMode
-	out.Nlink = 2 // runc checks Nlink>0 to verify directory is not deleted
+	out.Mode = uint32(syscall.S_IFDIR) | 0o555
+	out.Nlink = 2
 	if d.relPath != "" {
 		if oe, ok := d.tree.entries[d.relPath]; ok {
 			setAttrTimes(out, oe.entry.ModTimeUnix)
@@ -497,6 +390,7 @@ func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byt
 	if f.elfStore != nil && f.entry.ContentKind == layerformat.ContentKindELF && f.entry.Digest != "" {
 		n, err := f.elfStore.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
 		if err != nil && err != io.EOF {
+			logReadFailure("layerfuse.overlay_read", f.entry, f.section, off, len(buf), "elf-cache", err)
 			return nil, syscall.EIO
 		}
 		f.stats.ReadBytes.Add(int64(n))
@@ -507,6 +401,7 @@ func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byt
 	if f.store != nil && f.entry.Digest != "" {
 		n, err := f.store.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
 		if err != nil && err != io.EOF {
+			logReadFailure("layerfuse.overlay_read", f.entry, f.section, off, len(buf), "page-cache", err)
 			return nil, syscall.EIO
 		}
 		f.stats.ReadBytes.Add(int64(n))
@@ -516,6 +411,7 @@ func (f *OverlayFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byt
 
 	n, err := f.section.ReadAt(buf, off)
 	if err != nil && err != io.EOF {
+		logReadFailure("layerfuse.overlay_read", f.entry, f.section, off, len(buf), "direct", err)
 		return nil, syscall.EIO
 	}
 	f.stats.ReadBytes.Add(int64(n))

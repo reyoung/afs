@@ -70,19 +70,13 @@ fuse-overlayfs 对每个路径在 12 层逐层 lookup → 12772 次 lookup × 80
 **方案**: 在 Go 中合并所有 layer TOC（含 OCI whiteout 语义），输出单层只读 FUSE mount。
 lookup 从 12772 → 593（-95%），FUSE 层数从 N+1 → 2。
 
-### 5. Unified-RW（`pkg/layerfuse/overlay_rw.go`）
+### 5. Writable Path
 
-**问题**: 仍有 fuse-overlayfs 提供可写层（2 层 FUSE）。
+当前实现固定为 `unified-koverlay`：
+- 下层使用 unified read-only FUSE mount
+- 上层写入统一交给 Linux kernel overlay 处理
 
-**方案**: 在 unified FUSE 内实现完整写操作（Create/Write/Mkdir/Unlink/Rmdir/Rename/Symlink/Setattr），
-用本地 writable upper dir 存储运行时写入。完全去掉 fuse-overlayfs。
-FUSE 层数从 2 → 1，lookup 从 8073 → 593。
-
-**修复的关键 bug**:
-- `Nlink=0` 导致 runc "wandered into deleted directory" 拒绝挂载
-- `EntryOut` 未填充导致 kernel 缓存 size=0，cp 读空文件
-- `os.FileMode` 与 `syscall.S_IFREG` 编码不一致
-- `WriteAt` 在 `O_APPEND` 模式下不可用（Go 限制）
+旧的 `overlay_rw` 原型已移除，不再作为运行时策略保留。
 
 ## FUSE 操作量对比
 

@@ -11,6 +11,9 @@ service LayerStore {
   rpc ReadLayerStream(ReadLayerRequest) returns (stream ReadLayerResponse);
   rpc HasLayer(HasLayerRequest) returns (HasLayerResponse);
   rpc HasImage(HasImageRequest) returns (HasImageResponse);
+  rpc AcquireLayerLease(AcquireLayerLeaseRequest) returns (AcquireLayerLeaseResponse);
+  rpc RenewLayerLease(RenewLayerLeaseRequest) returns (RenewLayerLeaseResponse);
+  rpc ReleaseLayerLease(ReleaseLayerLeaseRequest) returns (ReleaseLayerLeaseResponse);
   rpc PruneCache(PruneCacheRequest) returns (PruneCacheResponse);
 }
 
@@ -100,6 +103,36 @@ message HasImageResponse {
   string resolved_reference = 4;
   int32 total_layers = 5;
   int32 missing_layers = 6;
+}
+
+message AcquireLayerLeaseRequest {
+  repeated string digests = 1;
+  int64 ttl_ms = 2;
+}
+
+message AcquireLayerLeaseResponse {
+  string lease_id = 1;
+  repeated string digests = 2;
+  int64 expires_at_unix_ms = 3;
+}
+
+message RenewLayerLeaseRequest {
+  string lease_id = 1;
+  int64 ttl_ms = 2;
+}
+
+message RenewLayerLeaseResponse {
+  string lease_id = 1;
+  repeated string digests = 2;
+  int64 expires_at_unix_ms = 3;
+}
+
+message ReleaseLayerLeaseRequest {
+  string lease_id = 1;
+}
+
+message ReleaseLayerLeaseResponse {
+  bool released = 1;
 }
 
 message PruneCacheRequest {

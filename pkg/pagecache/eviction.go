@@ -325,6 +325,14 @@ func (e *evictionPolicy) Access(key pageKey) {
 // Add inserts a new entry into the eviction policy. It returns a victim to
 // evict if capacity is exceeded, or nil if no eviction is needed.
 func (e *evictionPolicy) Add(key pageKey) (evicted *pageKey) {
+	return e.addInternal(key, nil)
+}
+
+func (e *evictionPolicy) AddPinned(key pageKey, isPinned func(pageKey) bool) (evicted *pageKey) {
+	return e.addInternal(key, isPinned)
+}
+
+func (e *evictionPolicy) addInternal(key pageKey, isPinned func(pageKey) bool) (evicted *pageKey) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -375,6 +383,30 @@ func (e *evictionPolicy) Add(key pageKey) (evicted *pageKey) {
 
 	wFreq := e.sketch.estimate(windowVictim.key.digestHash ^ windowVictim.key.pageID)
 	pFreq := e.sketch.estimate(probationVictim.key.digestHash ^ probationVictim.key.pageID)
+	windowPinned := isPinned != nil && isPinned(windowVictim.key)
+	probationPinned := isPinned != nil && isPinned(probationVictim.key)
+
+	if windowPinned && probationPinned {
+		e.probation.pushFront(probationVictim)
+		e.nodeLocation[probationVictim.key] = probation
+		e.probation.pushFront(windowVictim)
+		e.nodeLocation[windowVictim.key] = probation
+		return nil
+	}
+	if windowPinned {
+		e.probation.pushFront(windowVictim)
+		e.nodeLocation[windowVictim.key] = probation
+		delete(e.nodes, probationVictim.key)
+		evictedKey := probationVictim.key
+		return &evictedKey
+	}
+	if probationPinned {
+		e.probation.pushFront(probationVictim)
+		e.nodeLocation[probationVictim.key] = probation
+		delete(e.nodes, windowVictim.key)
+		evictedKey := windowVictim.key
+		return &evictedKey
+	}
 
 	if wFreq > pFreq {
 		// Window victim wins; admit to probation. Probation victim is evicted.

@@ -90,7 +90,6 @@ services:
       AFS_ELF_CACHE_ENABLED: ${AFS_ELF_CACHE_ENABLED:-true}
       AFSLET_ELF_CACHE_MAX_SIZE: ${AFSLET_ELF_CACHE_MAX_SIZE:-1GB}
       AFSLET_ELF_CACHE_MAX_FILE_SIZE: ${AFSLET_ELF_CACHE_MAX_FILE_SIZE:-32MB}
-      AFSLET_MOUNT_MODE: ${AFSLET_MOUNT_MODE:-unified-koverlay}
       AFSLET_SHARED_CATALOG_MAX_IMAGES: ${AFSLET_SHARED_CATALOG_MAX_IMAGES:-64}
       AFSLET_SHARED_CATALOG_IDLE_TTL: ${AFSLET_SHARED_CATALOG_IDLE_TTL:-10m}
     entrypoint: ["/bin/bash", "-lc"]
@@ -110,10 +109,10 @@ services:
           -runc-binary=/usr/local/bin/afs_runc \
           -discovery-addr=discovery:60051 \
           -temp-dir=/var/lib/afslet/tmp \
+          -work-base-dir=/var/lib/afslet/work \
           -limit-cpu=4 \
           -limit-memory-mb=4096 \
           -layer-mount-concurrency=$${AFSLET_LAYER_MOUNT_CONCURRENCY:-1} \
-          -mount-mode=$${AFSLET_MOUNT_MODE:-unified-koverlay} \
           -shared-catalog-max-images "$${AFSLET_SHARED_CATALOG_MAX_IMAGES:-64}" \
           -shared-catalog-idle-ttl "$${AFSLET_SHARED_CATALOG_IDLE_TTL:-10m}" \
           -pprof-listen=:6062 \

@@ -13,12 +13,15 @@ import (
 )
 
 type entry struct {
-	digest string
-	path   string
-	size   int64
-	elem   *list.Element
-	ready  chan struct{}
-	err    error
+	digest      string
+	path        string
+	size        int64
+	elem        *list.Element
+	ready       chan struct{}
+	err         error
+	fd          *os.File
+	pinCount    int
+	invalidated bool
 }
 
 type Store struct {
@@ -67,7 +70,17 @@ func NewStore(cacheDir string, maxBytes int64, maxFileBytes int64) (*Store, erro
 	}, nil
 }
 
-func (s *Store) Close() error     { return nil }
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.fd != nil {
+			_ = e.fd.Close()
+			e.fd = nil
+		}
+	}
+	return nil
+}
 func (s *Store) HitCount() int64  { return s.hitCount.Load() }
 func (s *Store) MissCount() int64 { return s.missCount.Load() }
 
@@ -162,10 +175,27 @@ func (s *Store) ReadThrough(underlying io.ReaderAt, digest string, fileSize int6
 	if !leader {
 		s.hitCount.Add(1)
 	}
-	s.touch(e)
-	n, err := readFromPath(e.path, fileSize, dest, off)
+	if !s.touchAndPin(e) {
+		n, err := readDirect(underlying, fileSize, dest, off)
+		if n > 0 {
+			s.directReadBytes.Add(int64(n))
+		}
+		return n, err
+	}
+	n, err := readFromEntry(e, fileSize, dest, off)
+	s.unpinEntry(e)
 	if n > 0 {
 		s.cacheReadBytes.Add(int64(n))
+	}
+	if err != nil && err != io.EOF {
+		s.errorCount.Add(1)
+		log.Printf("ELF cache read failed, falling back to direct read: digest=%s path=%s err=%v", e.digest, e.path, err)
+		s.invalidateEntry(e)
+		n, err = readDirect(underlying, fileSize, dest, off)
+		if n > 0 {
+			s.directReadBytes.Add(int64(n))
+		}
+		return n, err
 	}
 	return n, err
 }
@@ -214,11 +244,17 @@ func (s *Store) materialize(e *entry, underlying io.ReaderAt, fileSize int64) {
 		return
 	}
 	ok = true
+	fd, err := os.Open(finalPath)
+	if err != nil {
+		s.failEntry(e, fmt.Errorf("open ELF cache file: %w", err))
+		return
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.path = finalPath
 	e.size = fileSize
+	e.fd = fd
 	e.elem = s.lru.PushFront(e.digest)
 	s.used += fileSize
 	s.materializeCount.Add(1)
@@ -231,6 +267,10 @@ func (s *Store) failEntry(e *entry, err error) {
 	defer s.mu.Unlock()
 	s.errorCount.Add(1)
 	e.err = err
+	if e.fd != nil {
+		_ = e.fd.Close()
+		e.fd = nil
+	}
 	delete(s.entries, e.digest)
 }
 
@@ -242,22 +282,104 @@ func (s *Store) touch(e *entry) {
 	}
 }
 
+// touchAndPin moves e to the LRU front and increments its pin count atomically.
+// Returns false if the entry is no longer valid (invalidated, errored, or no open fd).
+func (s *Store) touchAndPin(e *entry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.elem != nil {
+		s.lru.MoveToFront(e.elem)
+	}
+	if e.invalidated || e.err != nil || e.fd == nil {
+		return false
+	}
+	e.pinCount++
+	return true
+}
+
 func (s *Store) evictLocked() {
 	for s.used > s.maxBytes {
-		back := s.lru.Back()
-		if back == nil {
+		var victim *entry
+		for cur := s.lru.Back(); cur != nil; cur = cur.Prev() {
+			digest := cur.Value.(string)
+			e := s.entries[digest]
+			if e == nil {
+				s.lru.Remove(cur)
+				continue
+			}
+			if e.pinCount > 0 {
+				continue
+			}
+			victim = e
+			break
+		}
+		if victim == nil {
 			return
 		}
-		digest := back.Value.(string)
-		e := s.entries[digest]
-		delete(s.entries, digest)
-		s.lru.Remove(back)
-		if e != nil {
-			s.used -= e.size
-			s.evictCount.Add(1)
-			s.evictBytes.Add(e.size)
-			_ = os.Remove(e.path)
+		s.evictCount.Add(1)
+		s.evictBytes.Add(victim.size)
+		s.removeEntryLocked(victim)
+	}
+}
+
+func (s *Store) pinEntry(e *entry) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.invalidated || e.err != nil || e.fd == nil {
+		return false
+	}
+	e.pinCount++
+	return true
+}
+
+func (s *Store) unpinEntry(e *entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.pinCount > 0 {
+		e.pinCount--
+	}
+	if e.pinCount == 0 && e.invalidated {
+		s.removeEntryLocked(e)
+	}
+}
+
+func (s *Store) invalidateEntry(e *entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.entries[e.digest]
+	if !ok || current != e {
+		return
+	}
+	e.invalidated = true
+	if e.pinCount == 0 {
+		s.removeEntryLocked(e)
+	}
+}
+
+func (s *Store) removeEntryLocked(e *entry) {
+	if e == nil {
+		return
+	}
+	if current, ok := s.entries[e.digest]; ok && current == e {
+		delete(s.entries, e.digest)
+	}
+	if e.elem != nil {
+		s.lru.Remove(e.elem)
+		e.elem = nil
+	}
+	if e.size > 0 {
+		s.used -= e.size
+		if s.used < 0 {
+			s.used = 0
 		}
+	}
+	if e.fd != nil {
+		_ = e.fd.Close()
+		e.fd = nil
+	}
+	e.invalidated = true
+	if e.path != "" {
+		_ = os.Remove(e.path)
 	}
 }
 
@@ -295,12 +417,10 @@ func readDirect(underlying io.ReaderAt, fileSize int64, dest []byte, off int64) 
 	return n, err
 }
 
-func readFromPath(path string, fileSize int64, dest []byte, off int64) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
+func readFromEntry(e *entry, fileSize int64, dest []byte, off int64) (int, error) {
+	if e == nil || e.fd == nil {
+		return 0, fmt.Errorf("cache file is not open")
 	}
-	defer f.Close()
 	remain := fileSize - off
 	if remain > int64(len(dest)) {
 		remain = int64(len(dest))
@@ -308,7 +428,7 @@ func readFromPath(path string, fileSize int64, dest []byte, off int64) (int, err
 	if remain <= 0 {
 		return 0, io.EOF
 	}
-	n, err := f.ReadAt(dest[:remain], off)
+	n, err := e.fd.ReadAt(dest[:remain], off)
 	if err == io.EOF && n > 0 {
 		return n, nil
 	}

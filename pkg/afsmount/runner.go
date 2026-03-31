@@ -69,7 +69,6 @@ type Config struct {
 	ELFCacheStore          *filecache.Store
 	HoldReaper             func() func()
 	TOCCache               *layerformat.TOCCache
-	MountMode              string // only "unified-koverlay" is supported
 }
 
 type config struct {
@@ -102,7 +101,6 @@ type config struct {
 	elfCacheStore          *filecache.Store
 	holdReaper             func() func()
 	tocCache               *layerformat.TOCCache
-	mountMode              string
 }
 
 type serviceInfo struct {
@@ -223,7 +221,6 @@ func normalizeConfig(userCfg Config) (config, error) {
 		elfCacheStore:          userCfg.ELFCacheStore,
 		holdReaper:             userCfg.HoldReaper,
 		tocCache:               userCfg.TOCCache,
-		mountMode:              strings.TrimSpace(userCfg.MountMode),
 	}
 
 	if cfg.discoveryAddr == "" {
@@ -253,17 +250,11 @@ func normalizeConfig(userCfg Config) (config, error) {
 	if !cfg.grpcInsecure {
 		cfg.grpcInsecure = true
 	}
-	if cfg.mountMode == "" {
-		cfg.mountMode = "unified-koverlay"
-	}
 	if cfg.sharedCatalogMaxImages <= 0 {
 		cfg.sharedCatalogMaxImages = defaultSharedCatalogMaxImages
 	}
 	if cfg.sharedCatalogIdleTTL <= 0 {
 		cfg.sharedCatalogIdleTTL = defaultSharedCatalogIdleTTL
-	}
-	if cfg.mountMode != "unified-koverlay" {
-		return config{}, fmt.Errorf("unsupported -mount-mode %q", cfg.mountMode)
 	}
 
 	if cfg.mountpoint == "" {
@@ -476,7 +467,7 @@ func runImageMode(ctx context.Context, discoveryClient discoverypb.ServiceDiscov
 	logTiming("layer_readers_prepare_total", layerReadersStarted, "layers="+strconv.Itoa(len(layers)))
 
 	if runtime.GOOS != "linux" {
-		return fmt.Errorf("mount-mode %q requires linux", cfg.mountMode)
+		return fmt.Errorf("unified-koverlay requires linux")
 	}
 	mounter := &UnifiedMounter{}
 

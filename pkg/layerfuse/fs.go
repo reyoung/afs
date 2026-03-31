@@ -272,6 +272,7 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 	if f.elfStore != nil && f.entry.ContentKind == layerformat.ContentKindELF && f.entry.Digest != "" {
 		n, err := f.elfStore.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
 		if err != nil && err != io.EOF {
+			logReadFailure("layerfuse.read", f.entry, f.section, off, len(buf), "elf-cache", err)
 			return nil, syscall.EIO
 		}
 		f.stats.ReadBytes.Add(int64(n))
@@ -283,6 +284,7 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 	if f.store != nil && f.entry.Digest != "" {
 		n, err := f.store.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
 		if err != nil && err != io.EOF {
+			logReadFailure("layerfuse.read", f.entry, f.section, off, len(buf), "page-cache", err)
 			return nil, syscall.EIO
 		}
 		f.stats.ReadBytes.Add(int64(n))
@@ -293,6 +295,7 @@ func (f *FileNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off 
 	// Direct read (no page cache).
 	n, err := f.section.ReadAt(buf, off)
 	if err != nil && err != io.EOF {
+		logReadFailure("layerfuse.read", f.entry, f.section, off, len(buf), "direct", err)
 		return nil, syscall.EIO
 	}
 	f.stats.ReadBytes.Add(int64(n))

@@ -41,23 +41,7 @@ func TestBuildLinuxOverlayOptionsRequiresWorkdirForUpper(t *testing.T) {
 	}
 }
 
-func TestNormalizeConfigAcceptsUnifiedKOverlay(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := normalizeConfig(Config{
-		Mountpoint: "/tmp/mountpoint",
-		Image:      "alpine",
-		MountMode:  "unified-koverlay",
-	})
-	if err != nil {
-		t.Fatalf("normalizeConfig() error: %v", err)
-	}
-	if cfg.mountMode != "unified-koverlay" {
-		t.Fatalf("mountMode=%q, want unified-koverlay", cfg.mountMode)
-	}
-}
-
-func TestNormalizeConfigDefaultsToUnifiedKOverlay(t *testing.T) {
+func TestNormalizeConfigDefaultsReadAheadAndDiscovery(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := normalizeConfig(Config{
@@ -66,43 +50,11 @@ func TestNormalizeConfigDefaultsToUnifiedKOverlay(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("normalizeConfig() error: %v", err)
-	}
-	if cfg.mountMode != "unified-koverlay" {
-		t.Fatalf("mountMode=%q, want unified-koverlay", cfg.mountMode)
 	}
 	if cfg.fuseMaxReadAheadBytes != DefaultFUSEMaxReadAhead {
 		t.Fatalf("fuseMaxReadAheadBytes=%d, want %d", cfg.fuseMaxReadAheadBytes, DefaultFUSEMaxReadAhead)
 	}
-}
-
-func TestNormalizeConfigRejectsUnknownMountMode(t *testing.T) {
-	t.Parallel()
-
-	_, err := normalizeConfig(Config{
-		Mountpoint: "/tmp/mountpoint",
-		Image:      "alpine",
-		MountMode:  "nope",
-	})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if !strings.Contains(err.Error(), "unsupported -mount-mode") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestNormalizeConfigRejectsLegacyMountMode(t *testing.T) {
-	t.Parallel()
-
-	_, err := normalizeConfig(Config{
-		Mountpoint: "/tmp/mountpoint",
-		Image:      "alpine",
-		MountMode:  "unified-rw",
-	})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if !strings.Contains(err.Error(), "unsupported -mount-mode") {
-		t.Fatalf("unexpected error: %v", err)
+	if cfg.discoveryAddr != "127.0.0.1:60051" {
+		t.Fatalf("discoveryAddr=%q, want default", cfg.discoveryAddr)
 	}
 }

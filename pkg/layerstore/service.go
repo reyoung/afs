@@ -35,6 +35,7 @@ const (
 	maxReadBytes        = 4 << 20
 	defaultCacheMaxByte = int64(1) << 40 // 1TB
 	defaultCacheRatio   = int64(60)      // 60% of free space
+	defaultLeaseTTL     = 2 * time.Minute
 )
 
 var digestPattern = regexp.MustCompile(`^[A-Za-z0-9_+.-]+:[A-Fa-f0-9]+$`)
@@ -70,7 +71,10 @@ type Service struct {
 	pruneMu       sync.Mutex
 	cacheMax      int64
 	reservedBytes int64
-	evictReport func()
+	leaseSeq      int64
+	leases        map[string]*layerLease
+	leasedDigests map[string]int
+	evictReport   func()
 
 	localEndpoint      string
 	discoveryEndpoints []string
@@ -83,6 +87,12 @@ type cachedLayerFile struct {
 	path    string
 	size    int64
 	modTime time.Time
+}
+
+type layerLease struct {
+	id        string
+	digests   []string
+	expiresAt time.Time
 }
 
 type imageMetadata struct {
@@ -140,6 +150,8 @@ func NewService(cacheDir string, authConfigs []RegistryAuthConfig) (*Service, er
 		authByHost:       authByHost,
 		mirrorsByHost:    make(map[string][]string),
 		cacheMax:         cacheMax,
+		leases:           make(map[string]*layerLease),
+		leasedDigests:    make(map[string]int),
 		peerFetchTimeout: 5 * time.Second,
 	}, nil
 }
@@ -737,6 +749,84 @@ func (s *Service) HasImage(ctx context.Context, req *layerstorepb.HasImageReques
 	}, nil
 }
 
+func (s *Service) AcquireLayerLease(ctx context.Context, req *layerstorepb.AcquireLayerLeaseRequest) (*layerstorepb.AcquireLayerLeaseResponse, error) {
+	_ = ctx
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	digests, err := normalizeLeaseDigests(req.GetDigests())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	ttl := normalizeLeaseTTL(req.GetTtlMs())
+
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	s.cleanupExpiredLeasesLocked(time.Now())
+	for _, digest := range digests {
+		fullPath, pathErr := s.layerPath(digest)
+		if pathErr != nil {
+			return nil, status.Error(codes.InvalidArgument, pathErr.Error())
+		}
+		if _, statErr := os.Stat(fullPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil, status.Errorf(codes.NotFound, "layer is not cached: %s", digest)
+			}
+			return nil, status.Errorf(codes.Internal, "stat layer for lease: %v", statErr)
+		}
+	}
+	now := time.Now()
+	s.leaseSeq++
+	leaseID := fmt.Sprintf("lease-%d-%d", now.UnixNano(), s.leaseSeq)
+	lease := &layerLease{
+		id:        leaseID,
+		digests:   append([]string(nil), digests...),
+		expiresAt: now.Add(ttl),
+	}
+	s.leases[leaseID] = lease
+	for _, digest := range lease.digests {
+		s.leasedDigests[digest]++
+	}
+	return &layerstorepb.AcquireLayerLeaseResponse{
+		LeaseId:         leaseID,
+		Digests:         append([]string(nil), lease.digests...),
+		ExpiresAtUnixMs: lease.expiresAt.UnixMilli(),
+	}, nil
+}
+
+func (s *Service) RenewLayerLease(ctx context.Context, req *layerstorepb.RenewLayerLeaseRequest) (*layerstorepb.RenewLayerLeaseResponse, error) {
+	_ = ctx
+	if req == nil || strings.TrimSpace(req.GetLeaseId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	ttl := normalizeLeaseTTL(req.GetTtlMs())
+
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	s.cleanupExpiredLeasesLocked(time.Now())
+	lease, ok := s.leases[strings.TrimSpace(req.GetLeaseId())]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "lease not found: %s", strings.TrimSpace(req.GetLeaseId()))
+	}
+	lease.expiresAt = time.Now().Add(ttl)
+	return &layerstorepb.RenewLayerLeaseResponse{
+		LeaseId:         lease.id,
+		Digests:         append([]string(nil), lease.digests...),
+		ExpiresAtUnixMs: lease.expiresAt.UnixMilli(),
+	}, nil
+}
+
+func (s *Service) ReleaseLayerLease(ctx context.Context, req *layerstorepb.ReleaseLayerLeaseRequest) (*layerstorepb.ReleaseLayerLeaseResponse, error) {
+	_ = ctx
+	if req == nil || strings.TrimSpace(req.GetLeaseId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	released := s.releaseLeaseLocked(strings.TrimSpace(req.GetLeaseId()))
+	return &layerstorepb.ReleaseLayerLeaseResponse{Released: released}, nil
+}
+
 func (s *Service) PruneCache(ctx context.Context, req *layerstorepb.PruneCacheRequest) (*layerstorepb.PruneCacheResponse, error) {
 	_ = ctx
 	if req == nil {
@@ -938,6 +1028,7 @@ func (s *Service) pruneByReclaimTarget(target int64, exclude map[string]struct{}
 }
 
 func (s *Service) pruneByReclaimTargetLocked(target int64, exclude map[string]struct{}) (int64, int, error) {
+	s.cleanupExpiredLeasesLocked(time.Now())
 	files, _, err := s.scanLayerFiles()
 	if err != nil {
 		return 0, 0, err
@@ -949,6 +1040,7 @@ func (s *Service) pruneByReclaimTargetLocked(target int64, exclude map[string]st
 	var reclaimed int64
 	evicted := 0
 	removed := false
+	skippedPinned := 0
 	for _, f := range files {
 		if reclaimed >= target {
 			break
@@ -957,6 +1049,10 @@ func (s *Service) pruneByReclaimTargetLocked(target int64, exclude map[string]st
 			if _, ok := exclude[f.digest]; ok {
 				continue
 			}
+		}
+		if s.leasedDigests[f.digest] > 0 {
+			skippedPinned++
+			continue
 		}
 		if err := os.Remove(f.path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -970,6 +1066,9 @@ func (s *Service) pruneByReclaimTargetLocked(target int64, exclude map[string]st
 	}
 	if removed && s.evictReport != nil {
 		s.evictReport()
+	}
+	if evicted > 0 || skippedPinned > 0 {
+		log.Printf("prune cache summary: target=%d reclaimed=%d evicted=%d skipped_pinned_layers=%d", target, reclaimed, evicted, skippedPinned)
 	}
 	return reclaimed, evicted, nil
 }
@@ -1056,6 +1155,62 @@ func defaultCacheLimitFromFS(dir string) (int64, error) {
 func touchFile(path string) error {
 	now := time.Now()
 	return os.Chtimes(path, now, now)
+}
+
+func normalizeLeaseDigests(in []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, digest := range in {
+		digest = strings.TrimSpace(digest)
+		if digest == "" {
+			continue
+		}
+		if !digestPattern.MatchString(digest) {
+			return nil, fmt.Errorf("invalid digest: %q", digest)
+		}
+		digest = strings.ToLower(digest)
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+		seen[digest] = struct{}{}
+		out = append(out, digest)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one digest is required")
+	}
+	return out, nil
+}
+
+func normalizeLeaseTTL(ttlMS int64) time.Duration {
+	if ttlMS <= 0 {
+		return defaultLeaseTTL
+	}
+	return time.Duration(ttlMS) * time.Millisecond
+}
+
+func (s *Service) cleanupExpiredLeasesLocked(now time.Time) {
+	for id, lease := range s.leases {
+		if now.Before(lease.expiresAt) {
+			continue
+		}
+		s.releaseLeaseLocked(id)
+	}
+}
+
+func (s *Service) releaseLeaseLocked(id string) bool {
+	lease, ok := s.leases[id]
+	if !ok {
+		return false
+	}
+	delete(s.leases, id)
+	for _, digest := range lease.digests {
+		if s.leasedDigests[digest] <= 1 {
+			delete(s.leasedDigests, digest)
+			continue
+		}
+		s.leasedDigests[digest]--
+	}
+	return true
 }
 
 func (s *Service) layerPath(digest string) (string, error) {

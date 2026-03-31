@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,7 @@ type Config struct {
 	TarChunk               int
 	DefaultDiscovery       string
 	TempDir                string
+	WorkBaseDir            string
 	LimitCPUCores          int64
 	LimitMemoryMB          int64
 	LayerMountConcurrency  int
@@ -59,9 +61,10 @@ type Config struct {
 	SharedCatalogMaxImages int
 	SharedCatalogIdleTTL   time.Duration
 	PageCacheStore         *pagecache.Store
+	PageCacheDir           string
 	ELFCacheStore          *filecache.Store
+	ELFCacheDir            string
 	TOCCache               *layerformat.TOCCache
-	MountMode              string
 	SharedMountRoot        string
 }
 
@@ -80,6 +83,7 @@ type Service struct {
 	tarChunk                  int
 	defaultDiscovery          string
 	tempDir                   string
+	workBaseDir               string
 	mu                        sync.Mutex
 	limitCPUCores             int64
 	limitMemoryMB             int64
@@ -92,9 +96,10 @@ type Service struct {
 	sharedCatalogMaxImages    int
 	sharedCatalogIdleTTL      time.Duration
 	pageCacheStore            *pagecache.Store
+	pageCacheDir              string
 	elfCacheStore             *filecache.Store
+	elfCacheDir               string
 	tocCache                  *layerformat.TOCCache
-	mountMode                 string
 	sharedMountRoot           string
 	resolveImageRuntimeConfig func(context.Context, string, *afsletpb.StartRequest) (*discoverypb.ImageRuntimeConfig, error)
 }
@@ -113,6 +118,7 @@ func NewService(cfg Config) *Service {
 		tarChunk:               cfg.TarChunk,
 		defaultDiscovery:       strings.TrimSpace(cfg.DefaultDiscovery),
 		tempDir:                strings.TrimSpace(cfg.TempDir),
+		workBaseDir:            strings.TrimSpace(cfg.WorkBaseDir),
 		limitCPUCores:          cfg.LimitCPUCores,
 		limitMemoryMB:          cfg.LimitMemoryMB,
 		layerMountConcurrency:  cfg.LayerMountConcurrency,
@@ -121,9 +127,10 @@ func NewService(cfg Config) *Service {
 		sharedCatalogMaxImages: cfg.SharedCatalogMaxImages,
 		sharedCatalogIdleTTL:   cfg.SharedCatalogIdleTTL,
 		pageCacheStore:         cfg.PageCacheStore,
+		pageCacheDir:           strings.TrimSpace(cfg.PageCacheDir),
 		elfCacheStore:          cfg.ELFCacheStore,
+		elfCacheDir:            strings.TrimSpace(cfg.ELFCacheDir),
 		tocCache:               cfg.TOCCache,
-		mountMode:              strings.TrimSpace(cfg.MountMode),
 		sharedMountRoot:        strings.TrimSpace(cfg.SharedMountRoot),
 	}
 	if s.runcBinary == "" {
@@ -153,6 +160,7 @@ type session struct {
 	mountpoint string
 	workDir    string
 	extraDir   string
+	id         string
 }
 
 type managedProcess struct {
@@ -218,7 +226,7 @@ func newFileAssembler(baseDir string) *fileAssembler {
 func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	ctx := stream.Context()
 	executeStart := time.Now()
-	sess, cleanup, err := newSession(s.tempDir)
+	sess, cleanup, err := newSession(s.tempDir, s.workBaseDir)
 	if err != nil {
 		return status.Errorf(codes.Internal, "create session: %v", err)
 	}
@@ -254,8 +262,18 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 	if err := stream.Send(&afsletpb.ExecuteResponse{Payload: &afsletpb.ExecuteResponse_Accepted{Accepted: &afsletpb.Accepted{Accepted: true}}}); err != nil {
 		return err
 	}
-	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=execute_request_enter ms=%d", time.Since(executeStart).Milliseconds()))
-	_ = s.sendLog(stream, "timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=true", reserveMs, reserveLockMs, admissionQueueWaitMs))
+	sessionID := sess.id
+	image := strings.TrimSpace(start.GetImage())
+	tag := strings.TrimSpace(start.GetTag())
+	logf := func(source string, message string) {
+		_ = s.sendLog(stream, source, message)
+		if shouldMirrorExecuteLog(source, message) {
+			log.Printf("afslet session_id=%s image=%s tag=%s source=%s %s", sessionID, image, tag, source, message)
+		}
+	}
+	logf("timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=execute_request_enter ms=%d", time.Since(executeStart).Milliseconds()))
+	logf("timing", fmt.Sprintf("__AFS_AFSLET_TIMING__ phase=reserve_resources ms=%d lock_wait_ms=%d admission_queue_wait_ms=%d ok=true", reserveMs, reserveLockMs, admissionQueueWaitMs))
+	s.logSessionStart(logf, sess, start)
 
 	for {
 		req, recvErr := stream.Recv()
@@ -288,9 +306,6 @@ func (s *Service) Execute(stream afsletpb.Afslet_ExecuteServer) error {
 		return status.Errorf(codes.InvalidArgument, "finalize extra-dir files: %v", err)
 	}
 
-	logf := func(source string, message string) {
-		_ = s.sendLog(stream, source, message)
-	}
 	runRes := s.runCommand(ctx, sess, start, logf)
 	if err := s.sendResult(stream, runRes); err != nil {
 		return err
@@ -436,6 +451,14 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 	if logf != nil {
 		logf("session", fmt.Sprintf("extra-dir prepared at %s", sess.extraDir))
 	}
+	writableUpperDir := filepath.Join(sess.workDir, "writable-upper")
+	writableWorkDir := filepath.Join(sess.workDir, "writable-work")
+	if logf != nil {
+		logf("mount", fmt.Sprintf("mountpoint=%s writable_upper=%s writable_work=%s extra_dir=%s", sess.mountpoint, writableUpperDir, writableWorkDir, sess.extraDir))
+		if msg := describePathFS("mount-work-root", sess.workDir); msg != "" {
+			logf("mount", msg)
+		}
+	}
 
 	discoveryAddr := pickDiscoveryAddr(start.GetDiscoveryAddr(), s.defaultDiscovery)
 	imageRuntimeConfig, err := s.resolveImageRuntimeConfig(ctx, discoveryAddr, start)
@@ -480,7 +503,6 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 		ELFCacheStore:          s.elfCacheStore,
 		HoldReaper:             HoldReaper,
 		TOCCache:               s.tocCache,
-		MountMode:              s.mountMode,
 	}
 	mountWait := make(chan error, 1)
 	readyCh := make(chan struct{}, 1)
@@ -631,6 +653,21 @@ func (s *Service) runCommand(ctx context.Context, sess *session, start *afsletpb
 			logf("cleanup", "mountpoint unmounted")
 		}
 	}
+	if logf != nil {
+		for _, item := range []struct {
+			label string
+			path  string
+		}{
+			{label: "cleanup-mountpoint", path: sess.mountpoint},
+			{label: "cleanup-work-root", path: sess.workDir},
+			{label: "cleanup-writable-upper", path: writableUpperDir},
+			{label: "cleanup-writable-work", path: writableWorkDir},
+		} {
+			if msg := describePathFS(item.label, item.path); msg != "" {
+				logf("cleanup", msg)
+			}
+		}
+	}
 
 	if runErr != nil {
 		exitCode := int32(1)
@@ -778,6 +815,65 @@ func normalizeWorkingDir(workingDir string) string {
 		return "/" + workingDir
 	}
 	return workingDir
+}
+
+func (s *Service) logSessionStart(logf func(string, string), sess *session, start *afsletpb.StartRequest) {
+	if logf == nil || sess == nil {
+		return
+	}
+	logf("session", fmt.Sprintf("session_id=%s image=%s tag=%s root=%s work_dir=%s mountpoint=%s extra_dir=%s", sess.id, strings.TrimSpace(start.GetImage()), strings.TrimSpace(start.GetTag()), sess.root, sess.workDir, sess.mountpoint, sess.extraDir))
+	for _, item := range []struct {
+		label string
+		path  string
+	}{
+		{label: "session-root", path: sess.root},
+		{label: "session-work-dir", path: sess.workDir},
+		{label: "session-mountpoint", path: sess.mountpoint},
+		{label: "session-extra-dir", path: sess.extraDir},
+		{label: "page-cache", path: s.pageCacheDir},
+		{label: "elf-cache", path: s.elfCacheDir},
+	} {
+		if msg := describePathFS(item.label, item.path); msg != "" {
+			logf("session", msg)
+		}
+	}
+}
+
+func shouldMirrorExecuteLog(source string, message string) bool {
+	switch source {
+	case "session", "image", "request", "resource", "mount", "cleanup", "runc", "runc:stderr":
+		return true
+	case "runc:stdout":
+		lower := strings.ToLower(message)
+		return strings.Contains(lower, "input/output error") ||
+			strings.Contains(lower, "i/o error") ||
+			strings.Contains(lower, "eio") ||
+			strings.Contains(lower, "command exited with code") ||
+			strings.Contains(lower, "traceback")
+	default:
+		return false
+	}
+}
+
+func describePathFS(label string, target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return fmt.Sprintf("%s path=%s stat_err=%v", label, target, err)
+	}
+	dev := uint64(0)
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		dev = uint64(st.Dev)
+	}
+	var fsStat syscall.Statfs_t
+	if err := syscall.Statfs(target, &fsStat); err != nil {
+		return fmt.Sprintf("%s path=%s mode=%#o dev=%d statfs_err=%v", label, target, info.Mode().Perm(), dev, err)
+	}
+	freeBytes := int64(fsStat.Bavail) * int64(fsStat.Bsize)
+	return fmt.Sprintf("%s path=%s mode=%#o dev=%d fs_type=%#x bsize=%d blocks=%d bavail=%d free_bytes=%d", label, target, info.Mode().Perm(), dev, uint64(fsStat.Type), fsStat.Bsize, fsStat.Blocks, fsStat.Bavail, freeBytes)
 }
 
 func (s *Service) sendLog(stream afsletpb.Afslet_ExecuteServer, source string, message string) error {
@@ -1017,7 +1113,7 @@ func safeJoin(base string, rel string) (string, error) {
 	return target, nil
 }
 
-func newSession(tempDir string) (*session, func(), error) {
+func newSession(tempDir string, workBaseDir string) (*session, func(), error) {
 	rootBase := strings.TrimSpace(tempDir)
 	if rootBase != "" {
 		if err := os.MkdirAll(rootBase, 0o755); err != nil {
@@ -1028,19 +1124,43 @@ func newSession(tempDir string) (*session, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	workDir := filepath.Join(root, "work")
+	separateWork := false
+	workBase := strings.TrimSpace(workBaseDir)
+	if workBase != "" {
+		if err := os.MkdirAll(workBase, 0o755); err != nil {
+			_ = os.RemoveAll(root)
+			return nil, nil, err
+		}
+		workDir, err = os.MkdirTemp(workBase, "afslet-work-*")
+		if err != nil {
+			_ = os.RemoveAll(root)
+			return nil, nil, err
+		}
+		separateWork = true
+	}
 	s := &session{
 		root:       root,
 		mountpoint: filepath.Join(root, "mountpoint"),
-		workDir:    filepath.Join(root, "work"),
+		workDir:    workDir,
 		extraDir:   filepath.Join(root, "extra"),
+		id:         filepath.Base(root),
 	}
 	for _, p := range []string{s.mountpoint, s.workDir, s.extraDir} {
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			_ = os.RemoveAll(root)
+			if separateWork {
+				_ = os.RemoveAll(workDir)
+			}
 			return nil, nil, err
 		}
 	}
-	cleanup := func() { _ = os.RemoveAll(root) }
+	cleanup := func() {
+		_ = os.RemoveAll(root)
+		if separateWork {
+			_ = os.RemoveAll(s.workDir)
+		}
+	}
 	return s, cleanup, nil
 }
 

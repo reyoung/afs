@@ -11,6 +11,10 @@ type CacheEntry struct {
 	SlabIndex int
 	SlabClass int
 	DataSize  uint32
+
+	mu      sync.Mutex
+	pins    int
+	evicted bool
 }
 
 // PageIndex is a thread-safe in-memory index mapping page keys to cache entries.
@@ -70,4 +74,50 @@ func MakePageKey(digest string, pageID uint64) pageKey {
 		digestHash: hashDigest(digest),
 		pageID:     pageID,
 	}
+}
+
+func (e *CacheEntry) Pin() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.evicted {
+		return false
+	}
+	e.pins++
+	return true
+}
+
+func (e *CacheEntry) Unpin() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	if e.pins > 0 {
+		e.pins--
+	}
+	e.mu.Unlock()
+}
+
+func (e *CacheEntry) Pinned() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pins > 0
+}
+
+func (e *CacheEntry) MarkEvicted() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.evicted || e.pins > 0 {
+		return false
+	}
+	e.evicted = true
+	return true
 }

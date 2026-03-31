@@ -18,6 +18,11 @@ import (
 	"github.com/reyoung/afs/pkg/layerstorepb"
 )
 
+const (
+	defaultLayerLeaseTTL      = 2 * time.Minute
+	defaultLayerLeaseRenewTTL = 30 * time.Second
+)
+
 type ServiceInfo struct {
 	NodeID   string
 	Endpoint string
@@ -42,6 +47,7 @@ type DiscoveryBackedReaderAt struct {
 	providers         []ServiceInfo
 	dialGRPCAcquire   func(addr string, timeout time.Duration, insecureTransport bool) (*grpc.ClientConn, func(), error)
 	findLayerServices func(discoveryAddr, digest string, timeout time.Duration, insecureTransport bool) ([]ServiceInfo, error)
+	switchMu          sync.Mutex
 
 	mu                   sync.Mutex
 	nextRefreshAt        time.Time
@@ -51,6 +57,9 @@ type DiscoveryBackedReaderAt struct {
 	connRelease          func()
 	client               layerstorepb.LayerStoreClient
 	size                 int64
+	leaseID              string
+	renewCancel          context.CancelFunc
+	closed               bool
 }
 
 func NewDiscoveryBackedLayerReader(cfg Config, digest string, bootstrapEndpoint string, providers []ServiceInfo) (*DiscoveryBackedReaderAt, error) {
@@ -92,9 +101,15 @@ func (r *DiscoveryBackedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	excluded := make(map[string]struct{})
 	for {
 		r.maybeRefreshProviders()
-		client, size, endpoint := r.currentProvider()
+		client, size, endpoint, closed := r.currentProvider()
 		if client == nil {
-			return 0, fmt.Errorf("layer provider is not initialized for digest=%s", r.digest)
+			if closed {
+				return 0, fmt.Errorf("layer reader is closed for digest=%s", r.digest)
+			}
+			if err := r.switchProvider(excluded); err != nil {
+				return 0, fmt.Errorf("layer provider is not initialized for digest=%s: %w", r.digest, err)
+			}
+			continue
 		}
 		if off >= size {
 			return 0, io.EOF
@@ -145,10 +160,10 @@ func (r *DiscoveryBackedReaderAt) maybeRefreshProviders() {
 	}
 }
 
-func (r *DiscoveryBackedReaderAt) currentProvider() (layerstorepb.LayerStoreClient, int64, string) {
+func (r *DiscoveryBackedReaderAt) currentProvider() (layerstorepb.LayerStoreClient, int64, string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.client, r.size, r.endpoint
+	return r.client, r.size, r.endpoint, r.closed
 }
 
 func (r *DiscoveryBackedReaderAt) readOnce(client layerstorepb.LayerStoreClient, p []byte, off int64) (int, error) {
@@ -200,6 +215,9 @@ func (r *DiscoveryBackedReaderAt) readOnce(client layerstorepb.LayerStoreClient,
 }
 
 func (r *DiscoveryBackedReaderAt) switchProvider(excluded map[string]struct{}) error {
+	r.switchMu.Lock()
+	defer r.switchMu.Unlock()
+
 	candidates := r.currentCandidates()
 	for _, c := range candidates {
 		if _, skip := excluded[c.Endpoint]; skip {
@@ -288,28 +306,54 @@ func (r *DiscoveryBackedReaderAt) connectProvider(endpoint string) error {
 		return err
 	}
 	client := layerstorepb.NewLayerStoreClient(conn)
+	leaseID, err := r.acquireLease(client, endpoint)
+	if err != nil {
+		release()
+		return err
+	}
 	size := r.cfg.KnownLayerAfsSize
 	if size <= 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
 		statResp, err := client.StatLayer(ctx, &layerstorepb.StatLayerRequest{Digest: r.digest})
 		cancel()
 		if err != nil {
+			r.releaseLease(client, endpoint, leaseID)
 			release()
 			return err
 		}
 		size = statResp.GetAfsSize()
 	}
+	renewCancel := r.startLeaseRenewLoop(client, endpoint, leaseID)
 
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		renewCancel()
+		r.releaseLease(client, endpoint, leaseID)
+		release()
+		return fmt.Errorf("layer reader is closed for digest=%s", r.digest)
+	}
 	oldConn := r.conn
 	oldRelease := r.connRelease
+	oldClient := r.client
+	oldEndpoint := r.endpoint
+	oldLeaseID := r.leaseID
+	oldRenewCancel := r.renewCancel
 	r.conn = conn
 	r.connRelease = release
 	r.client = client
 	r.endpoint = endpoint
 	r.size = size
+	r.leaseID = leaseID
+	r.renewCancel = renewCancel
 	r.mu.Unlock()
 
+	if oldRenewCancel != nil {
+		oldRenewCancel()
+	}
+	if oldClient != nil && oldLeaseID != "" {
+		r.releaseLease(oldClient, oldEndpoint, oldLeaseID)
+	}
 	if oldRelease != nil {
 		oldRelease()
 	} else if oldConn != nil {
@@ -322,12 +366,25 @@ func (r *DiscoveryBackedReaderAt) Close() error {
 	r.mu.Lock()
 	conn := r.conn
 	release := r.connRelease
+	client := r.client
+	endpoint := r.endpoint
+	leaseID := r.leaseID
+	renewCancel := r.renewCancel
 	r.conn = nil
 	r.connRelease = nil
 	r.client = nil
 	r.endpoint = ""
+	r.leaseID = ""
+	r.renewCancel = nil
+	r.closed = true
 	r.mu.Unlock()
 
+	if renewCancel != nil {
+		renewCancel()
+	}
+	if client != nil && leaseID != "" {
+		r.releaseLease(client, endpoint, leaseID)
+	}
 	if release != nil {
 		release()
 		return nil
@@ -336,6 +393,96 @@ func (r *DiscoveryBackedReaderAt) Close() error {
 		return conn.Close()
 	}
 	return nil
+}
+
+func (r *DiscoveryBackedReaderAt) acquireLease(client layerstorepb.LayerStoreClient, endpoint string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
+	defer cancel()
+	resp, err := client.AcquireLayerLease(ctx, &layerstorepb.AcquireLayerLeaseRequest{
+		Digests: []string{r.digest},
+		TtlMs:   defaultLayerLeaseTTL.Milliseconds(),
+	})
+	if err != nil {
+		log.Printf("layer lease acquire failed: digest=%s endpoint=%s err=%v", r.digest, endpoint, err)
+		return "", err
+	}
+	return strings.TrimSpace(resp.GetLeaseId()), nil
+}
+
+func (r *DiscoveryBackedReaderAt) releaseLease(client layerstorepb.LayerStoreClient, endpoint string, leaseID string) {
+	if client == nil || strings.TrimSpace(leaseID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
+	defer cancel()
+	if _, err := client.ReleaseLayerLease(ctx, &layerstorepb.ReleaseLayerLeaseRequest{LeaseId: leaseID}); err != nil {
+		log.Printf("layer lease release failed: digest=%s endpoint=%s lease_id=%s err=%v", r.digest, endpoint, leaseID, err)
+	}
+}
+
+func (r *DiscoveryBackedReaderAt) startLeaseRenewLoop(client layerstorepb.LayerStoreClient, endpoint string, leaseID string) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(defaultLayerLeaseRenewTTL)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				callCtx, callCancel := context.WithTimeout(context.Background(), r.cfg.GRPCTimeout)
+				_, err := client.RenewLayerLease(callCtx, &layerstorepb.RenewLayerLeaseRequest{
+					LeaseId: leaseID,
+					TtlMs:   defaultLayerLeaseTTL.Milliseconds(),
+				})
+				callCancel()
+				if err != nil {
+					r.onLeaseRenewFailure(endpoint, leaseID, err)
+					return
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+func (r *DiscoveryBackedReaderAt) onLeaseRenewFailure(endpoint string, leaseID string, err error) {
+	log.Printf("layer lease renew failed: digest=%s endpoint=%s lease_id=%s err=%v", r.digest, endpoint, leaseID, err)
+
+	r.mu.Lock()
+	if r.closed || r.endpoint != endpoint || r.leaseID != leaseID {
+		r.mu.Unlock()
+		return
+	}
+	conn := r.conn
+	release := r.connRelease
+	client := r.client
+	renewCancel := r.renewCancel
+	r.conn = nil
+	r.connRelease = nil
+	r.client = nil
+	r.endpoint = ""
+	r.size = 0
+	r.leaseID = ""
+	r.renewCancel = nil
+	r.mu.Unlock()
+
+	if renewCancel != nil {
+		renewCancel()
+	}
+	if client != nil {
+		r.releaseLease(client, endpoint, leaseID)
+	}
+	if release != nil {
+		release()
+	} else if conn != nil {
+		_ = conn.Close()
+	}
+	go func() {
+		if switchErr := r.switchProvider(map[string]struct{}{endpoint: {}}); switchErr != nil {
+			log.Printf("layer provider failover after lease renew failure failed: digest=%s endpoint=%s err=%v", r.digest, endpoint, switchErr)
+		}
+	}()
 }
 
 func rankServicesForAffinity(services []ServiceInfo, nodeID string) []ServiceInfo {

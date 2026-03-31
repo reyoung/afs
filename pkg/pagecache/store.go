@@ -123,16 +123,17 @@ func (s *Store) readPage(underlying io.ReaderAt, digest string, fileSize int64, 
 
 	// Try cache hit
 	entry, ok := s.index.Get(key)
-	if ok {
+	if ok && entry.Pin() {
 		s.hitCount.Add(1)
 		s.eviction.Access(key)
 
 		offset := s.slab.SlabOffset(entry.SlabClass, entry.SlabIndex) + int64(pageOffset)
 		n, err := s.preadChunk(entry.ChunkID, dst, offset)
+		entry.Unpin()
 		if err == nil {
 			return n, nil
 		}
-		// pread failed (shouldn't happen), fall through to miss
+		s.evictEntry(key)
 	}
 
 	s.missCount.Add(1)
@@ -200,34 +201,46 @@ func (s *Store) putPage(key pageKey, data []byte) {
 	}
 	s.index.Put(key, entry)
 
-	evicted := s.eviction.Add(key)
+	evicted := s.eviction.AddPinned(key, s.isPinned)
 	if evicted != nil {
-		s.evictEntry(*evicted)
+		_ = s.evictEntry(*evicted)
 	}
 }
 
 // evictEntry removes an entry from the cache.
-func (s *Store) evictEntry(key pageKey) {
+func (s *Store) evictEntry(key pageKey) bool {
 	entry, ok := s.index.Get(key)
 	if !ok {
-		return
+		return false
+	}
+	if !entry.MarkEvicted() {
+		return false
 	}
 	s.slab.Free(entry.ChunkID, entry.SlabIndex)
 	s.index.Delete(key)
+	s.eviction.Remove(key)
+	return true
+}
+
+func (s *Store) isPinned(key pageKey) bool {
+	entry, ok := s.index.Get(key)
+	if !ok {
+		return false
+	}
+	return entry.Pinned()
 }
 
 // allocateWithEviction tries to make space by evicting entries.
 func (s *Store) allocateWithEviction(slabClass int) (uint32, int, error) {
 	for attempts := 0; attempts < 64; attempts++ {
-		victim := s.eviction.FindVictim(func(key pageKey) bool {
-			return false
-		})
+		victim := s.eviction.FindVictim(s.isPinned)
 		if victim == nil {
 			break
 		}
 
-		s.evictEntry(*victim)
-		s.eviction.Remove(*victim)
+		if !s.evictEntry(*victim) {
+			continue
+		}
 
 		chunkID, slabIndex, err := s.slab.Allocate(slabClass)
 		if err == nil {

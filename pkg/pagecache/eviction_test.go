@@ -259,6 +259,23 @@ func TestEvictionPolicy_FindVictim_AllPinned(t *testing.T) {
 	}
 }
 
+func TestEvictionPolicy_AddPinnedDoesNotEvictPinnedVictim(t *testing.T) {
+	e := newEvictionPolicy(2)
+
+	pinned := pageKey{digestHash: 1, pageID: 0}
+	other := pageKey{digestHash: 2, pageID: 0}
+	newKey := pageKey{digestHash: 3, pageID: 0}
+
+	e.Add(pinned)
+	e.Add(other)
+	victim := e.AddPinned(newKey, func(k pageKey) bool {
+		return k == pinned
+	})
+	if victim != nil && *victim == pinned {
+		t.Fatal("expected pinned key to never be selected as eviction victim")
+	}
+}
+
 func TestEvictionPolicy_FrequencyComparison(t *testing.T) {
 	// Verify that a frequently accessed entry survives over a less frequent one.
 	e := newEvictionPolicy(10)

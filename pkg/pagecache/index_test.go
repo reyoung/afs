@@ -143,3 +143,26 @@ func TestPageIndex_ConcurrentAccess(t *testing.T) {
 		t.Fatalf("expected 100 entries, got %d", idx.Len())
 	}
 }
+
+func TestCacheEntryPinBlocksEviction(t *testing.T) {
+	entry := &CacheEntry{}
+	if !entry.Pin() {
+		t.Fatalf("expected pin to succeed")
+	}
+	if !entry.Pinned() {
+		t.Fatalf("expected entry to be pinned")
+	}
+	if entry.MarkEvicted() {
+		t.Fatalf("expected pinned entry to reject eviction")
+	}
+	entry.Unpin()
+	if entry.Pinned() {
+		t.Fatalf("expected entry to be unpinned")
+	}
+	if !entry.MarkEvicted() {
+		t.Fatalf("expected unpinned entry to become evicted")
+	}
+	if entry.Pin() {
+		t.Fatalf("evicted entry should not allow new pins")
+	}
+}

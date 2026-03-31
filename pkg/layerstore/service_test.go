@@ -597,6 +597,98 @@ func TestPullImageRespectsCacheLimit(t *testing.T) {
 	}
 }
 
+func TestLayerLeasePreventsPruneUntilReleased(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	oldDigest := "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+	newDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+	oldPath, err := svc.layerPath(oldDigest)
+	if err != nil {
+		t.Fatalf("old layerPath: %v", err)
+	}
+	newPath, err := svc.layerPath(newDigest)
+	if err != nil {
+		t.Fatalf("new layerPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, bytes.Repeat([]byte("a"), 1024), 0o644); err != nil {
+		t.Fatalf("write old layer: %v", err)
+	}
+	if err := os.WriteFile(newPath, bytes.Repeat([]byte("b"), 1024), 0o644); err != nil {
+		t.Fatalf("write new layer: %v", err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatalf("set old mtime: %v", err)
+	}
+
+	acquireResp, err := svc.AcquireLayerLease(context.Background(), &layerstorepb.AcquireLayerLeaseRequest{
+		Digests: []string{oldDigest},
+	})
+	if err != nil {
+		t.Fatalf("AcquireLayerLease: %v", err)
+	}
+	if acquireResp.GetLeaseId() == "" {
+		t.Fatalf("expected lease id")
+	}
+
+	resp, err := svc.PruneCache(context.Background(), &layerstorepb.PruneCacheRequest{Percent: 50})
+	if err != nil {
+		t.Fatalf("PruneCache while leased: %v", err)
+	}
+	if resp.GetEvictedLayers() == 0 {
+		t.Fatalf("expected prune to evict at least one layer")
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("leased layer should remain cached, stat err=%v", err)
+	}
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("expected newer unleased layer to be evicted first, stat err=%v", err)
+	}
+
+	if _, err := svc.ReleaseLayerLease(context.Background(), &layerstorepb.ReleaseLayerLeaseRequest{
+		LeaseId: acquireResp.GetLeaseId(),
+	}); err != nil {
+		t.Fatalf("ReleaseLayerLease: %v", err)
+	}
+
+	if _, _, err := svc.pruneByReclaimTarget(1, nil); err != nil {
+		t.Fatalf("pruneByReclaimTarget after release: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("released layer should become evictable, stat err=%v", err)
+	}
+}
+
+func TestAcquireLayerLeaseMissingDigestReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	svc, err := NewService(tmp, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	_, err = svc.AcquireLayerLease(context.Background(), &layerstorepb.AcquireLayerLeaseRequest{
+		Digests: []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+	})
+	if err == nil {
+		t.Fatalf("expected not found error")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected NotFound, got err=%v", err)
+	}
+}
+
 func TestPullImageFailsWhenImageExceedsCacheLimit(t *testing.T) {
 	t.Parallel()
 

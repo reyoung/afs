@@ -19,13 +19,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	LayerStore_PullImage_FullMethodName       = "/layerstore.v1.LayerStore/PullImage"
-	LayerStore_EnsureLayers_FullMethodName    = "/layerstore.v1.LayerStore/EnsureLayers"
-	LayerStore_StatLayer_FullMethodName       = "/layerstore.v1.LayerStore/StatLayer"
-	LayerStore_ReadLayerStream_FullMethodName = "/layerstore.v1.LayerStore/ReadLayerStream"
-	LayerStore_HasLayer_FullMethodName        = "/layerstore.v1.LayerStore/HasLayer"
-	LayerStore_HasImage_FullMethodName        = "/layerstore.v1.LayerStore/HasImage"
-	LayerStore_PruneCache_FullMethodName      = "/layerstore.v1.LayerStore/PruneCache"
+	LayerStore_PullImage_FullMethodName         = "/layerstore.v1.LayerStore/PullImage"
+	LayerStore_EnsureLayers_FullMethodName      = "/layerstore.v1.LayerStore/EnsureLayers"
+	LayerStore_StatLayer_FullMethodName         = "/layerstore.v1.LayerStore/StatLayer"
+	LayerStore_ReadLayerStream_FullMethodName   = "/layerstore.v1.LayerStore/ReadLayerStream"
+	LayerStore_HasLayer_FullMethodName          = "/layerstore.v1.LayerStore/HasLayer"
+	LayerStore_HasImage_FullMethodName          = "/layerstore.v1.LayerStore/HasImage"
+	LayerStore_AcquireLayerLease_FullMethodName = "/layerstore.v1.LayerStore/AcquireLayerLease"
+	LayerStore_RenewLayerLease_FullMethodName   = "/layerstore.v1.LayerStore/RenewLayerLease"
+	LayerStore_ReleaseLayerLease_FullMethodName = "/layerstore.v1.LayerStore/ReleaseLayerLease"
+	LayerStore_PruneCache_FullMethodName        = "/layerstore.v1.LayerStore/PruneCache"
 )
 
 // LayerStoreClient is the client API for LayerStore service.
@@ -38,6 +41,9 @@ type LayerStoreClient interface {
 	ReadLayerStream(ctx context.Context, in *ReadLayerRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadLayerResponse], error)
 	HasLayer(ctx context.Context, in *HasLayerRequest, opts ...grpc.CallOption) (*HasLayerResponse, error)
 	HasImage(ctx context.Context, in *HasImageRequest, opts ...grpc.CallOption) (*HasImageResponse, error)
+	AcquireLayerLease(ctx context.Context, in *AcquireLayerLeaseRequest, opts ...grpc.CallOption) (*AcquireLayerLeaseResponse, error)
+	RenewLayerLease(ctx context.Context, in *RenewLayerLeaseRequest, opts ...grpc.CallOption) (*RenewLayerLeaseResponse, error)
+	ReleaseLayerLease(ctx context.Context, in *ReleaseLayerLeaseRequest, opts ...grpc.CallOption) (*ReleaseLayerLeaseResponse, error)
 	PruneCache(ctx context.Context, in *PruneCacheRequest, opts ...grpc.CallOption) (*PruneCacheResponse, error)
 }
 
@@ -118,6 +124,36 @@ func (c *layerStoreClient) HasImage(ctx context.Context, in *HasImageRequest, op
 	return out, nil
 }
 
+func (c *layerStoreClient) AcquireLayerLease(ctx context.Context, in *AcquireLayerLeaseRequest, opts ...grpc.CallOption) (*AcquireLayerLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcquireLayerLeaseResponse)
+	err := c.cc.Invoke(ctx, LayerStore_AcquireLayerLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *layerStoreClient) RenewLayerLease(ctx context.Context, in *RenewLayerLeaseRequest, opts ...grpc.CallOption) (*RenewLayerLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewLayerLeaseResponse)
+	err := c.cc.Invoke(ctx, LayerStore_RenewLayerLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *layerStoreClient) ReleaseLayerLease(ctx context.Context, in *ReleaseLayerLeaseRequest, opts ...grpc.CallOption) (*ReleaseLayerLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseLayerLeaseResponse)
+	err := c.cc.Invoke(ctx, LayerStore_ReleaseLayerLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *layerStoreClient) PruneCache(ctx context.Context, in *PruneCacheRequest, opts ...grpc.CallOption) (*PruneCacheResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PruneCacheResponse)
@@ -138,6 +174,9 @@ type LayerStoreServer interface {
 	ReadLayerStream(*ReadLayerRequest, grpc.ServerStreamingServer[ReadLayerResponse]) error
 	HasLayer(context.Context, *HasLayerRequest) (*HasLayerResponse, error)
 	HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error)
+	AcquireLayerLease(context.Context, *AcquireLayerLeaseRequest) (*AcquireLayerLeaseResponse, error)
+	RenewLayerLease(context.Context, *RenewLayerLeaseRequest) (*RenewLayerLeaseResponse, error)
+	ReleaseLayerLease(context.Context, *ReleaseLayerLeaseRequest) (*ReleaseLayerLeaseResponse, error)
 	PruneCache(context.Context, *PruneCacheRequest) (*PruneCacheResponse, error)
 	mustEmbedUnimplementedLayerStoreServer()
 }
@@ -166,6 +205,15 @@ func (UnimplementedLayerStoreServer) HasLayer(context.Context, *HasLayerRequest)
 }
 func (UnimplementedLayerStoreServer) HasImage(context.Context, *HasImageRequest) (*HasImageResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HasImage not implemented")
+}
+func (UnimplementedLayerStoreServer) AcquireLayerLease(context.Context, *AcquireLayerLeaseRequest) (*AcquireLayerLeaseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AcquireLayerLease not implemented")
+}
+func (UnimplementedLayerStoreServer) RenewLayerLease(context.Context, *RenewLayerLeaseRequest) (*RenewLayerLeaseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RenewLayerLease not implemented")
+}
+func (UnimplementedLayerStoreServer) ReleaseLayerLease(context.Context, *ReleaseLayerLeaseRequest) (*ReleaseLayerLeaseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseLayerLease not implemented")
 }
 func (UnimplementedLayerStoreServer) PruneCache(context.Context, *PruneCacheRequest) (*PruneCacheResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PruneCache not implemented")
@@ -292,6 +340,60 @@ func _LayerStore_HasImage_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LayerStore_AcquireLayerLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcquireLayerLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LayerStoreServer).AcquireLayerLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LayerStore_AcquireLayerLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LayerStoreServer).AcquireLayerLease(ctx, req.(*AcquireLayerLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LayerStore_RenewLayerLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewLayerLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LayerStoreServer).RenewLayerLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LayerStore_RenewLayerLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LayerStoreServer).RenewLayerLease(ctx, req.(*RenewLayerLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LayerStore_ReleaseLayerLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseLayerLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LayerStoreServer).ReleaseLayerLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LayerStore_ReleaseLayerLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LayerStoreServer).ReleaseLayerLease(ctx, req.(*ReleaseLayerLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _LayerStore_PruneCache_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PruneCacheRequest)
 	if err := dec(in); err != nil {
@@ -336,6 +438,18 @@ var LayerStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HasImage",
 			Handler:    _LayerStore_HasImage_Handler,
+		},
+		{
+			MethodName: "AcquireLayerLease",
+			Handler:    _LayerStore_AcquireLayerLease_Handler,
+		},
+		{
+			MethodName: "RenewLayerLease",
+			Handler:    _LayerStore_RenewLayerLease_Handler,
+		},
+		{
+			MethodName: "ReleaseLayerLease",
+			Handler:    _LayerStore_ReleaseLayerLease_Handler,
 		},
 		{
 			MethodName: "PruneCache",

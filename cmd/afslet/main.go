@@ -38,6 +38,7 @@ func main() {
 	var gracefulTimeout time.Duration
 	var defaultDiscoveryAddr string
 	var tempDir string
+	var workBaseDir string
 	var limitCPUCores int64
 	var limitMemoryMB int64
 	var layerMountConcurrency int
@@ -51,7 +52,6 @@ func main() {
 	var elfCacheDir string
 	var elfCacheMaxSize string
 	var elfCacheMaxFileSize string
-	var mountMode string
 
 	flag.StringVar(&listenAddr, "listen", ":61051", "gRPC listen address")
 	flag.StringVar(&runcBinary, "runc-binary", "afs_runc", "afs_runc binary path")
@@ -66,6 +66,7 @@ func main() {
 	flag.DurationVar(&gracefulTimeout, "graceful-timeout", 10*time.Second, "max wait for graceful gRPC shutdown before force stop")
 	flag.StringVar(&defaultDiscoveryAddr, "discovery-addr", "", "default discovery address used when request does not specify one")
 	flag.StringVar(&tempDir, "temp-dir", "", "base temp directory for afslet sessions (default: system temp dir)")
+	flag.StringVar(&workBaseDir, "work-base-dir", "", "base directory for afslet writable upper/work state (default: under temp-dir)")
 	flag.Int64Var(&limitCPUCores, "limit-cpu", 1, "total allocatable CPU cores for afslet admission control")
 	flag.Int64Var(&limitMemoryMB, "limit-memory-mb", 256, "total allocatable memory (MB) for afslet admission control")
 	flag.IntVar(&layerMountConcurrency, "layer-mount-concurrency", 1, "max number of layers to prepare/mount concurrently")
@@ -79,7 +80,6 @@ func main() {
 	flag.StringVar(&elfCacheDir, "elf-cache-dir", "", "directory for on-disk ELF file cache (empty=disabled)")
 	flag.StringVar(&elfCacheMaxSize, "elf-cache-max-size", "1GB", "max total size for ELF file cache")
 	flag.StringVar(&elfCacheMaxFileSize, "elf-cache-max-file-size", "32MB", "max single file size for ELF file cache")
-	flag.StringVar(&mountMode, "mount-mode", "unified-koverlay", "mount mode: unified-koverlay")
 	flag.Parse()
 
 	fuseMaxReadAheadBytes, err := bytesize.Parse(fuseMaxReadAhead)
@@ -137,6 +137,7 @@ func main() {
 		TarChunk:               tarChunk,
 		DefaultDiscovery:       defaultDiscoveryAddr,
 		TempDir:                tempDir,
+		WorkBaseDir:            workBaseDir,
 		SharedMountRoot:        sharedMountRoot(tempDir),
 		LimitCPUCores:          limitCPUCores,
 		LimitMemoryMB:          limitMemoryMB,
@@ -146,9 +147,10 @@ func main() {
 		SharedCatalogMaxImages: sharedCatalogMaxImages,
 		SharedCatalogIdleTTL:   sharedCatalogIdleTTL,
 		PageCacheStore:         pageCacheStore,
+		PageCacheDir:           pageCacheDir,
 		ELFCacheStore:          elfCacheStore,
+		ELFCacheDir:            elfCacheDir,
 		TOCCache:               layerformat.NewTOCCache(256),
-		MountMode:              mountMode,
 	})
 
 	grpcServer := grpc.NewServer()

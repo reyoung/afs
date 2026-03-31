@@ -51,7 +51,6 @@ spec:
             - /usr/local/bin/afslet
           args:
             - -listen=:{{ .Values.afslet.containerPort }}
-            - -mount-mode={{ .Values.afslet.mountMode }}
             - -fuse-max-read-ahead={{ .Values.afslet.fuseMaxReadAhead }}
             - -runc-binary={{ .Values.afslet.runcBinary }}
             - -runc-no-pivot={{ .Values.afslet.runcNoPivot }}
@@ -71,6 +70,7 @@ spec:
             - -mount-pprof-listen={{ .Values.afslet.mountPprofListen }}
             {{- end }}
             - -temp-dir={{ .Values.afslet.tempDir }}
+            - -work-base-dir={{ .Values.afslet.workDir }}
             - -limit-cpu={{ .Values.afslet.limitCPUCores }}
             - -limit-memory-mb={{ .Values.afslet.limitMemoryMB }}
             - -layer-mount-concurrency={{ .Values.afslet.layerMountConcurrency }}

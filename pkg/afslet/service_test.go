@@ -95,7 +95,7 @@ func TestRunCommandRequiresExplicitCPUAndMemory(t *testing.T) {
 	t.Parallel()
 
 	svc := NewService(Config{LimitCPUCores: 8, LimitMemoryMB: 2048})
-	sess, cleanup, err := newSession(t.TempDir())
+	sess, cleanup, err := newSession(t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("newSession() error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestRunCommandInProcessMountRunnerError(t *testing.T) {
 		return fmt.Errorf("synthetic mount failure")
 	}
 
-	sess, cleanup, err := newSession(t.TempDir())
+	sess, cleanup, err := newSession(t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("newSession() error: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestRunCommandRequestFuseReadAheadOverridesServiceDefault(t *testing.T) {
 		return fmt.Errorf("synthetic mount failure")
 	}
 
-	sess, cleanup, err := newSession(t.TempDir())
+	sess, cleanup, err := newSession(t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("newSession() error: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestNewSessionRespectsTempDir(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
-	sess, cleanup, err := newSession(base)
+	sess, cleanup, err := newSession(base, "")
 	if err != nil {
 		t.Fatalf("newSession() error: %v", err)
 	}
@@ -285,6 +285,25 @@ func TestNewSessionRespectsTempDir(t *testing.T) {
 
 	if !strings.HasPrefix(sess.root, filepath.Clean(base)+string(filepath.Separator)) {
 		t.Fatalf("session root=%q should be under %q", sess.root, base)
+	}
+}
+
+func TestNewSessionSeparatesWorkBaseDir(t *testing.T) {
+	t.Parallel()
+
+	tempBase := t.TempDir()
+	workBase := t.TempDir()
+	sess, cleanup, err := newSession(tempBase, workBase)
+	if err != nil {
+		t.Fatalf("newSession() error: %v", err)
+	}
+	defer cleanup()
+
+	if !strings.HasPrefix(sess.root, filepath.Clean(tempBase)+string(filepath.Separator)) {
+		t.Fatalf("session root=%q should be under %q", sess.root, tempBase)
+	}
+	if !strings.HasPrefix(sess.workDir, filepath.Clean(workBase)+string(filepath.Separator)) {
+		t.Fatalf("session workDir=%q should be under %q", sess.workDir, workBase)
 	}
 }
 

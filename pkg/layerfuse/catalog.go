@@ -254,12 +254,14 @@ func (f *SharedELFFileNode) Read(ctx context.Context, fh fs.FileHandle, dest []b
 	if f.elfStore != nil && f.entry.Digest != "" {
 		n, err := f.elfStore.ReadThrough(&f.section, f.entry.Digest, fileSize, buf, off)
 		if err != nil && err != io.EOF {
+			logReadFailure("layerfuse.shared_elf_read", f.entry, f.section, off, len(buf), "elf-cache", err)
 			return nil, syscall.EIO
 		}
 		return fuse.ReadResultData(buf[:n]), 0
 	}
 	n, err := f.section.ReadAt(buf, off)
 	if err != nil && err != io.EOF {
+		logReadFailure("layerfuse.shared_elf_read", f.entry, f.section, off, len(buf), "direct", err)
 		return nil, syscall.EIO
 	}
 	return fuse.ReadResultData(buf[:n]), 0
