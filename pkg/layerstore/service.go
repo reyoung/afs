@@ -32,7 +32,11 @@ import (
 const (
 	defaultPlatformOS   = "linux"
 	defaultPlatformArch = "amd64"
-	maxReadBytes        = 4 << 20
+	// maxReadBytes is the maximum payload data per ReadLayerStream message.
+	// gRPC default max receive size is 4MB. Each stream message also carries
+	// protobuf overhead (digest string, offset int64, eof bool) so we leave
+	// 64KB headroom to stay safely under the 4MB wire limit.
+	maxReadBytes = (4 << 20) - (64 << 10) // 4MB - 64KB = 4032KB
 	defaultCacheMaxByte = int64(1) << 40 // 1TB
 	defaultCacheRatio   = int64(60)      // 60% of free space
 	defaultLeaseTTL     = 2 * time.Minute
@@ -296,6 +300,7 @@ func (s *Service) PullImage(ctx context.Context, req *layerstorepb.PullImageRequ
 
 		cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true)
 		if err != nil {
+			log.Printf("ERROR: ensureLayer failed for layer [%d/%d] digest=%s image=%s tag=%s: %v", i+1, len(meta.Layers), layer.Digest, req.GetImage(), req.GetTag(), err)
 			return nil, err
 		}
 		if cached {
@@ -379,6 +384,7 @@ func (s *Service) EnsureLayers(ctx context.Context, req *layerstorepb.EnsureLaye
 			defer wg.Done()
 			cachePath, afsSize, cached, err := s.ensureLayer(ctx, f, req.GetImage(), req.GetTag(), layer, true)
 			if err != nil {
+				log.Printf("ERROR: ensureLayer failed in EnsureLayers for digest=%s image=%s tag=%s: %v", layer.Digest, req.GetImage(), req.GetTag(), err)
 				errCh <- err
 				return
 			}
@@ -876,8 +882,13 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	}
 
 	if st, statErr := os.Stat(fullPath); statErr == nil {
-		_ = touchFile(fullPath)
-		return fullPath, st.Size(), true, nil
+		if validErr := validateLayerFile(fullPath, st.Size()); validErr != nil {
+			log.Printf("WARNING: cached layer is corrupt, removing: digest=%s path=%s: %v", layer.Digest, fullPath, validErr)
+			_ = os.Remove(fullPath)
+		} else {
+			_ = touchFile(fullPath)
+			return fullPath, st.Size(), true, nil
+		}
 	}
 	if !allowDownload {
 		return "", 0, false, status.Errorf(codes.NotFound, "layer is not cached: %s", layer.Digest)
@@ -887,8 +898,13 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 	defer unlock()
 
 	if st, statErr := os.Stat(fullPath); statErr == nil {
-		_ = touchFile(fullPath)
-		return fullPath, st.Size(), true, nil
+		if validErr := validateLayerFile(fullPath, st.Size()); validErr != nil {
+			log.Printf("WARNING: cached layer is corrupt (under lock), removing: digest=%s path=%s: %v", layer.Digest, fullPath, validErr)
+			_ = os.Remove(fullPath)
+		} else {
+			_ = touchFile(fullPath)
+			return fullPath, st.Size(), true, nil
+		}
 	}
 
 	dir := filepath.Dir(fullPath)
@@ -898,6 +914,7 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 
 	rc, err := f.DownloadLayer(ctx, image, tag, layer.Digest)
 	if err != nil {
+		log.Printf("ERROR: download layer failed digest=%s image=%s tag=%s: %v", layer.Digest, image, tag, err)
 		return "", 0, false, status.Errorf(codes.Internal, "download layer %s: %v", layer.Digest, err)
 	}
 	defer rc.Close()
@@ -908,21 +925,44 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		return "", 0, false, status.Errorf(codes.Internal, "create temp file: %v", err)
 	}
 	tmpPath := tmpFile.Name()
+	tmpClosed := false
 	defer func() {
-		_ = tmpFile.Close()
+		if !tmpClosed {
+			_ = tmpFile.Close()
+		}
 		if err != nil {
 			_ = os.Remove(tmpPath)
 		}
 	}()
 
 	if err = layerformat.ConvertOCILayer(layer.MediaType, rc, tmpFile); err != nil {
+		log.Printf("ERROR: convert layer failed digest=%s mediaType=%s image=%s tag=%s: %v", layer.Digest, layer.MediaType, image, tag, err)
 		return "", 0, false, status.Errorf(codes.Internal, "convert layer %s: %v", layer.Digest, err)
 	}
 	log.Printf("converted layer digest=%s to afs temp=%s", layer.Digest, tmpPath)
+	if err = tmpFile.Sync(); err != nil {
+		log.Printf("ERROR: sync temp file failed digest=%s tmp=%s: %v", layer.Digest, tmpPath, err)
+		return "", 0, false, status.Errorf(codes.Internal, "sync temp file: %v", err)
+	}
 	if err = tmpFile.Close(); err != nil {
+		log.Printf("ERROR: close temp file failed digest=%s tmp=%s: %v", layer.Digest, tmpPath, err)
 		return "", 0, false, status.Errorf(codes.Internal, "close temp file: %v", err)
 	}
+	tmpClosed = true
+
+	tmpSt, err := os.Stat(tmpPath)
+	if err != nil {
+		log.Printf("ERROR: stat temp file failed digest=%s tmp=%s: %v", layer.Digest, tmpPath, err)
+		return "", 0, false, status.Errorf(codes.Internal, "stat temp file: %v", err)
+	}
+	if validErr := validateLayerFile(tmpPath, tmpSt.Size()); validErr != nil {
+		err = status.Errorf(codes.Internal, "converted layer %s failed validation: %v", layer.Digest, validErr)
+		log.Printf("ERROR: %v", err)
+		return "", 0, false, err
+	}
+
 	if err = os.Rename(tmpPath, fullPath); err != nil {
+		log.Printf("ERROR: commit cache file failed digest=%s tmp=%s dest=%s: %v", layer.Digest, tmpPath, fullPath, err)
 		return "", 0, false, status.Errorf(codes.Internal, "commit cache file: %v", err)
 	}
 
@@ -944,6 +984,27 @@ func (s *Service) ensureLayer(ctx context.Context, f fetcher, image, tag string,
 		log.Printf("warning: enforce cache limit failed: %v", pruneErr)
 	}
 	return fullPath, st.Size(), false, nil
+}
+
+// validateLayerFile checks that a cached layer file is a valid AFSLYR02 archive.
+// It verifies the file has non-zero size and starts with the correct magic bytes.
+func validateLayerFile(path string, size int64) error {
+	if size < layerformat.MinValidSize {
+		return fmt.Errorf("file too small: size=%d (minimum %d)", size, layerformat.MinValidSize)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open for validation: %w", err)
+	}
+	defer f.Close()
+	var hdr [8]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return fmt.Errorf("read magic bytes: %w", err)
+	}
+	if string(hdr[:]) != "AFSLYR02" {
+		return fmt.Errorf("invalid magic: %q", string(hdr[:]))
+	}
+	return nil
 }
 
 func (s *Service) peerHasImage(ctx context.Context, imageKey string) (bool, error) {

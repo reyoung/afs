@@ -20,6 +20,10 @@ const (
 	magic02      = "AFSLYR02"
 	magicLen     = 8
 	fixedHdrSize = magicLen + 8
+
+	// MinValidSize is the minimum byte size for a valid AFSLYR02 file:
+	// 8 bytes magic + 8 bytes TOC length.
+	MinValidSize = fixedHdrSize
 )
 
 // PayloadCodec describes how a regular file's payload is stored in the archive.
