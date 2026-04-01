@@ -13,3 +13,5 @@ __pycache__/
 python/.venv/
 task.md
 docker-compose.ioi-test.yaml
+python/afs_sdk.egg-info/
+python/build/

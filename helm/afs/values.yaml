@@ -29,8 +29,8 @@ discovery:
       memory: 1Gi
 
 grpcd:
-  daemonSet: true
-  replicas: 1
+  daemonSet: false
+  replicas: 3
   nodeSelector: {}
   containerPort: 50051
   cacheDir: /var/lib/afs/layerstore
@@ -60,7 +60,7 @@ grpcd:
 
 afslet:
   daemonSet: false
-  replicas: 50
+  replicas: 3
   nodeSelector: {}
   spreadAcrossNodes:
     enabled: true
@@ -96,17 +96,17 @@ afslet:
       sizeLimit: 10Gi
   layerMountConcurrency: 1
   mountProcDev: false
-  limitCPUCores: 4
-  limitMemoryMB: 16384
+  limitCPUCores: 32
+  limitMemoryMB: 131072
   service:
     port: 61051
   resources:
     requests:
-      cpu: "4"
-      memory: 16Gi
+      cpu: "32"
+      memory: 128Gi
     limits:
-      cpu: "4"
-      memory: 16Gi
+      cpu: "32"
+      memory: 128Gi
 
 afsProxy:
   replicas: 3

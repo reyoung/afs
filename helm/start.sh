@@ -23,6 +23,8 @@ AFSLET_REQUEST_CPU=4
 AFSLET_REQUEST_MEMORY=16Gi
 AFSLET_LIMIT_CPU=4
 AFSLET_LIMIT_MEMORY=16Gi
+GRPCD_REPLICAS=3
+GRPCD_DAEMON_SET=false
 EOF
 }
 
@@ -49,6 +51,8 @@ AFSLET_REQUEST_CPU="${AFSLET_REQUEST_CPU:-4}"
 AFSLET_REQUEST_MEMORY="${AFSLET_REQUEST_MEMORY:-16Gi}"
 AFSLET_LIMIT_CPU="${AFSLET_LIMIT_CPU:-4}"
 AFSLET_LIMIT_MEMORY="${AFSLET_LIMIT_MEMORY:-16Gi}"
+GRPCD_REPLICAS="${GRPCD_REPLICAS:-3}"
+GRPCD_DAEMON_SET="${GRPCD_DAEMON_SET:-false}"
 
 cd "${REPO_ROOT}"
 
@@ -130,6 +134,12 @@ fi
 if ! has_set_override "afsProxy.replicas" "$@"; then
   EXTRA_HELM_ARGS+=(--set "afsProxy.replicas=${AFS_PROXY_REPLICAS}")
 fi
+if ! has_set_override "grpcd.replicas" "$@"; then
+  EXTRA_HELM_ARGS+=(--set "grpcd.replicas=${GRPCD_REPLICAS}")
+fi
+if ! has_set_override "grpcd.daemonSet" "$@"; then
+  EXTRA_HELM_ARGS+=(--set "grpcd.daemonSet=${GRPCD_DAEMON_SET}")
+fi
 if ! has_set_override "afslet.limitCPUCores" "$@"; then
   EXTRA_HELM_ARGS+=(--set "afslet.limitCPUCores=${AFSLET_LIMIT_CPU_CORES}")
 fi
@@ -148,7 +158,7 @@ fi
 if ! has_set_override "afslet.resources.limits.memory" "$@"; then
   EXTRA_HELM_ARGS+=(--set-string "afslet.resources.limits.memory=${AFSLET_LIMIT_MEMORY}")
 fi
-echo "[start] replicas: discovery=${DISCOVERY_REPLICAS} afslet=${AFSLET_REPLICAS} afsProxy=${AFS_PROXY_REPLICAS}"
+echo "[start] replicas: discovery=${DISCOVERY_REPLICAS} afslet=${AFSLET_REPLICAS} afsProxy=${AFS_PROXY_REPLICAS} grpcd=${GRPCD_REPLICAS} grpcd.daemonSet=${GRPCD_DAEMON_SET}"
 echo "[start] afslet limits: cpu_cores=${AFSLET_LIMIT_CPU_CORES} memory_mb=${AFSLET_LIMIT_MEMORY_MB}"
 echo "[start] afslet resources: requests(cpu=${AFSLET_REQUEST_CPU},mem=${AFSLET_REQUEST_MEMORY}) limits(cpu=${AFSLET_LIMIT_CPU},mem=${AFSLET_LIMIT_MEMORY})"
 
