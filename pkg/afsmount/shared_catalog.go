@@ -32,6 +32,7 @@ type sharedCatalogManager struct {
 	server    *fuse.Server
 	openless  bool
 	images    map[string]*sharedCatalogImage
+	layers    map[string]*sharedCatalogLayer
 	mountOpts sharedCatalogMountOpts
 	maxImages int
 	idleTTL   time.Duration
@@ -39,10 +40,16 @@ type sharedCatalogManager struct {
 
 type sharedCatalogImage struct {
 	name      string
-	layers    []LayerInfo
+	layers    []string
 	refs      int
 	lastUsed  time.Time
 	createdAt time.Time
+}
+
+type sharedCatalogLayer struct {
+	info     LayerInfo
+	refs     int
+	lastUsed time.Time
 }
 
 type sharedCatalogMountOpts struct {
@@ -65,6 +72,7 @@ func getSharedCatalogManager(baseDir string) *sharedCatalogManager {
 			baseDir:   baseDir,
 			mountDir:  filepath.Join(baseDir, "fuse-root"),
 			images:    make(map[string]*sharedCatalogImage),
+			layers:    make(map[string]*sharedCatalogLayer),
 			maxImages: defaultSharedCatalogMaxImages,
 			idleTTL:   defaultSharedCatalogIdleTTL,
 		}
@@ -140,13 +148,26 @@ func (m *sharedCatalogManager) ensureImage(ctx context.Context, imageName string
 	}
 
 	if existing := m.images[imageName]; existing != nil {
+		closeLayerRemotes(cfg.Layers)
 		existing.refs++
 		existing.lastUsed = time.Now()
 		return filepath.Join(m.mountDir, existing.name), false, nil
 	}
 
-	overlayLayers := make([]layerfuse.OverlayLayer, len(cfg.Layers))
+	sharedLayers := make([]LayerInfo, len(cfg.Layers))
+	sharedDigests := make([]string, 0, len(cfg.Layers))
 	for i, li := range cfg.Layers {
+		shared, err := m.acquireLayerLocked(li)
+		if err != nil {
+			m.releaseLayersLocked(sharedDigests)
+			return "", false, err
+		}
+		sharedLayers[i] = shared
+		sharedDigests = append(sharedDigests, shared.Digest)
+	}
+
+	overlayLayers := make([]layerfuse.OverlayLayer, len(sharedLayers))
+	for i, li := range sharedLayers {
 		overlayLayers[i] = layerfuse.OverlayLayer{
 			Reader: li.Reader,
 			Digest: li.Digest,
@@ -157,16 +178,18 @@ func (m *sharedCatalogManager) ensureImage(ctx context.Context, imageName string
 		child.SetOpenless(true)
 	}
 	if err := child.BindSharedELF(ctx, m.root); err != nil {
+		m.releaseLayersLocked(sharedDigests)
 		return "", false, fmt.Errorf("bind shared ELF for image %s: %w", imageName, err)
 	}
 	if _, err := m.root.AddImage(ctx, imageName, child); err != nil {
+		m.releaseLayersLocked(sharedDigests)
 		return "", false, fmt.Errorf("add image %s to shared catalog: %w", imageName, err)
 	}
 
 	now := time.Now()
 	m.images[imageName] = &sharedCatalogImage{
 		name:      imageName,
-		layers:    append([]LayerInfo(nil), cfg.Layers...),
+		layers:    sharedDigests,
 		refs:      1,
 		lastUsed:  now,
 		createdAt: now,
@@ -231,12 +254,61 @@ func (m *sharedCatalogManager) evictLocked(name string, reason string) {
 	}
 	delete(m.images, name)
 	m.root.RemoveImage(name)
-	for _, li := range img.layers {
+	m.releaseLayersLocked(img.layers)
+	log.Printf("shared catalog evicted image=%s reason=%s idle_for=%s remaining=%d", name, reason, time.Since(img.lastUsed).Round(time.Millisecond), len(m.images))
+}
+
+func (m *sharedCatalogManager) acquireLayerLocked(li LayerInfo) (LayerInfo, error) {
+	if strings.TrimSpace(li.Digest) == "" {
+		return LayerInfo{}, fmt.Errorf("shared catalog layer missing digest")
+	}
+	if existing := m.layers[li.Digest]; existing != nil {
+		existing.refs++
+		existing.lastUsed = time.Now()
+		if li.Remote != nil && li.Remote != existing.info.Remote {
+			_ = li.Remote.Close()
+		}
+		return existing.info, nil
+	}
+	if li.Reader == nil || li.Remote == nil {
+		return LayerInfo{}, fmt.Errorf("shared catalog layer %s missing reader", li.Digest)
+	}
+	now := time.Now()
+	m.layers[li.Digest] = &sharedCatalogLayer{
+		info:     li,
+		refs:     1,
+		lastUsed: now,
+	}
+	return li, nil
+}
+
+func (m *sharedCatalogManager) releaseLayersLocked(digests []string) {
+	now := time.Now()
+	for _, digest := range digests {
+		layer := m.layers[digest]
+		if layer == nil {
+			continue
+		}
+		if layer.refs > 0 {
+			layer.refs--
+		}
+		layer.lastUsed = now
+		if layer.refs != 0 {
+			continue
+		}
+		delete(m.layers, digest)
+		if layer.info.Remote != nil {
+			_ = layer.info.Remote.Close()
+		}
+	}
+}
+
+func closeLayerRemotes(layers []LayerInfo) {
+	for _, li := range layers {
 		if li.Remote != nil {
 			_ = li.Remote.Close()
 		}
 	}
-	log.Printf("shared catalog evicted image=%s reason=%s idle_for=%s remaining=%d", name, reason, time.Since(img.lastUsed).Round(time.Millisecond), len(m.images))
 }
 
 func imageCatalogName(image string, tag string, layers []LayerInfo, platformOS, platformArch, platformVariant string) string {

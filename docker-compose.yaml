@@ -78,6 +78,7 @@ x-afslet-common: &afslet-common
     <<: *afs-runtime-env
     AFSLET_LAYER_MOUNT_CONCURRENCY: ${AFSLET_LAYER_MOUNT_CONCURRENCY:-1}
     AFS_PAGE_CACHE_ENABLED: ${AFS_PAGE_CACHE_ENABLED:-true}
+    AFS_PAGE_CACHE_MAX_SIZE: ${AFS_PAGE_CACHE_MAX_SIZE:-8GB}
   entrypoint: ["/bin/bash", "-lc"]
 
 services:
@@ -199,14 +200,15 @@ services:
     volumes:
       - afslet_tmp:/var/lib/afslet/tmp
       - afslet_work:/var/lib/afslet/work
-      - page_cache_sock:/var/run/afs-page-cache
+      - page_cache_data:/var/lib/afslet/page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
         set -euo pipefail
         PAGE_CACHE_ARGS=()
         if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
-          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+          PAGE_CACHE_ARGS+=(-page-cache-dir /var/lib/afslet/page-cache)
+          PAGE_CACHE_ARGS+=(-page-cache-max-size "$${AFS_PAGE_CACHE_MAX_SIZE:-8GB}")
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
@@ -233,14 +235,15 @@ services:
     volumes:
       - afslet_tmp_2:/var/lib/afslet/tmp
       - afslet_work_2:/var/lib/afslet/work
-      - page_cache_sock:/var/run/afs-page-cache
+      - page_cache_data:/var/lib/afslet/page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
         set -euo pipefail
         PAGE_CACHE_ARGS=()
         if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
-          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+          PAGE_CACHE_ARGS+=(-page-cache-dir /var/lib/afslet/page-cache)
+          PAGE_CACHE_ARGS+=(-page-cache-max-size "$${AFS_PAGE_CACHE_MAX_SIZE:-8GB}")
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
@@ -267,14 +270,15 @@ services:
     volumes:
       - afslet_tmp_3:/var/lib/afslet/tmp
       - afslet_work_3:/var/lib/afslet/work
-      - page_cache_sock:/var/run/afs-page-cache
+      - page_cache_data:/var/lib/afslet/page-cache
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
     command:
       - |
         set -euo pipefail
         PAGE_CACHE_ARGS=()
         if [[ "$${AFS_PAGE_CACHE_ENABLED:-true}" == "true" ]]; then
-          PAGE_CACHE_ARGS+=(-page-cache-uds /var/run/afs-page-cache/page-cache.sock)
+          PAGE_CACHE_ARGS+=(-page-cache-dir /var/lib/afslet/page-cache)
+          PAGE_CACHE_ARGS+=(-page-cache-max-size "$${AFS_PAGE_CACHE_MAX_SIZE:-8GB}")
         fi
         exec /usr/local/bin/afslet \
           -listen=:61051 \
